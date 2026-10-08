@@ -28,11 +28,13 @@ const MIME_TYPES_PERMITIDOS = [
 ] as const;
 
 export const requestUploadTicketSchema = z.object({
-  userId: z.string().uuid('userId debe ser un UUID válido').or(z.string().min(1)),
-  userName: z.string().optional().default('Usuario Anónimo'),
+  userId: z.string().min(1, 'userId es requerido'),
+  orgId: z.string().min(1, 'orgId es requerido'),
+  visibilidad: z.enum(['publicos', 'privados']).default('privados'),
+  userName: z.string().optional().default('Usuario'),
   fileName: z.string().min(1, 'fileName es requerido'),
   fileType: z.string().refine((type) => MIME_TYPES_PERMITIDOS.includes(type as any), {
-    message: `Tipo de archivo no permitido. Tipos válidos: imágenes, videos y documentos (PDF, Word, Excel, PPT, TXT, CSV, ZIP).`,
+    message: `Tipo de archivo no permitido. Tipos válidos: imágenes, videos y documentos.`,
   }),
   fileSize: z.number().positive('fileSize debe ser un número positivo'),
   hashSha256: z.string().optional(),

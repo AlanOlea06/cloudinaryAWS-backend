@@ -1,15 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import { supabase } from '../config/supabase.js';
 import { RequestUploadTicketInput } from '../schemas/upload.schema.js';
+import { AuthService } from './auth.service.js';
 
 export interface FileRecord {
   id: string;
   ticket_id: string;
   user_id: string;
+  org_id?: string;
   user_name: string;
   nombre_original: string;
   formato: string;
   tamano_bytes: number;
+  tipo_recurso?: 'imagenes' | 'documentos' | 'videos';
+  visibilidad?: 'publicos' | 'privados';
   s3_key_pendiente: string;
   s3_key_procesado?: string | null;
   cloudfront_url?: string | null;
@@ -23,15 +27,42 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 export class FileService {
   /**
-   * Genera una clave limpia para el archivo en la carpeta /pendientes de S3
+   * Clasifica la tipología del archivo según su MIME type
    */
-  static generatePendingS3Key(userId: string, fileId: string, fileName: string): string {
-    const sanitizedFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-    return `pendientes/${userId}/${fileId}-${sanitizedFileName}`;
+  static getTipoRecurso(fileType: string): 'imagenes' | 'documentos' | 'videos' {
+    if (fileType.startsWith('image/')) return 'imagenes';
+    if (fileType.startsWith('video/')) return 'videos';
+    return 'documentos';
   }
 
   /**
-   * Registra el ticket de subida en Supabase con estado 'pendiente_subida'
+   * Genera la ruta en S3 para la zona de aterrizaje: Pendientes/
+   * Estructura: Pendientes/{orgSlug}/{userId}/{fileId}-{filename}
+   */
+  static generatePendingS3Key(orgSlug: string, userId: string, fileId: string, fileName: string): string {
+    const sanitizedFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    return `Pendientes/${orgSlug}/${userId}/${fileId}-${sanitizedFileName}`;
+  }
+
+  /**
+   * Genera la ruta definitiva en S3 según la jerarquía multi-tenant:
+   * Organizaciones/{Organizacion}/{tipo_recurso}/{visibilidad}/{archivo}
+   */
+  static generateProcessedS3Key(
+    orgSlug: string,
+    tipoRecurso: 'imagenes' | 'documentos' | 'videos',
+    visibilidad: 'publicos' | 'privados',
+    fileId: string,
+    fileName: string,
+    extensionOverride?: string
+  ): string {
+    const sanitizedBase = fileName.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/\.[^/.]+$/, '');
+    const ext = extensionOverride || (fileName.includes('.') ? fileName.split('.').pop() : 'bin');
+    return `Organizaciones/${orgSlug}/${tipoRecurso}/${visibilidad}/${fileId}-${sanitizedBase}.${ext}`;
+  }
+
+  /**
+   * Registra el ticket de subida en Supabase
    */
   static async createPendingFileRecord(
     input: RequestUploadTicketInput,
@@ -40,37 +71,64 @@ export class FileService {
     const fileId = randomUUID();
     const ticketId = randomUUID();
 
-    // Asegurar que userId sea un UUID válido para PostgreSQL
     const validUserId = UUID_REGEX.test(input.userId) ? input.userId : randomUUID();
-    const s3Key = this.generatePendingS3Key(validUserId, fileId, input.fileName);
+    const validOrgId = UUID_REGEX.test(input.orgId) ? input.orgId : randomUUID();
+
+    const org = await AuthService.findOrganizacion(input.orgId);
+    const orgSlug = org ? org.slug : 'organizacion_desconocida';
+    const tipoRecurso = this.getTipoRecurso(input.fileType);
+    const visibilidad = input.visibilidad || 'privados';
+
+    const s3KeyPendiente = this.generatePendingS3Key(orgSlug, validUserId, fileId, input.fileName);
 
     const initialMetadata = {
       hash_sha256: input.hashSha256 || null,
       modo_simulado: isMock,
-      ip_cliente: '127.0.0.1',
+      org_slug: orgSlug,
+      tipo_recurso: tipoRecurso,
+      visibilidad,
       creado_en: new Date().toISOString(),
     };
 
+    // Objeto base para insertar
+    const recordPayload: any = {
+      id: fileId,
+      ticket_id: ticketId,
+      user_id: validUserId,
+      user_name: input.userName || 'Usuario',
+      nombre_original: input.fileName,
+      formato: input.fileType,
+      tamano_bytes: input.fileSize,
+      s3_key_pendiente: s3KeyPendiente,
+      estado: 'pendiente_subida',
+      metadata: initialMetadata,
+    };
+
+    // Si la tabla ya tiene las columnas de organizaciones las incluimos
+    try {
+      recordPayload.org_id = validOrgId;
+      recordPayload.visibilidad = visibilidad;
+      recordPayload.tipo_recurso = tipoRecurso;
+    } catch {}
+
     const { data, error } = await supabase
       .from('archivos')
-      .insert({
-        id: fileId,
-        ticket_id: ticketId,
-        user_id: validUserId,
-        user_name: input.userName || 'Usuario Anónimo',
-        nombre_original: input.fileName,
-        formato: input.fileType,
-        tamano_bytes: input.fileSize,
-        s3_key_pendiente: s3Key,
-        estado: 'pendiente_subida',
-        metadata: initialMetadata,
-      })
+      .insert(recordPayload)
       .select('*')
       .single();
 
     if (error) {
-      console.error('Error insertando en Supabase:', error);
-      throw new Error(`Error al persistir archivo en Supabase: ${error.message}`);
+      console.warn('Advertencia al insertar con columnas multi-tenant, reintentando con columnas base:', error.message);
+      // Reintento sin las columnas nuevas si no se ha corrido el script en Supabase
+      delete recordPayload.org_id;
+      delete recordPayload.visibilidad;
+      delete recordPayload.tipo_recurso;
+
+      const fallback = await supabase.from('archivos').insert(recordPayload).select('*').single();
+      if (fallback.error) {
+        throw new Error(`Error al persistir archivo en Supabase: ${fallback.error.message}`);
+      }
+      return fallback.data;
     }
 
     return data;
@@ -106,7 +164,7 @@ export class FileService {
   /**
    * Obtiene los registros más recientes de Supabase para visualizarlos en la interfaz
    */
-  static async getRecentRecords(limit = 10): Promise<FileRecord[]> {
+  static async getRecentRecords(limit = 15): Promise<FileRecord[]> {
     const { data, error } = await supabase
       .from('archivos')
       .select('*')
@@ -115,7 +173,7 @@ export class FileService {
 
     if (error) {
       console.error('Error consultando registros en Supabase:', error);
-      throw new Error(`Error al consultar Supabase: ${error.message}`);
+      return [];
     }
 
     return data || [];

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Cloudinary Clone - Subida de Imágenes, Videos y Documentos</title>
+  <title>Cloudinary Clone - Multi-Tenant S3 Architecture</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <style>
@@ -18,25 +18,25 @@
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased selection:bg-indigo-500 selection:text-white">
 
-  <!-- Encabezado -->
-  <header class="border-b border-slate-800 bg-slate-900/60 backdrop-blur sticky top-0 z-50">
-    <div class="max-w-6xl mx-auto px-4 py-4 flex flex-wrap items-center justify-between gap-4">
+  <!-- Header -->
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-4">
       <div class="flex items-center space-x-3">
         <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-cyan-400 flex items-center justify-center shadow-lg shadow-indigo-500/20">
-          <i class="fa-solid fa-cloud-arrow-up text-white text-lg"></i>
+          <i class="fa-solid fa-shield-halved text-white text-lg"></i>
         </div>
         <div>
-          <h1 class="font-bold text-lg text-white tracking-tight flex items-center gap-2">
-            Cloudinary Clone <span class="text-xs px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"><i class="fa-solid fa-database mr-1"></i> Supabase Conectado</span>
+          <h1 class="font-bold text-base text-white tracking-tight flex items-center gap-2">
+            Cloudinary Clone <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">Multi-Tenant S3</span>
           </h1>
-          <p class="text-xs text-slate-400">Subida Directa: Imágenes, Videos y Documentos (PDF, Office, etc.)</p>
+          <p class="text-xs text-slate-400">Aislamiento por Organizaciones & Jerarquía Estricta de Prefijos S3</p>
         </div>
       </div>
 
       <!-- Selector de Modo -->
       <div class="flex items-center bg-slate-800/80 p-1 rounded-xl border border-slate-700 text-xs">
         <button id="btn-mode-mock" class="px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-medium shadow-sm transition">
-          <i class="fa-solid fa-vial mr-1.5"></i> Modo Simulación (Supabase)
+          <i class="fa-solid fa-vial mr-1.5"></i> Simulación Local (Supabase)
         </button>
         <button id="btn-mode-real" class="px-3 py-1.5 rounded-lg text-slate-400 hover:text-white transition">
           <i class="fa-brands fa-aws mr-1.5"></i> Modo AWS S3 Real
@@ -45,9 +45,97 @@
     </div>
   </header>
 
-  <main class="max-w-6xl mx-auto px-4 py-8 space-y-8">
+  <!-- BARRA DE SESIÓN Y CONTROL MULTI-TENANT (LOGIN SIMULADO) -->
+  <section class="bg-slate-900 border-b border-slate-800 shadow-lg px-4 py-3">
+    <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4 text-xs">
+      
+      <div class="flex flex-wrap items-center gap-4">
+        <!-- Selector de Usuario / Sesión -->
+        <div class="flex items-center gap-2">
+          <span class="text-slate-400 font-semibold flex items-center gap-1.5">
+            <i class="fa-solid fa-user-circle text-indigo-400 text-sm"></i> Sesión / Usuario:
+          </span>
+          <select id="user-select" class="bg-slate-950 border border-slate-700 text-slate-200 rounded-lg px-3 py-1.5 focus:border-indigo-500 outline-none font-mono">
+            <optgroup label="🏢 Organización 1 (10 miembros)">
+              <option value="a1111111-0000-0000-0000-000000000001" data-org="11111111-1111-1111-1111-111111111111" data-perm="true" selected>Carlos Mendoza (Admin)</option>
+              <option value="a1111111-0000-0000-0000-000000000002" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Ana Beltrán (Editor)</option>
+              <option value="a1111111-0000-0000-0000-000000000003" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Roberto Morales (Editor)</option>
+              <option value="a1111111-0000-0000-0000-000000000004" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Lucía Vega (Editor)</option>
+              <option value="a1111111-0000-0000-0000-000000000005" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Diego Solís (Editor)</option>
+              <option value="a1111111-0000-0000-0000-000000000006" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Elena Castillo (Editor)</option>
+              <option value="a1111111-0000-0000-0000-000000000007" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Javier Ramos (Editor)</option>
+              <option value="a1111111-0000-0000-0000-000000000008" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Sofía Pineda (Editor)</option>
+              <option value="a1111111-0000-0000-0000-000000000009" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Fernando Ortiz (Editor)</option>
+              <option value="a1111111-0000-0000-0000-000000000010" data-org="11111111-1111-1111-1111-111111111111" data-perm="false" class="text-rose-400 font-bold">⛔ Valeria Ruiz (SIN PERMISOS)</option>
+            </optgroup>
+            <optgroup label="🏢 Organización 2 (5 miembros)">
+              <option value="b2222222-0000-0000-0000-000000000001" data-org="22222222-2222-2222-2222-222222222222" data-perm="true">Mateo Delgado (Admin)</option>
+              <option value="b2222222-0000-0000-0000-000000000002" data-org="22222222-2222-2222-2222-222222222222" data-perm="true">Camila Herrera (Editor)</option>
+              <option value="b2222222-0000-0000-0000-000000000003" data-org="22222222-2222-2222-2222-222222222222" data-perm="true">Andrés Navarro (Editor)</option>
+              <option value="b2222222-0000-0000-0000-000000000004" data-org="22222222-2222-2222-2222-222222222222" data-perm="true">Paula Cárdenas (Editor)</option>
+              <option value="b2222222-0000-0000-0000-000000000005" data-org="22222222-2222-2222-2222-222222222222" data-perm="false" class="text-rose-400 font-bold">⛔ Gabriel Fuentes (SIN PERMISOS)</option>
+            </optgroup>
+            <optgroup label="⚠️ Pruebas de Ataque / No Registrado">
+              <option value="00000000-0000-0000-0000-000000000000" data-org="11111111-1111-1111-1111-111111111111" data-perm="false" class="text-amber-400">❓ Usuario Fantasma (No Registrado)</option>
+            </optgroup>
+          </select>
+        </div>
+
+        <!-- Organización Destino -->
+        <div class="flex items-center gap-2">
+          <span class="text-slate-400 font-semibold flex items-center gap-1.5">
+            <i class="fa-solid fa-sitemap text-cyan-400 text-sm"></i> Subir hacia Organización:
+          </span>
+          <select id="target-org-select" class="bg-slate-950 border border-slate-700 text-slate-200 rounded-lg px-3 py-1.5 focus:border-cyan-500 outline-none font-mono">
+            <option value="11111111-1111-1111-1111-111111111111" selected>Organización 1 (organizacion_1)</option>
+            <option value="22222222-2222-2222-2222-222222222222">Organización 2 (organizacion_2)</option>
+            <option value="99999999-9999-9999-9999-999999999999" class="text-red-400">Organización Inexistente</option>
+          </select>
+        </div>
+
+        <!-- Visibilidad / Acceso -->
+        <div class="flex items-center gap-2">
+          <span class="text-slate-400 font-semibold">Nivel de Acceso:</span>
+          <div class="flex items-center bg-slate-950 p-0.5 rounded-lg border border-slate-800">
+            <label class="px-2.5 py-1 rounded cursor-pointer transition flex items-center gap-1.5 text-slate-300 hover:text-white">
+              <input type="radio" name="visibilidad" value="privados" checked class="text-indigo-600 focus:ring-0" />
+              <i class="fa-solid fa-lock text-rose-400"></i> Privado (Firmado)
+            </label>
+            <label class="px-2.5 py-1 rounded cursor-pointer transition flex items-center gap-1.5 text-slate-300 hover:text-white">
+              <input type="radio" name="visibilidad" value="publicos" class="text-indigo-600 focus:ring-0" />
+              <i class="fa-solid fa-globe text-emerald-400"></i> Público (CDN Abierto)
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Botón de prueba rápida de ataque cruzado -->
+      <button id="btn-simulate-cross-attack" class="px-3 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/60 text-rose-300 border border-rose-800/60 font-semibold transition flex items-center gap-1.5" title="Simula un usuario de Org 1 intentando subir a Org 2">
+        <i class="fa-solid fa-skull-crossbones"></i> Probar Subida Cruzada (Ataque)
+      </button>
+
+    </div>
+  </section>
+
+  <!-- ESTRUCTURA DE RUTAS S3 VISUALIZADA -->
+  <div class="max-w-7xl mx-auto px-4 pt-4">
+    <div class="p-3 bg-slate-900 border border-slate-800 rounded-xl flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
+      <div class="flex items-center gap-2 text-slate-300">
+        <span class="text-slate-500">Jerarquía S3 calculada:</span>
+        <span class="text-indigo-400 font-bold" id="path-preview-landing">Pendientes/organizacion_1/{user}/...</span>
+        <span class="text-slate-600">➔</span>
+        <span class="text-emerald-400 font-bold" id="path-preview-final">Organizaciones/organizacion_1/imagenes/privados/...</span>
+      </div>
+      <div class="flex items-center gap-3 text-[11px] text-slate-500">
+        <span>Auditoría: <strong class="text-cyan-400">logs de servicio/</strong></span>
+      </div>
+    </div>
+  </div>
+
+  <main class="max-w-7xl mx-auto px-4 py-6 space-y-8">
 
     <div class="grid grid-cols-1 lg:grid-cols-12 gap-8">
+      
       <!-- COLUMNA IZQUIERDA: Zona de Carga -->
       <section class="lg:col-span-6 space-y-6">
 
@@ -55,7 +143,7 @@
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl relative overflow-hidden">
           <div class="flex items-center justify-between mb-4">
             <h2 class="font-semibold text-slate-200 text-sm uppercase tracking-wider flex items-center gap-2">
-              <i class="fa-solid fa-file-arrow-up text-indigo-400"></i> Seleccionar Archivo o Documento
+              <i class="fa-solid fa-file-arrow-up text-indigo-400"></i> Seleccionar Archivo
             </h2>
             <span class="text-xs text-slate-400" id="file-limit-badge">Máx 100 MB</span>
           </div>
@@ -71,7 +159,7 @@
                 <p class="text-sm font-medium text-slate-200">
                   Arrastra tu archivo aquí, o <span class="text-indigo-400 underline underline-offset-2">explora tus carpetas</span>
                 </p>
-                <p class="text-xs text-slate-500 mt-1">Imágenes, Videos o Documentos (PDF, Word, Excel, PPT, TXT, ZIP)</p>
+                <p class="text-xs text-slate-500 mt-1">Imágenes, Videos o Documentos (PDF, Office, TXT, etc.)</p>
               </div>
             </div>
           </div>
@@ -84,11 +172,11 @@
                   <i class="fa-solid fa-file text-xl"></i>
                 </div>
                 <div class="min-w-0">
-                  <p id="file-name" class="text-sm font-semibold text-slate-200 truncate">archivo.pdf</p>
+                  <p id="file-name" class="text-sm font-semibold text-slate-200 truncate">archivo.png</p>
                   <div class="flex items-center gap-2 text-xs text-slate-400">
                     <span id="file-size">0 KB</span>
                     <span>•</span>
-                    <span id="file-type" class="uppercase font-mono text-[10px] bg-slate-700 px-1.5 py-0.5 rounded">PDF</span>
+                    <span id="file-type" class="uppercase font-mono text-[10px] bg-slate-700 px-1.5 py-0.5 rounded">PNG</span>
                   </div>
                 </div>
               </div>
@@ -97,7 +185,6 @@
               </button>
             </div>
 
-            <!-- Hash SHA-256 Calculado en Vivo -->
             <div class="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800 text-xs font-mono">
               <div class="text-[10px] text-slate-500 uppercase tracking-wider mb-0.5 flex items-center justify-between">
                 <span>Hash SHA-256 (Generado por el Cliente):</span>
@@ -110,7 +197,7 @@
           <!-- Botón de Acción -->
           <div class="mt-6">
             <button id="btn-upload" disabled class="w-full py-3.5 px-4 rounded-xl font-semibold text-sm bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-600 disabled:cursor-not-allowed text-white shadow-lg shadow-indigo-600/20 transition flex items-center justify-center gap-2">
-              <i class="fa-solid fa-bolt"></i> Iniciar Subida y Guardar en Supabase
+              <i class="fa-solid fa-bolt"></i> Validar Permisos e Iniciar Subida
             </button>
           </div>
         </div>
@@ -119,7 +206,7 @@
         <div id="progress-card" class="hidden bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
           <div class="flex items-center justify-between text-xs font-medium">
             <span id="progress-phase" class="text-indigo-400 flex items-center gap-2">
-              <i class="fa-solid fa-spinner fa-spin"></i> Subiendo a S3 (/pendientes)...
+              <i class="fa-solid fa-spinner fa-spin"></i> Subiendo a S3 (/Pendientes)...
             </span>
             <span id="progress-percent" class="font-mono text-slate-200">0%</span>
           </div>
@@ -130,7 +217,7 @@
 
           <div id="multipart-badges" class="hidden pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
             <span>Modo: <strong class="text-cyan-400">S3 Multipart Upload</strong></span>
-            <span id="multipart-chunk-status">Parte 1 de 4 enviada</span>
+            <span id="multipart-chunk-status">Parte 1 enviada</span>
           </div>
         </div>
 
@@ -141,32 +228,25 @@
               <i class="fa-solid fa-circle-check"></i>
             </div>
             <div>
-              <p>¡Subida Registrada en Supabase con Éxito!</p>
-              <p class="text-xs text-slate-400 font-normal">Estado: 'completado' con URL de CloudFront</p>
+              <p>¡Subida Autorizada y Procesada con Éxito!</p>
+              <p class="text-xs text-slate-400 font-normal" id="result-org-badge">Organización aislada correctamente</p>
             </div>
           </div>
 
           <div class="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2 text-xs font-mono">
             <div class="flex justify-between text-slate-400 text-[11px]">
-              <span>URL CloudFront:</span>
-              <span class="text-indigo-400 cursor-pointer hover:underline" id="btn-copy-url">Copiar</span>
+              <span>Ruta en S3 (Organizaciones/):</span>
+              <span class="text-indigo-400 cursor-pointer hover:underline" id="btn-copy-s3">Copiar</span>
             </div>
-            <div id="result-cdn-url" class="text-cyan-300 truncate text-[11px]">https://cdn.tudominio.com/...</div>
+            <div id="result-s3-key" class="text-cyan-300 truncate text-[11px]">Organizaciones/...</div>
           </div>
 
-          <div class="grid grid-cols-3 gap-2 text-center text-xs">
-            <div class="bg-slate-800/40 p-2 rounded-lg border border-slate-800">
-              <p class="text-[10px] text-slate-500 uppercase">Original</p>
-              <p id="stat-orig-size" class="font-bold text-slate-200 mt-0.5">--</p>
+          <div class="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2 text-xs font-mono">
+            <div class="flex justify-between text-slate-400 text-[11px]">
+              <span>URL CloudFront CDN:</span>
+              <span class="text-indigo-400 cursor-pointer hover:underline" id="btn-copy-url">Copiar</span>
             </div>
-            <div class="bg-slate-800/40 p-2 rounded-lg border border-slate-800">
-              <p class="text-[10px] text-slate-500 uppercase">Procesado</p>
-              <p id="stat-final-size" class="font-bold text-emerald-400 mt-0.5">--</p>
-            </div>
-            <div class="bg-slate-800/40 p-2 rounded-lg border border-slate-800">
-              <p class="text-[10px] text-slate-500 uppercase">Pipeline</p>
-              <p id="stat-saved" class="font-bold text-cyan-400 mt-0.5">--</p>
-            </div>
+            <div id="result-cdn-url" class="text-emerald-300 truncate text-[11px]">https://cdn.tudominio.com/...</div>
           </div>
         </div>
 
@@ -174,7 +254,7 @@
 
       <!-- COLUMNA DERECHA: Terminal de Logs en Tiempo Real -->
       <section class="lg:col-span-6 space-y-6">
-        <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl flex flex-col h-[560px] overflow-hidden">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl flex flex-col h-[580px] overflow-hidden">
           
           <div class="px-4 py-3 bg-slate-950 border-b border-slate-800 flex items-center justify-between">
             <div class="flex items-center space-x-2">
@@ -182,7 +262,7 @@
               <span class="w-3 h-3 rounded-full bg-yellow-500/80 inline-block"></span>
               <span class="w-3 h-3 rounded-full bg-emerald-500/80 inline-block"></span>
               <span class="ml-2 text-xs font-mono text-slate-400 flex items-center gap-2">
-                <i class="fa-solid fa-terminal text-indigo-400"></i> Traza de Operaciones
+                <i class="fa-solid fa-terminal text-indigo-400"></i> Terminal de Auditoría y Verificación de Permisos
               </span>
             </div>
             <button id="btn-clear-logs" class="text-xs text-slate-500 hover:text-slate-300 font-mono transition">
@@ -191,12 +271,12 @@
           </div>
 
           <div id="terminal-body" class="p-4 flex-1 overflow-y-auto font-mono text-[11px] space-y-2 terminal-scroll bg-slate-950 text-slate-300">
-            <div class="text-slate-500 italic">// Esperando archivo o documento para comenzar la traza...</div>
+            <div class="text-slate-500 italic">// Esperando petición para comprobar permisos de usuario y organización...</div>
           </div>
 
           <div class="px-4 py-2 bg-slate-950 border-t border-slate-800/80 text-[10px] font-mono text-slate-500 flex justify-between">
-            <span>Servidor: <strong class="text-indigo-400">localhost:4000</strong></span>
-            <span id="terminal-step-badge">Fase: Inactivo</span>
+            <span>Servidor Central: <strong class="text-indigo-400">localhost:4000</strong></span>
+            <span id="terminal-step-badge">Estado: Listo</span>
           </div>
         </div>
       </section>
@@ -207,9 +287,9 @@
       <div class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
         <div>
           <h3 class="text-base font-bold text-white flex items-center gap-2">
-            <i class="fa-solid fa-database text-emerald-400"></i> Registros en la tabla <code class="text-emerald-300 text-xs bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30">archivos</code> de Supabase
+            <i class="fa-solid fa-database text-emerald-400"></i> Tabla <code class="text-emerald-300 text-xs bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30">archivos</code> en Supabase
           </h3>
-          <p class="text-xs text-slate-400 mt-0.5">Filas guardadas y actualizadas en tiempo real en tu base de datos PostgreSQL</p>
+          <p class="text-xs text-slate-400 mt-0.5">Control de aislamiento por organización, tipología y visibilidad</p>
         </div>
 
         <div class="flex items-center gap-2">
@@ -217,7 +297,7 @@
             <i class="fa-solid fa-arrows-rotate"></i> Actualizar
           </button>
           <button id="btn-clear-simulated" class="px-3 py-1.5 rounded-lg bg-red-950/50 hover:bg-red-900/60 text-xs font-medium text-red-300 border border-red-800/50 transition flex items-center gap-1.5">
-            <i class="fa-solid fa-trash-can"></i> Limpiar registros de prueba
+            <i class="fa-solid fa-trash-can"></i> Limpiar pruebas
           </button>
         </div>
       </div>
@@ -227,17 +307,17 @@
           <thead class="text-[11px] text-slate-400 uppercase bg-slate-950/60 border-b border-slate-800">
             <tr>
               <th class="py-2.5 px-3">Nombre</th>
+              <th class="py-2.5 px-3">Organización / S3 Path</th>
               <th class="py-2.5 px-3">Estado</th>
+              <th class="py-2.5 px-3">Tipo / Acceso</th>
+              <th class="py-2.5 px-3">Usuario</th>
               <th class="py-2.5 px-3">Tamaño</th>
-              <th class="py-2.5 px-3">Formato</th>
-              <th class="py-2.5 px-3">Ticket ID</th>
-              <th class="py-2.5 px-3">S3 Key / CloudFront</th>
               <th class="py-2.5 px-3">Fecha</th>
             </tr>
           </thead>
           <tbody id="records-table-body" class="divide-y divide-slate-800/60 text-slate-300">
             <tr>
-              <td colspan="7" class="py-6 text-center text-slate-500 italic">Cargando registros de Supabase...</td>
+              <td colspan="7" class="py-6 text-center text-slate-500 italic">Cargando registros...</td>
             </tr>
           </tbody>
         </table>
@@ -272,30 +352,65 @@
     const multipartBadges = document.getElementById('multipart-badges');
     const multipartChunkStatus = document.getElementById('multipart-chunk-status');
     const resultCard = document.getElementById('result-card');
+    const resultS3Key = document.getElementById('result-s3-key');
     const resultCdnUrl = document.getElementById('result-cdn-url');
-    const statOrigSize = document.getElementById('stat-orig-size');
-    const statFinalSize = document.getElementById('stat-final-size');
-    const statSaved = document.getElementById('stat-saved');
+    const resultOrgBadge = document.getElementById('result-org-badge');
     const btnModeMock = document.getElementById('btn-mode-mock');
     const btnModeReal = document.getElementById('btn-mode-real');
     const terminalStepBadge = document.getElementById('terminal-step-badge');
     const recordsTableBody = document.getElementById('records-table-body');
     const btnRefreshRecords = document.getElementById('btn-refresh-records');
     const btnClearSimulated = document.getElementById('btn-clear-simulated');
+    const userSelect = document.getElementById('user-select');
+    const targetOrgSelect = document.getElementById('target-org-select');
+    const btnSimulateCrossAttack = document.getElementById('btn-simulate-cross-attack');
+    const pathPreviewLanding = document.getElementById('path-preview-landing');
+    const pathPreviewFinal = document.getElementById('path-preview-final');
 
     // MODO SELECTOR
     btnModeMock.addEventListener('click', () => {
       isMockMode = true;
       btnModeMock.className = 'px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-medium shadow-sm transition';
       btnModeReal.className = 'px-3 py-1.5 rounded-lg text-slate-400 hover:text-white transition';
-      addLog('SISTEMA', 'Modo: Simulación AWS activa (Persistencia en Supabase conectada).', 'cyan');
+      addLog('SISTEMA', 'Modo: Simulación de S3 activa con persistencia en Supabase.', 'cyan');
     });
 
     btnModeReal.addEventListener('click', () => {
       isMockMode = false;
       btnModeReal.className = 'px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-medium shadow-sm transition';
       btnModeMock.className = 'px-3 py-1.5 rounded-lg text-slate-400 hover:text-white transition';
-      addLog('SISTEMA', 'Modo: AWS S3 Real (Requiere .env con credenciales IAM válidas).', 'amber');
+      addLog('SISTEMA', 'Modo: AWS S3 Real activado.', 'amber');
+    });
+
+    function updatePathPreviews() {
+      const selectedUserOpt = userSelect.selectedOptions[0];
+      const targetOrg = targetOrgSelect.value === '11111111-1111-1111-1111-111111111111' ? 'organizacion_1' : 'organizacion_2';
+      const visibilidad = document.querySelector('input[name="visibilidad"]:checked').value;
+      const userName = selectedUserOpt ? selectedUserOpt.text.split(' ')[0] : 'usuario';
+
+      pathPreviewLanding.textContent = `Pendientes/${targetOrg}/${userName}/...`;
+      pathPreviewFinal.textContent = `Organizaciones/${targetOrg}/imagenes/${visibilidad}/...`;
+    }
+
+    userSelect.addEventListener('change', () => {
+      const opt = userSelect.selectedOptions[0];
+      if (opt && opt.dataset.org) {
+        targetOrgSelect.value = opt.dataset.org;
+      }
+      updatePathPreviews();
+      addLog('AUTH', `Sesión cambiada a: <strong>${opt.text}</strong>.`, 'indigo');
+    });
+
+    targetOrgSelect.addEventListener('change', updatePathPreviews);
+    document.querySelectorAll('input[name="visibilidad"]').forEach(r => r.addEventListener('change', updatePathPreviews));
+
+    // PRUEBA DE ATAQUE CRUZADO
+    btnSimulateCrossAttack.addEventListener('click', () => {
+      // Carlos Mendoza de Org 1 intentando subir a Org 2
+      userSelect.value = 'a1111111-0000-0000-0000-000000000001'; // Carlos (Org 1)
+      targetOrgSelect.value = '22222222-2222-2222-2222-222222222222'; // Org 2
+      updatePathPreviews();
+      addLog('SIMULADOR', '⚠️ Configurado escenario de ataque: Usuario de Organización 1 intentará forzar subida en Organización 2.', 'amber');
     });
 
     function addLog(source, message, color = 'slate') {
@@ -346,8 +461,6 @@
       if (type === 'application/pdf' || name.endsWith('.pdf')) return '<i class="fa-solid fa-file-pdf text-2xl text-rose-500"></i>';
       if (name.endsWith('.doc') || name.endsWith('.docx') || type.includes('word')) return '<i class="fa-solid fa-file-word text-2xl text-blue-500"></i>';
       if (name.endsWith('.xls') || name.endsWith('.xlsx') || type.includes('sheet') || type.includes('excel')) return '<i class="fa-solid fa-file-excel text-2xl text-emerald-500"></i>';
-      if (name.endsWith('.ppt') || name.endsWith('.pptx') || type.includes('presentation')) return '<i class="fa-solid fa-file-powerpoint text-2xl text-orange-500"></i>';
-      if (name.endsWith('.zip')) return '<i class="fa-solid fa-file-zipper text-2xl text-amber-500"></i>';
       return '<i class="fa-solid fa-file-lines text-2xl text-slate-300"></i>';
     }
 
@@ -417,34 +530,35 @@
       addLog('CLIENTE', 'Archivo descartado.', 'slate');
     });
 
-    // FLUJO DE SUBIDA COMPLETO
+    // FLUJO DE SUBIDA CON COMPROBACIONES STRICTAS
     btnUpload.addEventListener('click', async () => {
       if (!currentFile || isUploading) return;
       isUploading = true;
       btnUpload.disabled = true;
-      progressCard.classList.remove('hidden');
+      progressCard.classList.add('hidden');
       resultCard.classList.add('hidden');
-      progressBarFill.style.width = '0%';
-      progressPercent.textContent = '0%';
+
+      const selectedUserOpt = userSelect.selectedOptions[0];
+      const userId = userSelect.value;
+      const targetOrgId = targetOrgSelect.value;
+      const visibilidad = document.querySelector('input[name="visibilidad"]:checked').value;
 
       try {
-        terminalStepBadge.textContent = 'Paso 1: Ticket & Supabase';
-        addLog('PASO 1', 'Pidiendo autorización al Servidor Central...', 'indigo');
+        terminalStepBadge.textContent = 'Verificando Permisos';
+        addLog('PASO 1', `Solicitando ticket para usuario: <strong>${selectedUserOpt.text}</strong>...`, 'indigo');
 
-        // Determinar tipo MIME
         let detectedType = currentFile.type;
         if (!detectedType) {
           const ext = currentFile.name.toLowerCase();
           if (ext.endsWith('.pdf')) detectedType = 'application/pdf';
           else if (ext.endsWith('.docx')) detectedType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-          else if (ext.endsWith('.xlsx')) detectedType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-          else if (ext.endsWith('.txt')) detectedType = 'text/plain';
-          else detectedType = 'application/pdf';
+          else detectedType = 'image/jpeg';
         }
 
         const ticketPayload = {
-          userId: 'a0000000-0000-0000-0000-000000000001',
-          userName: 'Alan',
+          userId,
+          orgId: targetOrgId,
+          visibilidad,
           fileName: currentFile.name,
           fileType: detectedType,
           fileSize: currentFile.size,
@@ -454,55 +568,61 @@
         const headers = { 'Content-Type': 'application/json' };
         if (isMockMode) headers['x-mock-mode'] = 'true';
 
+        addLog('SERVIDOR', `Ejecutando comprobaciones en BD para usuario y organización destino...`, 'slate');
+
         const resTicket = await fetch('/api/upload/ticket', {
           method: 'POST',
           headers,
           body: JSON.stringify(ticketPayload),
         });
 
+        const ticketData = await resTicket.json();
+
+        // MANEJO DE RECHAZOS Y COMPROBACIONES
         if (!resTicket.ok) {
-          const errData = await resTicket.json();
-          throw new Error(errData.message || 'Error solicitando ticket');
+          if (resTicket.status === 401) {
+            addLog('COMPROBACIÓN 1', `❌ <strong>RECHAZADO (401 Unauthorized)</strong>: ${ticketData.message}`, 'red');
+            addLog('AUDITORÍA', `Evento registrado en <code>logs de servicio/</code>: DENEGADO_NO_REGISTRADO.`, 'amber');
+          } else if (ticketData.code === 'FORBIDDEN_ORGANIZATION') {
+            addLog('COMPROBACIÓN 2', `❌ <strong>RECHAZADO (403 Forbidden)</strong>: ${ticketData.message}`, 'red');
+            addLog('AUDITORÍA', `Violación Multi-Tenant registrada en <code>logs de servicio/</code>: DENEGADO_OTRA_ORG.`, 'amber');
+          } else if (ticketData.code === 'FORBIDDEN_NO_PERMISSION') {
+            addLog('COMPROBACIÓN 3', `❌ <strong>RECHAZADO (403 Forbidden)</strong>: ${ticketData.message}`, 'red');
+            addLog('AUDITORÍA', `Intento sin permiso registrado en <code>logs de servicio/</code>: DENEGADO_SIN_PERMISO.`, 'amber');
+          } else {
+            addLog('ERROR', ticketData.message || 'Error en servidor', 'red');
+          }
+
+          terminalStepBadge.textContent = 'Acceso Denegado';
+          return;
         }
 
-        const ticketData = await resTicket.json();
-        addLog('SUPABASE', `✅ Registro insertado en tabla <code>archivos</code> (ID: ${ticketData.fileId.substring(0, 8)}...) con estado <span class="text-amber-400 font-bold">'pendiente_subida'</span>.`, 'emerald');
-        addLog('SERVIDOR', `Ticket emitido: <strong>${ticketData.ticketId.substring(0, 8)}...</strong>`, 'cyan');
+        // SI PASÓ TODAS LAS COMPROBACIONES
+        addLog('COMPROBACIÓN 1', `✅ Usuario autenticado y registrado en el sistema.`, 'emerald');
+        addLog('COMPROBACIÓN 2', `✅ Aislamiento Multi-Tenant verificado: Pertenece a ${ticketData.organizacion?.nombre}.`, 'emerald');
+        addLog('COMPROBACIÓN 3', `✅ Permiso de subida verificado (puede_subir: true).`, 'emerald');
+
+        addLog('S3 RUTAS', `Zona Aterrizaje temporal: <code>${ticketData.s3Hierarchy.landingZone}</code>`, 'cyan');
+        addLog('S3 RUTAS', `Destino Permanente asignado: <code>${ticketData.s3Hierarchy.permanentTarget}</code>`, 'cyan');
 
         loadSupabaseRecords();
 
-        if (ticketData.isMultipart) {
-          multipartBadges.classList.remove('hidden');
-          addLog('SISTEMA', `Multipart Upload activado para fragmentación de paquetes.`, 'amber');
-        } else {
-          multipartBadges.classList.add('hidden');
-        }
-
-        // Subida directa
-        terminalStepBadge.textContent = 'Paso 2: Subida Directa';
-        addLog('PASO 2', `Enviando paquetes a la URL prefirmada...`, 'indigo');
+        // Iniciar subida directa
+        progressCard.classList.remove('hidden');
+        terminalStepBadge.textContent = 'Subiendo a S3 Pendientes';
+        addLog('PASO 2', `Cliente enviando paquetes a la Pre-signed URL...`, 'indigo');
 
         await simulateUploadProgress(ticketData.isMultipart);
 
         const resS3Mock = await fetch(ticketData.uploadUrl, { method: 'PUT' });
         await resS3Mock.json();
-        addLog('SUPABASE', `🔄 Estado actualizado a <span class="text-cyan-400 font-bold">'subido_pendiente_proc'</span> en S3 /pendientes.`, 'emerald');
+        addLog('AWS S3', `Archivo recibido en: <code>${ticketData.s3Hierarchy.landingZone}</code>`, 'emerald');
         loadSupabaseRecords();
 
-        // Procesamiento en función del tipo de archivo
-        const isDoc = !detectedType.startsWith('image/') && !detectedType.startsWith('video/');
-        terminalStepBadge.textContent = isDoc ? 'Paso 3: Validación Documento' : 'Paso 3: Lambda Pipeline';
-
-        addLog('AWS S3', `Evento ObjectCreated emitido hacia AWS Lambda.`, 'cyan');
+        // Lambda y GuardDuty
+        terminalStepBadge.textContent = 'Lambda y Mover a Organizaciones/';
+        addLog('AWS S3', `Evento S3 disparado. Activando Lambda procesadora...`, 'cyan');
         addLog('GUARDDUTY', `Escaneo de seguridad antivirus: <strong class="text-emerald-400">CLEAN</strong> (Sin amenazas).`, 'emerald');
-
-        if (isDoc) {
-          addLog('DOC-PIPELINE', `Documento verificado: Conservando formato íntegro y aplicando firma digital.`, 'slate');
-        } else if (detectedType.startsWith('image/')) {
-          addLog('SHARP', `Limpiando metadatos EXIF y optimizando formato a WebP...`, 'slate');
-        } else {
-          addLog('MEDIA-PIPELINE', `Extrayendo thumbnail y analizando códec...`, 'slate');
-        }
 
         const resProcess = await fetch(`/api/upload/mock-process/${ticketData.ticketId}`, {
           method: 'POST',
@@ -512,26 +632,29 @@
             fileName: currentFile.name,
             fileSize: currentFile.size,
             hashSha256: fileHash,
+            orgSlug: ticketData.organizacion?.slug,
+            visibilidad,
           }),
         });
 
         const processData = await resProcess.json();
 
-        addLog('SUPABASE', `🎉 Estado actualizado a <span class="text-emerald-400 font-bold">'completado'</span> con URL final de CloudFront y metadatos JSONB.`, 'emerald');
+        addLog('AWS LAMBDA', `Archivo movido exitosamente a su destino permanente:`, 'emerald');
+        addLog('S3 DESTINO', `<code>${processData.s3_key_procesado}</code>`, 'emerald');
+
         loadSupabaseRecords();
 
-        terminalStepBadge.textContent = 'Paso 4: Completado';
+        terminalStepBadge.textContent = 'Completado';
         resultCard.classList.remove('hidden');
+        resultS3Key.textContent = processData.s3_key_procesado;
         resultCdnUrl.textContent = processData.cloudfront_url;
-        statOrigSize.textContent = formatBytes(currentFile.size);
-        statFinalSize.textContent = formatBytes(processData.lambdaProcessing.finalSize);
-        statSaved.textContent = processData.lambdaProcessing.engine.includes('Sharp') ? '78% (WebP)' : 'Original (100%)';
+        resultOrgBadge.textContent = `Guardado bajo ${ticketData.organizacion?.nombre} (${visibilidad.toUpperCase()})`;
 
-        addLog('CLIENTE', `¡Subida finalizada con éxito!`, 'emerald');
+        addLog('CLIENTE', `¡Subida y aislamiento completados exitosamente!`, 'emerald');
 
       } catch (err) {
         addLog('ERROR', err.message, 'red');
-        terminalStepBadge.textContent = 'Error';
+        terminalStepBadge.textContent = 'Fallo';
       } finally {
         isUploading = false;
         btnUpload.disabled = false;
@@ -560,7 +683,7 @@
             clearInterval(interval);
             setTimeout(resolve, 300);
           }
-        }, 120);
+        }, 100);
       });
     }
 
@@ -573,7 +696,7 @@
         if (records.length === 0) {
           recordsTableBody.innerHTML = `
             <tr>
-              <td colspan="7" class="py-6 text-center text-slate-500 italic">No hay registros aún. Sube un archivo o documento para ver la primera fila guardada.</td>
+              <td colspan="7" class="py-6 text-center text-slate-500 italic">No hay registros aún. Sube un archivo para ver la traza.</td>
             </tr>`;
           return;
         }
@@ -584,26 +707,30 @@
           'procesando': 'bg-indigo-500/10 text-indigo-400 border-indigo-500/30',
           'completado': 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
           'error': 'bg-red-500/10 text-red-400 border-red-500/30',
-          'rechazado_seguridad': 'bg-rose-500/10 text-rose-400 border-rose-500/30',
         };
 
         recordsTableBody.innerHTML = records.map((r) => {
           const badgeClass = statusBadges[r.estado] || 'bg-slate-700 text-slate-300';
           const fecha = new Date(r.created_at).toLocaleTimeString();
-          const targetKey = r.cloudfront_url || r.s3_key_procesado || r.s3_key_pendiente || '--';
+          const targetKey = r.s3_key_procesado || r.s3_key_pendiente || '--';
+          const vis = r.metadata?.visibilidad || r.visibilidad || 'privado';
+          const tipo = r.metadata?.tipo_recurso || r.tipo_recurso || 'multimedia';
 
           return `
             <tr class="hover:bg-slate-800/40 transition">
               <td class="py-2.5 px-3 font-semibold text-slate-200">${r.nombre_original}</td>
+              <td class="py-2.5 px-3 text-cyan-300 truncate max-w-xs" title="${targetKey}">${targetKey}</td>
               <td class="py-2.5 px-3">
                 <span class="px-2 py-0.5 rounded text-[10px] font-bold border ${badgeClass}">
                   ${r.estado}
                 </span>
               </td>
+              <td class="py-2.5 px-3">
+                <span class="text-[10px] text-slate-300 font-bold">${tipo}</span>
+                <span class="text-[10px] text-slate-500">(${vis})</span>
+              </td>
+              <td class="py-2.5 px-3 text-slate-400">${r.user_name || 'Desconocido'}</td>
               <td class="py-2.5 px-3 text-slate-400">${formatBytes(r.tamano_bytes)}</td>
-              <td class="py-2.5 px-3 text-slate-400">${r.formato}</td>
-              <td class="py-2.5 px-3 text-slate-500 text-[10px]">${r.ticket_id.substring(0, 8)}...</td>
-              <td class="py-2.5 px-3 text-slate-400 truncate max-w-xs" title="${targetKey}">${targetKey}</td>
               <td class="py-2.5 px-3 text-slate-500">${fecha}</td>
             </tr>
           `;
@@ -614,7 +741,7 @@
     }
 
     btnClearSimulated.addEventListener('click', async () => {
-      if (!confirm('¿Deseas eliminar todas las entradas de prueba simuladas de Supabase?')) return;
+      if (!confirm('¿Deseas eliminar las entradas de prueba de Supabase?')) return;
       try {
         const res = await fetch('/api/upload/records/simulated', { method: 'DELETE' });
         const data = await res.json();
@@ -627,7 +754,7 @@
 
     btnRefreshRecords.addEventListener('click', () => {
       loadSupabaseRecords();
-      addLog('SISTEMA', 'Tabla de registros actualizada desde Supabase.', 'slate');
+      addLog('SISTEMA', 'Tabla actualizada.', 'slate');
     });
 
     document.getElementById('btn-copy-url').addEventListener('click', () => {
@@ -635,8 +762,15 @@
       addLog('CLIENTE', 'URL copiada al portapapeles.', 'cyan');
     });
 
+    document.getElementById('btn-copy-s3').addEventListener('click', () => {
+      navigator.clipboard.writeText(resultS3Key.textContent);
+      addLog('CLIENTE', 'Ruta S3 copiada.', 'cyan');
+    });
+
+    updatePathPreviews();
     loadSupabaseRecords();
-    addLog('SISTEMA', 'Simulador listo: Soporta Imágenes, Videos y Documentos (PDF, Office, TXT, etc.).', 'emerald');
+    addLog('SISTEMA', 'Simulador Multi-Tenant inicializado con 2 Organizaciones y 15 Usuarios.', 'emerald');
+    addLog('INFO', 'Prueba cambiando de usuario o intentando subir a la otra organización para ver las comprobaciones.', 'cyan');
   </script>
 </body>
 </html>
