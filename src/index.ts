@@ -43,8 +43,9 @@ app.get('/', (_req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'));
 });
 
-app.listen(env.PORT, () => {
-  console.log(`🚀 Servidor Central Cloudinary Clon corriendo en http://localhost:${env.PORT}`);
-  console.log(`🌐 Interfaz Web de Prueba disponible en: http://localhost:${env.PORT}`);
+const port = Number(process.env.PORT || env.PORT);
+app.listen(port, '0.0.0.0', () => {
+  console.log(`🚀 Servidor Central Cloudinary Clon corriendo en puerto ${port}`);
+  console.log(`🌐 Health check disponible en: http://0.0.0.0:${port}/health`);
   console.log(`🧪 Modo Simulación: ${env.MOCK_MODE ? 'ACTIVO (No requiere AWS)' : 'DESACTIVADO (Usa AWS real)'}`);
 });

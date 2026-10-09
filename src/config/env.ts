@@ -8,14 +8,14 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 
   // AWS S3
-  AWS_REGION: z.string().min(1, 'AWS_REGION es requerida'),
-  AWS_ACCESS_KEY_ID: z.string().min(1, 'AWS_ACCESS_KEY_ID es requerida'),
-  AWS_SECRET_ACCESS_KEY: z.string().min(1, 'AWS_SECRET_ACCESS_KEY es requerida'),
-  AWS_S3_BUCKET_NAME: z.string().min(1, 'AWS_S3_BUCKET_NAME es requerida'),
+  AWS_REGION: z.string().default('us-east-1'),
+  AWS_ACCESS_KEY_ID: z.string().default('mock-access-key-id'),
+  AWS_SECRET_ACCESS_KEY: z.string().default('mock-secret-access-key'),
+  AWS_S3_BUCKET_NAME: z.string().default('mock-s3-bucket'),
 
   // Supabase
-  SUPABASE_URL: z.string().url('SUPABASE_URL debe ser una URL válida'),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1, 'SUPABASE_SERVICE_ROLE_KEY es requerida'),
+  SUPABASE_URL: z.string().url().default('https://mock-project.supabase.co'),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().default('mock-service-role-key'),
 
   // Opciones de subida
   UPLOAD_URL_EXPIRATION_SECONDS: z.coerce.number().default(900), // 15 min
