@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { USUARIOS, ORGANIZACIONES, addServiceLog } from '@/lib/service-logs';
+import { supabase } from '@/lib/supabase';
 
 // Cabeceras CORS
 const corsHeaders = {
@@ -16,7 +17,7 @@ export async function OPTIONS() {
   });
 }
 
-// 2. Endpoint principal: Emisión de Ticket de Subida con COMPROBACIONES STRICTAS MULTI-TENANT
+// 2. Endpoint principal: Emisión de Ticket de Subida con PERSISTENCIA EN SUPABASE
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -33,7 +34,7 @@ export async function POST(req: NextRequest) {
     // COMPROBACIÓN 1: Autenticación / Registro del Usuario
     const usuario = userId ? USUARIOS[userId] : null;
     if (!usuario) {
-      addServiceLog({
+      await addServiceLog({
         accion: 'PETICION_TICKET',
         estado: 'DENEGADO_NO_REGISTRADO',
         userId: userId || 'desconocido',
@@ -72,7 +73,7 @@ export async function POST(req: NextRequest) {
 
     // COMPROBACIÓN 2: Aislamiento Multi-Tenant (NO PERMITIR SUBIR A OTRA ORGANIZACIÓN)
     if (usuario.orgId !== orgId) {
-      addServiceLog({
+      await addServiceLog({
         accion: 'VIOLACION_MULTI_TENANT',
         estado: 'DENEGADO_OTRA_ORG',
         userId: usuario.id,
@@ -105,7 +106,7 @@ export async function POST(req: NextRequest) {
 
     // COMPROBACIÓN 3: Permiso de Subida de Archivos Importantes
     if (!usuario.puede_subir) {
-      addServiceLog({
+      await addServiceLog({
         accion: 'PERMISO_INSUFICIENTE',
         estado: 'DENEGADO_SIN_PERMISO',
         userId: usuario.id,
@@ -128,7 +129,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // SI PASÓ TODAS LAS COMPROBACIONES -> GENERAR TICKET Y JERARQUÍA S3
+    // SI PASÓ TODAS LAS COMPROBACIONES -> GENERAR TICKET, RUTAS S3 Y GUARDAR EN SUPABASE
+    const fileId = crypto.randomUUID();
     const ticketId = crypto.randomUUID();
     const timestamp = Date.now();
     const orgSlug = orgDestino.slug;
@@ -147,8 +149,40 @@ export async function POST(req: NextRequest) {
     const protocol = host.includes('localhost') ? 'http' : 'https';
     const uploadUrl = `${protocol}://${host}/api/upload?ticketId=${ticketId}`;
 
-    // Registrar evento de éxito en logs de servicio
-    addServiceLog({
+    // 1. Guardar archivo en la tabla 'archivos' de Supabase
+    try {
+      const { error: fileErr } = await supabase.from('archivos').insert({
+        id: fileId,
+        ticket_id: ticketId,
+        user_id: usuario.id,
+        user_name: usuario.nombre,
+        org_id: orgDestino.id,
+        nombre_original: fileName,
+        formato: fileType,
+        tamano_bytes: fileSize,
+        tipo_recurso: tipo,
+        visibilidad: visibilidad,
+        s3_key_pendiente: landingZoneKey,
+        s3_key_procesado: permanentTargetKey,
+        estado: 'pendiente_subida',
+        metadata: {
+          hash_sha256: hashSha256,
+          ticketId,
+          landingZone: landingZoneKey,
+          permanentTarget: permanentTargetKey,
+        },
+        created_at: new Date(timestamp).toISOString(),
+      });
+
+      if (fileErr) {
+        console.warn('Advertencia insertando en tabla archivos de Supabase:', fileErr.message);
+      }
+    } catch (dbErr: any) {
+      console.error('Error insertando en tabla archivos de Supabase:', dbErr.message);
+    }
+
+    // 2. Registrar evento en la tabla 'logs_servicio' de Supabase
+    await addServiceLog({
       accion: 'TICKET_EMITIDO',
       estado: 'PERMITIDO',
       userId: usuario.id,
@@ -158,6 +192,7 @@ export async function POST(req: NextRequest) {
       targetOrgId: orgId,
       detalles: {
         ticketId,
+        fileId,
         archivo: fileName,
         tamano: fileSize,
         tipo,
@@ -170,6 +205,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         ticketId,
+        fileId,
         uploadUrl,
         isMultipart: fileSize > 20 * 1024 * 1024,
         usuario: {
@@ -212,7 +248,25 @@ export async function PUT(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const ticketId = searchParams.get('ticketId') || 'unknown';
 
-  addServiceLog({
+  // 1. Actualizar estado del archivo en la tabla 'archivos' de Supabase
+  try {
+    const { error } = await supabase
+      .from('archivos')
+      .update({
+        estado: 'completado',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('ticket_id', ticketId);
+
+    if (error) {
+      console.warn('Advertencia actualizando archivo en Supabase:', error.message);
+    }
+  } catch (dbErr: any) {
+    console.error('Error actualizando archivo en Supabase:', dbErr.message);
+  }
+
+  // 2. Registrar evento en la tabla 'logs_servicio' de Supabase
+  await addServiceLog({
     accion: 'RECEPCION_S3',
     estado: 'SUBIDO_LANDING',
     detalles: {
@@ -224,7 +278,7 @@ export async function PUT(req: NextRequest) {
   return NextResponse.json(
     {
       status: 'success',
-      message: `[MOCK S3] Archivo recibido en zona de aterrizaje para ticket ${ticketId}`,
+      message: `[MOCK S3] Archivo recibido en zona de aterrizaje para ticket ${ticketId} y registrado en Supabase`,
       ticketId,
       s3Status: 'uploaded_to_landing',
     },

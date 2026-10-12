@@ -1,3 +1,5 @@
+import { supabase } from './supabase';
+
 export interface ServiceLog {
   id: string;
   timestamp: string;
@@ -60,45 +62,100 @@ export const USUARIOS: Record<string, MockUser> = {
   'b2222222-0000-0000-0000-000000000005': { id: 'b2222222-0000-0000-0000-000000000005', orgId: '22222222-2222-2222-2222-222222222222', nombre: 'Gabriel Fuentes (Sin Permiso)', email: 'gabriel.fuentes@org2.com', rol: 'visitante', puede_subir: false },
 };
 
-// Almacén en memoria de los logs de servicio (últimos 100 eventos)
-// En Vercel Serverless, sobrevive durante la vida del contenedor
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Almacén en memoria de respaldo
 const globalForLogs = globalThis as unknown as { serviceLogs?: ServiceLog[] };
 if (!globalForLogs.serviceLogs) {
-  globalForLogs.serviceLogs = [
-    {
-      id: 'init-log-01',
-      timestamp: new Date().toISOString(),
-      accion: 'SERVICIO_INICIADO',
-      estado: 'PERMITIDO',
-      userName: 'Sistema AWS',
-      orgNombre: 'Infraestructura',
-      detalles: {
-        mensaje: 'Módulo de logs de servicio inicializado. Monitoreando accesos multi-tenant.',
-        directorioS3: 'logs de servicio/',
-      },
-    },
-  ];
+  globalForLogs.serviceLogs = [];
 }
 
-export function addServiceLog(log: Omit<ServiceLog, 'id' | 'timestamp'>): ServiceLog {
+/**
+ * Guarda un evento de auditoría tanto en memoria como en la tabla logs_servicio de Supabase
+ */
+export async function addServiceLog(log: Omit<ServiceLog, 'id' | 'timestamp'>): Promise<ServiceLog> {
   const newLog: ServiceLog = {
     ...log,
     id: crypto.randomUUID(),
     timestamp: new Date().toISOString(),
   };
 
+  // 1. Guardar en memoria para respuesta ultra rápida
   const logs = globalForLogs.serviceLogs || [];
-  logs.unshift(newLog); // Más reciente primero
+  logs.unshift(newLog);
   if (logs.length > 100) logs.pop();
   globalForLogs.serviceLogs = logs;
+
+  // 2. Persistir en la tabla 'logs_servicio' en Supabase
+  try {
+    const validOrgId = log.orgId && UUID_REGEX.test(log.orgId) ? log.orgId : (log.targetOrgId && UUID_REGEX.test(log.targetOrgId) ? log.targetOrgId : null);
+    const validUserId = log.userId && UUID_REGEX.test(log.userId) && log.userId !== '00000000-0000-0000-0000-000000000000' ? log.userId : null;
+
+    const { error } = await supabase.from('logs_servicio').insert({
+      id: newLog.id,
+      org_id: validOrgId,
+      user_id: validUserId,
+      accion: log.accion,
+      estado: log.estado,
+      detalles: {
+        ...log.detalles,
+        userName: log.userName,
+        orgNombre: log.orgNombre,
+      },
+      ip_origen: log.detalles?.ip || '127.0.0.1',
+      created_at: newLog.timestamp,
+    });
+
+    if (error) {
+      console.warn('Advertencia insertando en logs_servicio de Supabase:', error.message);
+    }
+  } catch (err: any) {
+    console.error('Error persistiendo log en Supabase:', err.message);
+  }
 
   return newLog;
 }
 
-export function getServiceLogs(): ServiceLog[] {
+/**
+ * Obtiene los logs de servicio directamente desde la tabla 'logs_servicio' en Supabase
+ */
+export async function getServiceLogs(): Promise<ServiceLog[]> {
+  try {
+    const { data, error } = await supabase
+      .from('logs_servicio')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (!error && data && data.length > 0) {
+      return data.map((row: any) => ({
+        id: row.id,
+        timestamp: row.created_at,
+        accion: row.accion,
+        estado: row.estado,
+        userId: row.user_id,
+        userName: row.detalles?.userName || 'Desconocido',
+        orgId: row.org_id,
+        orgNombre: row.detalles?.orgNombre || 'Organización',
+        targetOrgId: row.detalles?.targetOrgId,
+        detalles: row.detalles,
+      }));
+    }
+  } catch (err) {
+    console.warn('Fallback a logs en memoria:', err);
+  }
+
   return globalForLogs.serviceLogs || [];
 }
 
-export function clearServiceLogs(): void {
+/**
+ * Limpia los logs de servicio en Supabase y en memoria
+ */
+export async function clearServiceLogs(): Promise<void> {
   globalForLogs.serviceLogs = [];
+  try {
+    await supabase.from('logs_servicio').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+  } catch (err) {
+    console.error('Error limpiando logs en Supabase:', err);
+  }
 }

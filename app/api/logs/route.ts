@@ -12,11 +12,11 @@ export async function OPTIONS() {
 }
 
 export async function GET() {
-  const logs = getServiceLogs();
+  const logs = await getServiceLogs();
   return NextResponse.json({ logs, count: logs.length }, { status: 200, headers: corsHeaders });
 }
 
 export async function DELETE() {
-  clearServiceLogs();
+  await clearServiceLogs();
   return NextResponse.json({ message: 'Logs de servicio reiniciados con éxito' }, { status: 200, headers: corsHeaders });
 }
