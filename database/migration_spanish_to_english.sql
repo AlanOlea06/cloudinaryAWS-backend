@@ -1,9 +1,11 @@
 -- ==============================================================================
--- MIGRATION SCRIPT: SPANISH TO STANDARDIZED ENGLISH
--- Migrates existing Supabase tables, columns, and constraints safely
+-- MIGRATION SCRIPT: SPANISH TO STANDARDIZED ENGLISH (ROBUST & SAFE)
+-- Fixes constraint violations by dropping old Spanish checks before updating values
 -- ==============================================================================
 
--- 1. Rename Tables
+-- ------------------------------------------------------------------------------
+-- STEP 1: Rename Tables (if not already renamed)
+-- ------------------------------------------------------------------------------
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'organizaciones') THEN
@@ -23,7 +25,30 @@ BEGIN
     END IF;
 END $$;
 
--- 2. Rename Columns in 'organizations'
+-- ------------------------------------------------------------------------------
+-- STEP 2: Drop Old Spanish Check Constraints (To avoid Error 23514)
+-- ------------------------------------------------------------------------------
+DO $$
+BEGIN
+    -- Drop old constraints on files/archivos
+    ALTER TABLE public.files DROP CONSTRAINT IF EXISTS archivos_visibilidad_check;
+    ALTER TABLE public.files DROP CONSTRAINT IF EXISTS archivos_tipo_recurso_check;
+    ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_visibilidad_check;
+    ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_tipo_recurso_check;
+    ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_visibility_check;
+    ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_resource_type_check;
+
+    -- Drop old constraints on users/usuarios
+    ALTER TABLE public.users DROP CONSTRAINT IF EXISTS usuarios_rol_check;
+    ALTER TABLE public.users DROP CONSTRAINT IF EXISTS users_rol_check;
+    ALTER TABLE public.users DROP CONSTRAINT IF EXISTS users_role_check;
+EXCEPTION
+    WHEN undefined_table THEN null;
+END $$;
+
+-- ------------------------------------------------------------------------------
+-- STEP 3: Rename Columns in 'organizations'
+-- ------------------------------------------------------------------------------
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'organizations' AND column_name = 'nombre') THEN
@@ -34,7 +59,9 @@ BEGIN
     END IF;
 END $$;
 
--- 3. Rename Columns & Standardize Values in 'users'
+-- ------------------------------------------------------------------------------
+-- STEP 4: Rename Columns in 'users'
+-- ------------------------------------------------------------------------------
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'nombre') THEN
@@ -48,13 +75,12 @@ BEGIN
     END IF;
 END $$;
 
--- Update Spanish role names to English
-UPDATE public.users SET role = 'viewer' WHERE role = 'visitante';
-
--- 4. Rename Columns & Standardize Values in 'files'
+-- ------------------------------------------------------------------------------
+-- STEP 5: Rename Columns in 'files'
+-- ------------------------------------------------------------------------------
 DO $$
 BEGIN
-    -- Drop obsolete redundant columns if still present
+    -- Drop obsolete redundant columns
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'files' AND column_name = 'user_name') THEN
         ALTER TABLE public.files DROP COLUMN user_name;
     END IF;
@@ -62,7 +88,7 @@ BEGIN
         ALTER TABLE public.files DROP COLUMN metadata;
     END IF;
 
-    -- Rename columns to English
+    -- Rename columns
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'files' AND column_name = 'nombre_original') THEN
         ALTER TABLE public.files RENAME COLUMN nombre_original TO original_name;
     END IF;
@@ -98,11 +124,9 @@ BEGIN
     END IF;
 END $$;
 
--- Update Spanish visibility values to English
-UPDATE public.files SET visibility = 'private' WHERE visibility IN ('privados', 'privado');
-UPDATE public.files SET visibility = 'public' WHERE visibility IN ('publicos', 'publico');
-
--- 5. Rename Columns in 'service_logs'
+-- ------------------------------------------------------------------------------
+-- STEP 6: Rename Columns in 'service_logs'
+-- ------------------------------------------------------------------------------
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'service_logs' AND column_name = 'accion') THEN
@@ -121,3 +145,50 @@ BEGIN
         ALTER TABLE public.service_logs RENAME COLUMN detalles TO details;
     END IF;
 END $$;
+
+-- ------------------------------------------------------------------------------
+-- STEP 7: Convert Status column to TEXT to allow English values seamlessly
+-- ------------------------------------------------------------------------------
+ALTER TABLE public.files ALTER COLUMN status TYPE TEXT USING status::text;
+
+-- ------------------------------------------------------------------------------
+-- STEP 8: Translate Data Values in 'files' and 'users'
+-- ------------------------------------------------------------------------------
+-- Visibility
+UPDATE public.files SET visibility = 'private' WHERE visibility IN ('privados', 'privado');
+UPDATE public.files SET visibility = 'public' WHERE visibility IN ('publicos', 'publico');
+
+-- Resource Type
+UPDATE public.files SET resource_type = 'images' WHERE resource_type IN ('imagenes', 'imagen');
+UPDATE public.files SET resource_type = 'documents' WHERE resource_type IN ('documentos', 'documento');
+UPDATE public.files SET resource_type = 'videos' WHERE resource_type IN ('videos', 'video');
+
+-- Status
+UPDATE public.files SET status = 'pending_upload' WHERE status = 'pendiente_subida';
+UPDATE public.files SET status = 'uploaded_pending_processing' WHERE status = 'subido_pendiente_proc';
+UPDATE public.files SET status = 'processing' WHERE status = 'procesando';
+UPDATE public.files SET status = 'completed' WHERE status = 'completado';
+UPDATE public.files SET status = 'failed' WHERE status = 'error';
+UPDATE public.files SET status = 'security_rejected' WHERE status = 'rechazado_seguridad';
+
+-- Users Role
+UPDATE public.users SET role = 'viewer' WHERE role IN ('visitante', 'miembro');
+
+-- ------------------------------------------------------------------------------
+-- STEP 9: Add New English Check Constraints
+-- ------------------------------------------------------------------------------
+ALTER TABLE public.files 
+    ADD CONSTRAINT files_visibility_check 
+    CHECK (visibility IN ('public', 'private'));
+
+ALTER TABLE public.files 
+    ADD CONSTRAINT files_resource_type_check 
+    CHECK (resource_type IN ('images', 'documents', 'videos'));
+
+ALTER TABLE public.files 
+    ADD CONSTRAINT files_status_check 
+    CHECK (status IN ('pending_upload', 'uploaded_pending_processing', 'processing', 'completed', 'failed', 'security_rejected'));
+
+ALTER TABLE public.users 
+    ADD CONSTRAINT users_role_check 
+    CHECK (role IN ('admin', 'editor', 'viewer'));
