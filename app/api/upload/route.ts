@@ -1,16 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { USUARIOS, ORGANIZACIONES, addServiceLog } from '@/lib/service-logs';
+import { USERS, ORGANIZATIONS, addServiceLog } from '@/lib/service-logs';
 import { supabase } from '@/lib/supabase';
 import { isAwsConfigured, generatePresignedUploadUrl } from '@/lib/s3';
 
-// Cabeceras CORS
+// CORS Headers
 const corsHeaders = {
   'Access-Control-Allow-Origin': 'http://localhost:3000',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-mock-mode',
 };
 
-// 1. Manejo de Preflight OPTIONS
+// 1. Preflight OPTIONS handler
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
@@ -18,31 +18,31 @@ export async function OPTIONS() {
   });
 }
 
-// 2. Endpoint principal: Emisión de Ticket y Generación de URL Pre-firmada S3
+// 2. Primary Endpoint: Issue Upload Ticket & Generate S3 Presigned URL
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const {
       userId,
       orgId,
-      fileName = 'archivo.png',
+      fileName = 'file.png',
       fileType = 'image/png',
       fileSize = 1024,
-      visibilidad = 'privados',
-      hashSha256 = 'simulated-hash-sha256',
+      visibility = body.visibilidad || 'private',
+      sha256Hash = body.hashSha256 || 'simulated-sha256-hash',
     } = body;
 
-    // COMPROBACIÓN 1: Autenticación / Registro del Usuario
-    const usuario = userId ? USUARIOS[userId] : null;
-    if (!usuario) {
+    // CHECK 1: User Authentication / Registration
+    const user = userId ? USERS[userId] : null;
+    if (!user) {
       await addServiceLog({
-        accion: 'PETICION_TICKET',
-        estado: 'DENEGADO_NO_REGISTRADO',
-        userId: userId || 'desconocido',
-        userName: 'Usuario No Registrado',
+        action: 'TICKET_REQUEST',
+        status: 'DENIED_NOT_REGISTERED',
+        userId: userId || 'unknown',
+        userName: 'Unregistered User',
         targetOrgId: orgId,
-        detalles: {
-          motivo: 'El usuario no existe en la base de datos de usuarios.',
+        details: {
+          reason: 'User does not exist in the database.',
           ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
           fileName,
         },
@@ -52,41 +52,41 @@ export async function POST(req: NextRequest) {
         {
           error: 'Unauthorized',
           code: 'USER_NOT_REGISTERED',
-          message: 'Acceso Denegado: El usuario no está registrado en el sistema.',
+          message: 'Access Denied: User is not registered in the system.',
         },
         { status: 401, headers: corsHeaders }
       );
     }
 
-    const orgUsuario = ORGANIZACIONES[usuario.orgId];
-    const orgDestino = orgId ? ORGANIZACIONES[orgId] : null;
+    const userOrg = ORGANIZATIONS[user.orgId];
+    const targetOrg = orgId ? ORGANIZATIONS[orgId] : null;
 
-    if (!orgDestino) {
+    if (!targetOrg) {
       return NextResponse.json(
         {
           error: 'Not Found',
           code: 'ORGANIZATION_NOT_FOUND',
-          message: 'La organización destino especificada no existe.',
+          message: 'Target organization does not exist.',
         },
         { status: 404, headers: corsHeaders }
       );
     }
 
-    // COMPROBACIÓN 2: Aislamiento Multi-Tenant (NO PERMITIR SUBIR A OTRA ORGANIZACIÓN)
-    if (usuario.orgId !== orgId) {
+    // CHECK 2: Multi-Tenant Isolation (Disallow uploading to a foreign organization)
+    if (user.orgId !== orgId) {
       await addServiceLog({
-        accion: 'VIOLACION_MULTI_TENANT',
-        estado: 'DENEGADO_OTRA_ORG',
-        userId: usuario.id,
-        userName: usuario.nombre,
-        orgId: usuario.orgId,
-        orgNombre: orgUsuario?.nombre,
+        action: 'CROSS_ORG_VIOLATION',
+        status: 'DENIED_CROSS_ORG',
+        userId: user.id,
+        userName: user.name,
+        orgId: user.orgId,
+        orgName: userOrg?.name,
         targetOrgId: orgId,
-        detalles: {
-          alerta: 'INTENTO DE SUBIDA CRUZADA BLOQUEADO',
-          orgOrigen: orgUsuario?.nombre,
-          orgDestino: orgDestino.nombre,
-          archivo: fileName,
+        details: {
+          alert: 'CROSS-ORGANIZATION UPLOAD ATTEMPT BLOCKED',
+          originOrg: userOrg?.name,
+          destinationOrg: targetOrg.name,
+          fileName,
           ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
         },
       });
@@ -95,28 +95,28 @@ export async function POST(req: NextRequest) {
         {
           error: 'Forbidden',
           code: 'FORBIDDEN_CROSS_ORGANIZATION',
-          message: `Violación de Seguridad Multi-Tenant: El usuario '${usuario.nombre}' pertenece a '${orgUsuario?.nombre}' y NO puede subir archivos a '${orgDestino.nombre}'.`,
-          detalles: {
-            usuarioOrg: orgUsuario?.nombre,
-            destinoOrg: orgDestino.nombre,
+          message: `Multi-Tenant Security Violation: User '${user.name}' belongs to '${userOrg?.name}' and cannot upload files to '${targetOrg.name}'.`,
+          details: {
+            userOrg: userOrg?.name,
+            targetOrg: targetOrg.name,
           },
         },
         { status: 403, headers: corsHeaders }
       );
     }
 
-    // COMPROBACIÓN 3: Permiso de Subida de Archivos
-    if (!usuario.puede_subir) {
+    // CHECK 3: Upload Permissions (RBAC)
+    if (!user.canUpload) {
       await addServiceLog({
-        accion: 'PERMISO_INSUFICIENTE',
-        estado: 'DENEGADO_SIN_PERMISO',
-        userId: usuario.id,
-        userName: usuario.nombre,
-        orgId: usuario.orgId,
-        orgNombre: orgUsuario?.nombre,
-        detalles: {
-          motivo: 'El usuario tiene rol de visitante y no tiene permiso puede_subir=true.',
-          archivo: fileName,
+        action: 'INSUFFICIENT_PERMISSIONS',
+        status: 'DENIED_NO_PERMISSION',
+        userId: user.id,
+        userName: user.name,
+        orgId: user.orgId,
+        orgName: userOrg?.name,
+        details: {
+          reason: 'User has a viewer role and lacks upload authorization.',
+          fileName,
         },
       });
 
@@ -124,28 +124,28 @@ export async function POST(req: NextRequest) {
         {
           error: 'Forbidden',
           code: 'FORBIDDEN_NO_PERMISSION',
-          message: `Permiso Denegado: El usuario '${usuario.nombre}' no tiene autorización para subir archivos a ${orgUsuario?.nombre}.`,
+          message: `Permission Denied: User '${user.name}' is not authorized to upload files to '${userOrg?.name}'.`,
         },
         { status: 403, headers: corsHeaders }
       );
     }
 
-    // SI PASÓ TODAS LAS COMPROBACIONES -> GENERAR TICKET Y RUTA S3
+    // ALL CHECKS PASSED -> Generate Ticket & S3 Keys
     const fileId = crypto.randomUUID();
     const ticketId = crypto.randomUUID();
     const timestamp = Date.now();
-    const orgSlug = orgDestino.slug;
+    const orgSlug = targetOrg.slug;
 
-    // Clasificación de tipología (imágenes, documentos, videos)
-    let tipo = 'documentos';
-    if (fileType.startsWith('image/')) tipo = 'imagenes';
-    else if (fileType.startsWith('video/')) tipo = 'videos';
+    // Resource categorization (images, documents, videos)
+    let resourceType: 'images' | 'documents' | 'videos' = 'documents';
+    if (fileType.startsWith('image/')) resourceType = 'images';
+    else if (fileType.startsWith('video/')) resourceType = 'videos';
 
-    // Ruta estricta de aterrizaje solicitada para AWS S3: pendientes/{userId}/{fileName}
-    const landingZoneKey = `pendientes/${usuario.id}/${fileName}`;
-    const permanentTargetKey = `Organizaciones/${orgSlug}/${tipo}/${visibilidad}/${ticketId}-${fileName}`;
+    // Standardized S3 Key hierarchy
+    const landingZoneKey = `pending/${user.id}/${fileName}`;
+    const permanentTargetKey = `organizations/${orgSlug}/${resourceType}/${visibility}/${ticketId}-${fileName}`;
 
-    // Determinar si usamos AWS S3 real o modo Mock de respaldo
+    // Determine AWS S3 direct upload vs Mock fallback
     const forceMock = req.headers.get('x-mock-mode') === 'true' && !isAwsConfigured();
     let uploadUrl = '';
     let isRealS3 = false;
@@ -158,11 +158,11 @@ export async function POST(req: NextRequest) {
           isRealS3 = true;
         }
       } catch (s3Err: any) {
-        console.error('Error generando URL prefirmada de AWS S3:', s3Err.message);
+        console.error('Error generating AWS S3 Presigned URL:', s3Err.message);
       }
     }
 
-    // Fallback a URL simulada si AWS no está configurado aún o falló la firma
+    // Fallback URL if AWS S3 is not yet configured
     if (!uploadUrl) {
       const host = req.headers.get('host') || 'localhost:3000';
       const protocol = host.includes('localhost') ? 'http' : 'https';
@@ -170,22 +170,19 @@ export async function POST(req: NextRequest) {
       isRealS3 = false;
     }
 
-    // 1. Guardar archivo en la base de datos (tabla estandarizada 'files' con fallback a 'archivos')
+    // 1. Insert file record into Supabase (files table with fallback to archivos)
     try {
-      const resourceTypeEnglish = tipo === 'imagenes' ? 'images' : (tipo === 'videos' ? 'videos' : 'documents');
-      const visibilityEnglish = visibilidad === 'publicos' ? 'public' : 'private';
-
       const { error: englishErr } = await supabase.from('files').insert({
         id: fileId,
         ticket_id: ticketId,
-        user_id: usuario.id,
-        org_id: orgDestino.id,
+        user_id: user.id,
+        org_id: targetOrg.id,
         original_name: fileName,
         mime_type: fileType,
         size_bytes: fileSize,
-        sha256_hash: hashSha256,
-        resource_type: resourceTypeEnglish,
-        visibility: visibilityEnglish,
+        sha256_hash: sha256Hash,
+        resource_type: resourceType,
+        visibility,
         s3_pending_key: landingZoneKey,
         s3_processed_key: permanentTargetKey,
         status: 'pending_upload',
@@ -193,50 +190,50 @@ export async function POST(req: NextRequest) {
       });
 
       if (englishErr) {
-        // Fallback si la base de datos aún no ejecuta la migración a inglés
-        const { error: fileErr } = await supabase.from('archivos').insert({
+        // Fallback to Spanish table if not yet migrated
+        const spanishVisibility = visibility === 'private' ? 'privados' : 'publicos';
+        const spanishType = resourceType === 'images' ? 'imagenes' : resourceType;
+
+        await supabase.from('archivos').insert({
           id: fileId,
           ticket_id: ticketId,
-          user_id: usuario.id,
-          org_id: orgDestino.id,
+          user_id: user.id,
+          org_id: targetOrg.id,
           nombre_original: fileName,
           formato: fileType,
           tamano_bytes: fileSize,
-          hash_sha256: hashSha256,
-          tipo_recurso: tipo,
-          visibilidad: visibilidad,
+          hash_sha256: sha256Hash,
+          tipo_recurso: spanishType,
+          visibilidad: spanishVisibility,
           s3_key_pendiente: landingZoneKey,
           s3_key_procesado: permanentTargetKey,
           estado: 'pendiente_subida',
           created_at: new Date(timestamp).toISOString(),
         });
-        if (fileErr) {
-          console.warn('Advertencia insertando en tabla archivos de Supabase:', fileErr.message);
-        }
       }
     } catch (dbErr: any) {
-      console.error('Error insertando en tabla de archivos de Supabase:', dbErr.message);
+      console.error('Error inserting file in Supabase:', dbErr.message);
     }
 
-    // 2. Registrar evento en la tabla 'logs_servicio' de Supabase
+    // 2. Record audit log event in Supabase
     await addServiceLog({
-      accion: 'TICKET_EMITIDO',
-      estado: 'PERMITIDO',
-      userId: usuario.id,
-      userName: usuario.nombre,
-      orgId: usuario.orgId,
-      orgNombre: orgUsuario?.nombre,
+      action: 'TICKET_ISSUED',
+      status: 'ALLOWED',
+      userId: user.id,
+      userName: user.name,
+      orgId: user.orgId,
+      orgName: userOrg?.name,
       targetOrgId: orgId,
-      detalles: {
+      details: {
         ticketId,
         fileId,
-        archivo: fileName,
-        tamano: fileSize,
-        tipo,
-        visibilidad,
-        modo: isRealS3 ? 'AWS_S3_REAL' : 'MOCK_SIMULADO',
+        fileName,
+        fileSize,
+        resourceType,
+        visibility,
+        mode: isRealS3 ? 'REAL_AWS_S3' : 'MOCK_SIMULATED',
         s3Landing: landingZoneKey,
-        s3Permanente: permanentTargetKey,
+        s3Permanent: permanentTargetKey,
       },
     });
 
@@ -247,30 +244,41 @@ export async function POST(req: NextRequest) {
         uploadUrl,
         isRealS3,
         isMultipart: fileSize > 20 * 1024 * 1024,
-        usuario: {
-          id: usuario.id,
-          nombre: usuario.nombre,
-          rol: usuario.rol,
+        user: {
+          id: user.id,
+          name: user.name,
+          role: user.role,
         },
-        organizacion: {
-          id: orgDestino.id,
-          nombre: orgDestino.nombre,
-          slug: orgDestino.slug,
+        organization: {
+          id: targetOrg.id,
+          name: targetOrg.name,
+          slug: targetOrg.slug,
         },
         s3Hierarchy: {
           landingZone: landingZoneKey,
           permanentTarget: permanentTargetKey,
         },
         metadata: {
-          userId: usuario.id,
-          orgId: orgDestino.id,
+          userId: user.id,
+          orgId: targetOrg.id,
           orgSlug,
-          visibilidad,
+          visibility,
           fileName,
           fileSize,
-          hashSha256,
+          sha256Hash,
           isRealS3,
           issuedAt: new Date(timestamp).toISOString(),
+        },
+        // Backward compatibility fields for frontend/postman
+        usuario: {
+          id: user.id,
+          nombre: user.name,
+          rol: user.role,
+        },
+        organizacion: {
+          id: targetOrg.id,
+          nombre: targetOrg.name,
+          slug: targetOrg.slug,
         },
       },
       { status: 200, headers: corsHeaders }
@@ -283,12 +291,12 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// 3. Confirmación de recepción / Fallback Mock PUT
+// 3. Upload Confirmation / Mock PUT Fallback
 export async function PUT(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const ticketId = searchParams.get('ticketId') || 'unknown';
 
-  // 1. Actualizar estado del archivo en Supabase (tabla 'files' con fallback a 'archivos')
+  // 1. Update file status in Supabase
   try {
     const nowIso = new Date().toISOString();
     const { error: errFiles } = await supabase
@@ -301,7 +309,7 @@ export async function PUT(req: NextRequest) {
       .eq('ticket_id', ticketId);
 
     if (errFiles) {
-      const { error: errArchivos } = await supabase
+      await supabase
         .from('archivos')
         .update({
           estado: 'completado',
@@ -309,29 +317,25 @@ export async function PUT(req: NextRequest) {
           updated_at: nowIso,
         })
         .eq('ticket_id', ticketId);
-
-      if (errArchivos) {
-        console.warn('Advertencia actualizando archivo en Supabase:', errArchivos.message);
-      }
     }
   } catch (dbErr: any) {
-    console.error('Error actualizando archivo en Supabase:', dbErr.message);
+    console.error('Error updating file in Supabase:', dbErr.message);
   }
 
-  // 2. Registrar evento en la tabla 'logs_servicio' de Supabase
+  // 2. Record confirmation audit event
   await addServiceLog({
-    accion: 'RECEPCION_S3',
-    estado: 'SUBIDO_LANDING',
-    detalles: {
+    action: 'S3_UPLOAD_CONFIRMED',
+    status: 'UPLOADED_LANDING',
+    details: {
       ticketId,
-      mensaje: `Archivo confirmado en zona pendientes/ para el ticket ${ticketId}`,
+      message: `File confirmed in S3 landing zone for ticket ${ticketId}`,
     },
   });
 
   return NextResponse.json(
     {
       status: 'success',
-      message: `Archivo confirmado en zona pendientes/ para ticket ${ticketId} y registrado en Supabase`,
+      message: `File upload confirmed for ticket ${ticketId}`,
       ticketId,
       s3Status: 'uploaded_to_landing',
     },

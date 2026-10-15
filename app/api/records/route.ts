@@ -13,14 +13,14 @@ export async function OPTIONS() {
 
 export async function GET() {
   try {
-    // 1. Intentar consulta relacional sobre la tabla estandarizada en inglés: files
+    // 1. Query standardized English table: files
     let { data, error } = await supabase
       .from('files')
       .select('*, users(name, email, role), organizations(name, slug)')
       .order('created_at', { ascending: false })
       .limit(50);
 
-    // 2. Si files no existe, fallback a archivos
+    // 2. Fallback to archivos if table not yet migrated
     if (error) {
       const fallbackArchivos = await supabase
         .from('archivos')
@@ -47,14 +47,14 @@ export async function GET() {
       return NextResponse.json({ error: error.message, records: [] }, { status: 500, headers: corsHeaders });
     }
 
-    // Normalizar formato de salida compatible para Postman y Frontend
+    // Format output with unified English fields and backward-compatible fallbacks
     const formattedRecords = (data || []).map((row: any) => ({
       ...row,
       fileName: row.original_name || row.nombre_original || 'unknown',
       mimeType: row.mime_type || row.formato,
       sizeBytes: row.size_bytes || row.tamano_bytes,
       sha256Hash: row.sha256_hash || row.hash_sha256,
-      userName: row.users?.name || row.usuarios?.nombre || row.user_name || 'Desconocido',
+      userName: row.users?.name || row.usuarios?.nombre || row.user_name || 'Unknown',
       userEmail: row.users?.email || row.usuarios?.email || null,
       orgName: row.organizations?.name || row.organizaciones?.nombre || null,
       orgSlug: row.organizations?.slug || row.organizaciones?.slug || null,
@@ -74,7 +74,7 @@ export async function DELETE() {
     await supabase.from('files').delete().neq('id', '00000000-0000-0000-0000-000000000000');
     await supabase.from('archivos').delete().neq('id', '00000000-0000-0000-0000-000000000000');
 
-    return NextResponse.json({ message: 'Registros de archivos limpiados en Supabase' }, { status: 200, headers: corsHeaders });
+    return NextResponse.json({ message: 'File records cleared successfully' }, { status: 200, headers: corsHeaders });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500, headers: corsHeaders });
   }

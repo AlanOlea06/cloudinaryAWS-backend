@@ -5,7 +5,7 @@ const region = process.env.AWS_REGION || 'us-east-1';
 const bucketName = process.env.AWS_S3_BUCKET_NAME || '';
 
 /**
- * Verifica si las credenciales y el bucket de AWS están configurados
+ * Checks if AWS S3 credentials and bucket name are configured in environment variables
  */
 export function isAwsConfigured(): boolean {
   return Boolean(
@@ -16,7 +16,7 @@ export function isAwsConfigured(): boolean {
 }
 
 /**
- * Instancia del cliente de S3 configurado con las credenciales de entorno
+ * Returns an S3Client instance configured with environment credentials
  */
 export function getS3Client(): S3Client | null {
   if (!isAwsConfigured()) {
@@ -33,11 +33,11 @@ export function getS3Client(): S3Client | null {
 }
 
 /**
- * Genera una URL pre-firmada real de AWS S3 para subida directa (PUT)
+ * Generates an AWS S3 Presigned URL for direct client upload (PUT)
  * 
- * @param key Ruta dentro del bucket (ej: pendientes/{userId}/{fileName})
- * @param contentType Tipo MIME del archivo (ej: image/png)
- * @param expiresInSeconds Tiempo de expiración en segundos (por defecto 900 = 15 min)
+ * @param key Destination path within the bucket (e.g. pending/{userId}/{fileName})
+ * @param contentType MIME type of the file (e.g. image/png)
+ * @param expiresInSeconds Lifetime in seconds (default 900 = 15 minutes)
  */
 export async function generatePresignedUploadUrl(
   key: string,
@@ -59,10 +59,10 @@ export async function generatePresignedUploadUrl(
 }
 
 /**
- * Elimina objetos de S3 cuyo prefijo coincida (ej: pendientes/{userId}/)
+ * Deletes S3 objects matching a given prefix (e.g. pending/{userId}/)
  * 
- * @param prefix Prefijo a buscar y eliminar
- * @returns Número de objetos eliminados
+ * @param prefix S3 Key prefix to search and delete
+ * @returns Object with count and deleted keys
  */
 export async function deleteS3ObjectsByPrefix(prefix: string): Promise<{ count: number; keys: string[] }> {
   const client = getS3Client();
@@ -105,7 +105,7 @@ export async function deleteS3ObjectsByPrefix(prefix: string): Promise<{ count: 
       keys: deletedKeys,
     };
   } catch (error) {
-    console.error('Error eliminando objetos en S3 por prefijo:', error);
+    console.error('Error deleting S3 objects by prefix:', error);
     throw error;
   }
 }

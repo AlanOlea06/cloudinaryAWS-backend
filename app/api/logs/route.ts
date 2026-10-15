@@ -18,5 +18,5 @@ export async function GET() {
 
 export async function DELETE() {
   await clearServiceLogs();
-  return NextResponse.json({ message: 'Logs de servicio reiniciados con éxito' }, { status: 200, headers: corsHeaders });
+  return NextResponse.json({ message: 'Service logs cleared successfully' }, { status: 200, headers: corsHeaders });
 }

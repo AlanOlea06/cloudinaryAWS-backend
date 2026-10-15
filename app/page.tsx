@@ -5,52 +5,59 @@ import React, { useState, useEffect } from 'react';
 interface ServiceLog {
   id: string;
   timestamp: string;
-  accion: string;
-  estado: 'PERMITIDO' | 'DENEGADO_NO_REGISTRADO' | 'DENEGADO_OTRA_ORG' | 'DENEGADO_SIN_PERMISO' | 'SUBIDO_LANDING';
+  action: string;
+  status: string;
   userId?: string;
   userName?: string;
   orgId?: string;
-  orgNombre?: string;
+  orgName?: string;
   targetOrgId?: string;
-  detalles: any;
+  details: any;
 }
 
-interface ArchivoRecord {
+interface FileRecord {
   id: string;
   ticket_id: string;
-  user_name: string;
-  nombre_original: string;
-  tamano_bytes: number;
-  tipo_recurso: string;
-  visibilidad: string;
-  estado: string;
-  s3_key_procesado: string;
+  userName?: string;
+  user_name?: string;
+  fileName?: string;
+  nombre_original?: string;
+  sizeBytes?: number;
+  tamano_bytes?: number;
+  resource_type?: string;
+  tipo_recurso?: string;
+  visibility?: string;
+  visibilidad?: string;
+  status?: string;
+  estado?: string;
+  s3_processed_key?: string;
+  s3_key_procesado?: string;
   created_at: string;
 }
 
 export default function ServiceLogsPage() {
   const [logs, setLogs] = useState<ServiceLog[]>([]);
-  const [archivos, setArchivos] = useState<ArchivoRecord[]>([]);
-  const [activeTab, setActiveTab] = useState<'LOGS' | 'ARCHIVOS'>('LOGS');
-  const [filter, setFilter] = useState<'ALL' | 'PERMITIDO' | 'DENEGADO'>('ALL');
+  const [files, setFiles] = useState<FileRecord[]>([]);
+  const [activeTab, setActiveTab] = useState<'LOGS' | 'FILES'>('LOGS');
+  const [filter, setFilter] = useState<'ALL' | 'ALLOWED' | 'DENIED'>('ALL');
   const [loading, setLoading] = useState<boolean>(true);
   const [lastUpdated, setLastUpdated] = useState<string>('');
 
   const fetchData = async () => {
     try {
       setLoading(true);
-      // 1. Logs de servicio desde Supabase
+      // 1. Audit logs from Supabase
       const resLogs = await fetch('/api/logs');
       if (resLogs.ok) {
         const dataLogs = await resLogs.json();
         setLogs(dataLogs.logs || []);
       }
 
-      // 2. Archivos desde Supabase
-      const resArchivos = await fetch('/api/records');
-      if (resArchivos.ok) {
-        const dataArchivos = await resArchivos.json();
-        setArchivos(dataArchivos.records || []);
+      // 2. Files from Supabase
+      const resFiles = await fetch('/api/records');
+      if (resFiles.ok) {
+        const dataFiles = await resFiles.json();
+        setFiles(dataFiles.records || []);
       }
 
       setLastUpdated(new Date().toLocaleTimeString());
@@ -62,8 +69,8 @@ export default function ServiceLogsPage() {
   };
 
   const clearData = async () => {
-    const target = activeTab === 'LOGS' ? 'los logs de servicio' : 'los registros de archivos';
-    if (!confirm(`¿Deseas reiniciar ${target} en Supabase?`)) return;
+    const target = activeTab === 'LOGS' ? 'service logs' : 'file records';
+    if (!confirm(`Do you want to clear ${target} in Supabase?`)) return;
     try {
       const url = activeTab === 'LOGS' ? '/api/logs' : '/api/records';
       await fetch(url, { method: 'DELETE' });
@@ -75,35 +82,39 @@ export default function ServiceLogsPage() {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 4000); // Polling cada 4s
+    const interval = setInterval(fetchData, 4000); // Polling every 4s
     return () => clearInterval(interval);
   }, []);
 
   const filteredLogs = logs.filter((l) => {
+    const status = l.status || (l as any).estado || '';
     if (filter === 'ALL') return true;
-    if (filter === 'PERMITIDO') return l.estado === 'PERMITIDO' || l.estado === 'SUBIDO_LANDING';
-    if (filter === 'DENEGADO') return l.estado.startsWith('DENEGADO');
+    if (filter === 'ALLOWED') return status === 'ALLOWED' || status === 'PERMITIDO' || status === 'UPLOADED_LANDING' || status === 'SUBIDO_LANDING';
+    if (filter === 'DENIED') return status.startsWith('DENIED') || status.startsWith('DENEGADO');
     return true;
   });
 
-  const getStatusBadge = (estado: string) => {
-    switch (estado) {
-      case 'PERMITIDO':
-        return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">PERMITIDO</span>;
-      case 'SUBIDO_LANDING':
-      case 'completado':
-        return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/10 text-cyan-400 border border-cyan-500/30">COMPLETADO</span>;
-      case 'pendiente_subida':
-        return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">PENDIENTE</span>;
-      case 'DENEGADO_OTRA_ORG':
-        return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/40">VIOLACIÓN MULTI-TENANT</span>;
-      case 'DENEGADO_SIN_PERMISO':
-        return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/40">SIN PERMISOS</span>;
-      case 'DENEGADO_NO_REGISTRADO':
-        return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/40">NO REGISTRADO</span>;
-      default:
-        return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-700 text-slate-300">{estado}</span>;
+  const getStatusBadge = (statusInput: string) => {
+    const status = statusInput?.toUpperCase() || '';
+    if (status === 'ALLOWED' || status === 'PERMITIDO') {
+      return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">ALLOWED</span>;
     }
+    if (status === 'COMPLETED' || status === 'UPLOADED_LANDING' || status === 'SUBIDO_LANDING' || status === 'COMPLETADO') {
+      return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/10 text-cyan-400 border border-cyan-500/30">COMPLETED</span>;
+    }
+    if (status === 'PENDING' || status === 'PENDING_UPLOAD' || status === 'PENDIENTE_SUBIDA') {
+      return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">PENDING</span>;
+    }
+    if (status.includes('CROSS_ORG') || status.includes('OTRA_ORG')) {
+      return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/40">MULTI-TENANT VIOLATION</span>;
+    }
+    if (status.includes('PERMISSION') || status.includes('PERMISOS')) {
+      return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/40">NO PERMISSION</span>;
+    }
+    if (status.includes('NOT_REGISTERED') || status.includes('NO_REGISTRADO')) {
+      return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/40">NOT REGISTERED</span>;
+    }
+    return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-700 text-slate-300">{statusInput}</span>;
   };
 
   return (
@@ -116,14 +127,14 @@ export default function ServiceLogsPage() {
               <i className="fa-solid fa-server"></i>
             </div>
             <h1 className="text-xl font-bold text-white tracking-tight">
-              Monitor de Base de Datos y Logs en Supabase
+              Supabase Database & Service Logs Monitor
             </h1>
             <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-              🟢 Conectado a Supabase
+              🟢 Connected to Supabase
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Persistencia activa en las tablas <code>logs_servicio</code> y <code>archivos</code> de PostgreSQL en Supabase.
+            Real-time persistence in PostgreSQL tables <code>service_logs</code> and <code>files</code>.
           </p>
         </div>
 
@@ -134,14 +145,14 @@ export default function ServiceLogsPage() {
             className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 border border-slate-700 transition flex items-center gap-1.5"
           >
             <i className={`fa-solid fa-arrows-rotate ${loading ? 'fa-spin' : ''}`}></i>
-            Actualizar
+            Refresh
           </button>
           <button
             onClick={clearData}
             className="px-3 py-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-xs text-rose-300 border border-rose-800/50 transition flex items-center gap-1.5"
           >
             <i className="fa-solid fa-trash-can"></i>
-            Limpiar {activeTab === 'LOGS' ? 'Logs' : 'Archivos'}
+            Clear {activeTab === 'LOGS' ? 'Logs' : 'Files'}
           </button>
         </div>
       </header>
@@ -157,111 +168,116 @@ export default function ServiceLogsPage() {
           }`}
         >
           <i className="fa-solid fa-list-check"></i>
-          Tabla &apos;logs_servicio&apos; ({logs.length})
+          &apos;service_logs&apos; Table ({logs.length})
         </button>
         <button
-          onClick={() => setActiveTab('ARCHIVOS')}
+          onClick={() => setActiveTab('FILES')}
           className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
-            activeTab === 'ARCHIVOS'
+            activeTab === 'FILES'
               ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20'
               : 'bg-slate-900 text-slate-400 hover:text-slate-200'
           }`}
         >
           <i className="fa-solid fa-database"></i>
-          Tabla &apos;archivos&apos; ({archivos.length})
+          &apos;files&apos; Table ({files.length})
         </button>
       </div>
 
-      {/* VISTA 1: TABLA LOGS_SERVICIO */}
+      {/* VIEW 1: SERVICE_LOGS TABLE */}
       {activeTab === 'LOGS' && (
         <section className="space-y-4">
-          {/* Métricas Rápidas */}
+          {/* Quick Metrics */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4">
               <span className="text-xs text-slate-400 uppercase font-mono">Total Logs</span>
               <p className="text-2xl font-bold text-white mt-1">{logs.length}</p>
             </div>
             <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4">
-              <span className="text-xs text-emerald-400 uppercase font-mono">Permitidos</span>
+              <span className="text-xs text-emerald-400 uppercase font-mono">Allowed</span>
               <p className="text-2xl font-bold text-emerald-400 mt-1">
-                {logs.filter((l) => l.estado === 'PERMITIDO' || l.estado === 'SUBIDO_LANDING').length}
+                {logs.filter((l) => (l.status || (l as any).estado) === 'ALLOWED' || (l.status || (l as any).estado) === 'PERMITIDO').length}
               </p>
             </div>
             <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4">
-              <span className="text-xs text-rose-400 uppercase font-mono">Denegados / Ataques</span>
+              <span className="text-xs text-rose-400 uppercase font-mono">Denied / Violations</span>
               <p className="text-2xl font-bold text-rose-400 mt-1">
-                {logs.filter((l) => l.estado.startsWith('DENEGADO')).length}
+                {logs.filter((l) => ((l.status || (l as any).estado) || '').startsWith('DENIED') || ((l.status || (l as any).estado) || '').startsWith('DENEGADO')).length}
               </p>
             </div>
             <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
-              <span className="text-xs text-slate-400 font-mono">Filtro:</span>
+              <span className="text-xs text-slate-400 font-mono">Filter:</span>
               <div className="flex items-center gap-1 mt-1 text-xs">
                 <button
                   onClick={() => setFilter('ALL')}
                   className={`px-2.5 py-1 rounded transition ${filter === 'ALL' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}
                 >
-                  Todos
+                  All
                 </button>
                 <button
-                  onClick={() => setFilter('PERMITIDO')}
-                  className={`px-2.5 py-1 rounded transition ${filter === 'PERMITIDO' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-400'}`}
+                  onClick={() => setFilter('ALLOWED')}
+                  className={`px-2.5 py-1 rounded transition ${filter === 'ALLOWED' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-400'}`}
                 >
-                  Éxitos
+                  Allowed
                 </button>
                 <button
-                  onClick={() => setFilter('DENEGADO')}
-                  className={`px-2.5 py-1 rounded transition ${filter === 'DENEGADO' ? 'bg-rose-600 text-white' : 'bg-slate-800 text-slate-400'}`}
+                  onClick={() => setFilter('DENIED')}
+                  className={`px-2.5 py-1 rounded transition ${filter === 'DENIED' ? 'bg-rose-600 text-white' : 'bg-slate-800 text-slate-400'}`}
                 >
-                  Denegados
+                  Denied
                 </button>
               </div>
             </div>
           </div>
 
-          {/* Tabla de Logs */}
+          {/* Logs Table */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs font-mono">
                 <thead className="bg-slate-950/70 text-slate-400 uppercase text-[10px] border-b border-slate-800">
                   <tr>
-                    <th className="py-2.5 px-4">Hora</th>
-                    <th className="py-2.5 px-4">Acción</th>
-                    <th className="py-2.5 px-4">Estado</th>
-                    <th className="py-2.5 px-4">Usuario</th>
-                    <th className="py-2.5 px-4">Organización</th>
-                    <th className="py-2.5 px-4">Detalles</th>
+                    <th className="py-2.5 px-4">Time</th>
+                    <th className="py-2.5 px-4">Action</th>
+                    <th className="py-2.5 px-4">Status</th>
+                    <th className="py-2.5 px-4">User</th>
+                    <th className="py-2.5 px-4">Organization</th>
+                    <th className="py-2.5 px-4">Details</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 text-slate-300">
                   {filteredLogs.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="py-8 text-center text-slate-500 italic">
-                        No hay logs en la tabla &apos;logs_servicio&apos; de Supabase.
+                        No logs recorded yet in Supabase.
                       </td>
                     </tr>
                   ) : (
                     filteredLogs.map((log) => {
                       const time = new Date(log.timestamp).toLocaleTimeString();
-                      const isDeny = log.estado.startsWith('DENEGADO');
+                      const status = log.status || (log as any).estado || '';
+                      const isDeny = status.startsWith('DENIED') || status.startsWith('DENEGADO');
+                      const details = log.details || (log as any).detalles || {};
+                      const action = log.action || (log as any).accion || '--';
+
                       return (
                         <tr key={log.id} className={`hover:bg-slate-800/40 transition ${isDeny ? 'bg-rose-950/10' : ''}`}>
                           <td className="py-3 px-4 text-slate-400 whitespace-nowrap">{time}</td>
-                          <td className="py-3 px-4 font-bold text-slate-200">{log.accion}</td>
-                          <td className="py-3 px-4">{getStatusBadge(log.estado)}</td>
+                          <td className="py-3 px-4 font-bold text-slate-200">{action}</td>
+                          <td className="py-3 px-4">{getStatusBadge(status)}</td>
                           <td className="py-3 px-4 text-indigo-300 font-medium">{log.userName || log.userId || '--'}</td>
-                          <td className="py-3 px-4 text-slate-300">{log.orgNombre || log.orgId || '--'}</td>
+                          <td className="py-3 px-4 text-slate-300">{log.orgName || (log as any).orgNombre || log.orgId || '--'}</td>
                           <td className="py-3 px-4 text-slate-400 max-w-md">
-                            {log.detalles?.alerta && (
-                              <div className="text-rose-400 font-bold text-[11px] mb-0.5">⚠️ {log.detalles.alerta}</div>
+                            {details.alert && (
+                              <div className="text-rose-400 font-bold text-[11px] mb-0.5">⚠️ {details.alert}</div>
                             )}
-                            {log.detalles?.motivo && <div className="text-amber-300 text-[11px]">{log.detalles.motivo}</div>}
-                            {log.detalles?.s3Permanente && (
-                              <div className="text-cyan-400 text-[10px] truncate" title={log.detalles.s3Permanente}>
-                                ➔ {log.detalles.s3Permanente}
+                            {details.reason && <div className="text-amber-300 text-[11px]">{details.reason}</div>}
+                            {details.motivo && <div className="text-amber-300 text-[11px]">{details.motivo}</div>}
+                            {(details.s3Permanent || details.s3Permanente) && (
+                              <div className="text-cyan-400 text-[10px] truncate" title={details.s3Permanent || details.s3Permanente}>
+                                ➔ {details.s3Permanent || details.s3Permanente}
                               </div>
                             )}
-                            {log.detalles?.mensaje && !log.detalles?.s3Permanente && (
-                              <div className="text-[11px]">{log.detalles.mensaje}</div>
+                            {details.message && !details.s3Permanent && !details.s3Permanente && (
+                              <div className="text-[11px]">{details.message}</div>
                             )}
                           </td>
                         </tr>
@@ -275,42 +291,52 @@ export default function ServiceLogsPage() {
         </section>
       )}
 
-      {/* VISTA 2: TABLA ARCHIVOS */}
-      {activeTab === 'ARCHIVOS' && (
+      {/* VIEW 2: FILES TABLE */}
+      {activeTab === 'FILES' && (
         <section className="space-y-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs font-mono">
                 <thead className="bg-slate-950/70 text-slate-400 uppercase text-[10px] border-b border-slate-800">
                   <tr>
-                    <th className="py-2.5 px-4">Nombre Original</th>
-                    <th className="py-2.5 px-4">Usuario</th>
-                    <th className="py-2.5 px-4">Estado</th>
-                    <th className="py-2.5 px-4">Tipo / Acceso</th>
-                    <th className="py-2.5 px-4">Tamaño</th>
-                    <th className="py-2.5 px-4">Ruta S3 en BD</th>
+                    <th className="py-2.5 px-4">Original Name</th>
+                    <th className="py-2.5 px-4">User</th>
+                    <th className="py-2.5 px-4">Status</th>
+                    <th className="py-2.5 px-4">Type / Access</th>
+                    <th className="py-2.5 px-4">Size</th>
+                    <th className="py-2.5 px-4">S3 Key in DB</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                  {archivos.length === 0 ? (
+                  {files.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="py-8 text-center text-slate-500 italic">
-                        No hay archivos registrados aún en la tabla &apos;archivos&apos; de Supabase.
+                        No files recorded yet in Supabase.
                       </td>
                     </tr>
                   ) : (
-                    archivos.map((file) => (
-                      <tr key={file.id} className="hover:bg-slate-800/40 transition">
-                        <td className="py-3 px-4 font-bold text-slate-200">{file.nombre_original}</td>
-                        <td className="py-3 px-4 text-indigo-300">{file.user_name || '--'}</td>
-                        <td className="py-3 px-4">{getStatusBadge(file.estado)}</td>
-                        <td className="py-3 px-4 text-slate-400">{file.tipo_recurso} ({file.visibilidad})</td>
-                        <td className="py-3 px-4 text-slate-400">{(file.tamano_bytes / 1024).toFixed(1)} KB</td>
-                        <td className="py-3 px-4 text-cyan-400 truncate max-w-xs" title={file.s3_key_procesado}>
-                          {file.s3_key_procesado || '--'}
-                        </td>
-                      </tr>
-                    ))
+                    files.map((file) => {
+                      const fileName = file.fileName || file.nombre_original || 'unknown';
+                      const userName = file.userName || file.user_name || '--';
+                      const status = file.status || file.estado || 'pending';
+                      const sizeBytes = file.sizeBytes || file.tamano_bytes || 0;
+                      const resourceType = file.resource_type || file.tipo_recurso || 'document';
+                      const visibility = file.visibility || file.visibilidad || 'private';
+                      const s3Key = file.s3_processed_key || file.s3_key_procesado || '--';
+
+                      return (
+                        <tr key={file.id} className="hover:bg-slate-800/40 transition">
+                          <td className="py-3 px-4 font-bold text-slate-200">{fileName}</td>
+                          <td className="py-3 px-4 text-indigo-300">{userName}</td>
+                          <td className="py-3 px-4">{getStatusBadge(status)}</td>
+                          <td className="py-3 px-4 text-slate-400">{resourceType} ({visibility})</td>
+                          <td className="py-3 px-4 text-slate-400">{(sizeBytes / 1024).toFixed(1)} KB</td>
+                          <td className="py-3 px-4 text-cyan-400 truncate max-w-xs" title={s3Key}>
+                            {s3Key}
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
