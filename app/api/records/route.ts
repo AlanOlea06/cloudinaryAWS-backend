@@ -20,7 +20,21 @@ export async function GET() {
       .order('created_at', { ascending: false })
       .limit(50);
 
-    // 2. Fallback to archivos if table not yet migrated
+    // 2. If relational query on files failed, try simple files query first
+    if (error) {
+      const simpleFiles = await supabase
+        .from('files')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      if (!simpleFiles.error && simpleFiles.data) {
+        data = simpleFiles.data;
+        error = null;
+      }
+    }
+
+    // 3. Fallback to archivos if files table does not exist
     if (error) {
       const fallbackArchivos = await supabase
         .from('archivos')
