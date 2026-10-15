@@ -32,12 +32,12 @@ export const ORGANIZACIONES: Record<string, MockOrg> = {
   '11111111-1111-1111-1111-111111111111': {
     id: '11111111-1111-1111-1111-111111111111',
     nombre: 'Organización 1',
-    slug: 'organizacion_1',
+    slug: 'organization_1',
   },
   '22222222-2222-2222-2222-222222222222': {
     id: '22222222-2222-2222-2222-222222222222',
     nombre: 'Organización 2',
-    slug: 'organizacion_2',
+    slug: 'organization_2',
   },
 };
 
@@ -71,7 +71,7 @@ if (!globalForLogs.serviceLogs) {
 }
 
 /**
- * Guarda un evento de auditoría tanto en memoria como en la tabla logs_servicio de Supabase
+ * Guarda un evento de auditoría en memoria y en la tabla service_logs (o logs_servicio)
  */
 export async function addServiceLog(log: Omit<ServiceLog, 'id' | 'timestamp'>): Promise<ServiceLog> {
   const newLog: ServiceLog = {
@@ -80,34 +80,50 @@ export async function addServiceLog(log: Omit<ServiceLog, 'id' | 'timestamp'>): 
     timestamp: new Date().toISOString(),
   };
 
-  // 1. Guardar en memoria para respuesta ultra rápida
+  // 1. Guardar en memoria
   const logs = globalForLogs.serviceLogs || [];
   logs.unshift(newLog);
   if (logs.length > 100) logs.pop();
   globalForLogs.serviceLogs = logs;
 
-  // 2. Persistir en la tabla 'logs_servicio' en Supabase
+  // 2. Persistir en Supabase
   try {
     const validOrgId = log.orgId && UUID_REGEX.test(log.orgId) ? log.orgId : (log.targetOrgId && UUID_REGEX.test(log.targetOrgId) ? log.targetOrgId : null);
     const validUserId = log.userId && UUID_REGEX.test(log.userId) && log.userId !== '00000000-0000-0000-0000-000000000000' ? log.userId : null;
 
-    const { error } = await supabase.from('logs_servicio').insert({
+    // Intentar primero en la tabla estandarizada en inglés: service_logs
+    const { error: englishErr } = await supabase.from('service_logs').insert({
       id: newLog.id,
       org_id: validOrgId,
       user_id: validUserId,
-      accion: log.accion,
-      estado: log.estado,
-      detalles: {
+      action: log.accion,
+      status: log.estado,
+      file_name: log.detalles?.fileName || log.detalles?.archivo || null,
+      details: {
         ...log.detalles,
         userName: log.userName,
         orgNombre: log.orgNombre,
       },
-      ip_origen: log.detalles?.ip || '127.0.0.1',
+      ip_address: log.detalles?.ip || '127.0.0.1',
       created_at: newLog.timestamp,
     });
 
-    if (error) {
-      console.warn('Advertencia insertando en logs_servicio de Supabase:', error.message);
+    // Si falló (ej. tabla aún en español), insertar en logs_servicio
+    if (englishErr) {
+      await supabase.from('logs_servicio').insert({
+        id: newLog.id,
+        org_id: validOrgId,
+        user_id: validUserId,
+        accion: log.accion,
+        estado: log.estado,
+        detalles: {
+          ...log.detalles,
+          userName: log.userName,
+          orgNombre: log.orgNombre,
+        },
+        ip_origen: log.detalles?.ip || '127.0.0.1',
+        created_at: newLog.timestamp,
+      });
     }
   } catch (err: any) {
     console.error('Error persistiendo log en Supabase:', err.message);
@@ -117,28 +133,41 @@ export async function addServiceLog(log: Omit<ServiceLog, 'id' | 'timestamp'>): 
 }
 
 /**
- * Obtiene los logs de servicio directamente desde la tabla 'logs_servicio' en Supabase
+ * Obtiene los logs de servicio desde Supabase (service_logs o logs_servicio)
  */
 export async function getServiceLogs(): Promise<ServiceLog[]> {
   try {
-    const { data, error } = await supabase
-      .from('logs_servicio')
+    // Intentar primero desde tabla en inglés: service_logs
+    let { data, error } = await supabase
+      .from('service_logs')
       .select('*')
       .order('created_at', { ascending: false })
       .limit(50);
+
+    if (error) {
+      // Fallback a tabla en español
+      const fallback = await supabase
+        .from('logs_servicio')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      data = fallback.data;
+      error = fallback.error;
+    }
 
     if (!error && data && data.length > 0) {
       return data.map((row: any) => ({
         id: row.id,
         timestamp: row.created_at,
-        accion: row.accion,
-        estado: row.estado,
+        accion: row.action || row.accion,
+        estado: row.status || row.estado,
         userId: row.user_id,
-        userName: row.detalles?.userName || 'Desconocido',
+        userName: row.details?.userName || row.detalles?.userName || 'Desconocido',
         orgId: row.org_id,
-        orgNombre: row.detalles?.orgNombre || 'Organización',
-        targetOrgId: row.detalles?.targetOrgId,
-        detalles: row.detalles,
+        orgNombre: row.details?.orgNombre || row.detalles?.orgNombre || 'Organización',
+        targetOrgId: row.details?.targetOrgId || row.detalles?.targetOrgId,
+        detalles: row.details || row.detalles || {},
       }));
     }
   } catch (err) {
@@ -154,6 +183,7 @@ export async function getServiceLogs(): Promise<ServiceLog[]> {
 export async function clearServiceLogs(): Promise<void> {
   globalForLogs.serviceLogs = [];
   try {
+    await supabase.from('service_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
     await supabase.from('logs_servicio').delete().neq('id', '00000000-0000-0000-0000-000000000000');
   } catch (err) {
     console.error('Error limpiando logs en Supabase:', err);

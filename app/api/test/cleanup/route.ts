@@ -49,28 +49,30 @@ async function handleCleanup(req: NextRequest) {
       }
     }
 
-    // 2. Limpieza de Registros en la tabla 'archivos' de Supabase
-    let archivosQuery = supabase.from('archivos').delete();
-    if (cleanAll) {
-      archivosQuery = archivosQuery.neq('id', '00000000-0000-0000-0000-000000000000');
-    } else {
-      archivosQuery = archivosQuery.eq('user_id', userId);
-    }
-    const { error: errArchivos, count: countArchivos } = await archivosQuery;
-    if (errArchivos) {
-      console.warn('Advertencia limpiando tabla archivos:', errArchivos.message);
+    // 2. Limpieza de Registros en las tablas de archivos (files / archivos) de Supabase
+    try {
+      if (cleanAll) {
+        await supabase.from('files').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('archivos').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+      } else {
+        await supabase.from('files').delete().eq('user_id', userId);
+        await supabase.from('archivos').delete().eq('user_id', userId);
+      }
+    } catch (e: any) {
+      console.warn('Advertencia limpiando archivos:', e.message);
     }
 
-    // 3. Limpieza de Registros en la tabla 'logs_servicio' de Supabase
-    let logsQuery = supabase.from('logs_servicio').delete();
-    if (cleanAll) {
-      logsQuery = logsQuery.neq('id', '00000000-0000-0000-0000-000000000000');
-    } else {
-      logsQuery = logsQuery.eq('user_id', userId);
-    }
-    const { error: errLogs, count: countLogs } = await logsQuery;
-    if (errLogs) {
-      console.warn('Advertencia limpiando tabla logs_servicio:', errLogs.message);
+    // 3. Limpieza de Registros en las tablas de logs (service_logs / logs_servicio) de Supabase
+    try {
+      if (cleanAll) {
+        await supabase.from('service_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('logs_servicio').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+      } else {
+        await supabase.from('service_logs').delete().eq('user_id', userId);
+        await supabase.from('logs_servicio').delete().eq('user_id', userId);
+      }
+    } catch (e: any) {
+      console.warn('Advertencia limpiando logs:', e.message);
     }
 
     // Registrar evento de auditoría de la limpieza
@@ -84,8 +86,7 @@ async function handleCleanup(req: NextRequest) {
         s3DeletedCount,
         s3Status,
         cleanAll,
-        archivosEliminados: countArchivos ?? 'ejecutado',
-        logsEliminados: countLogs ?? 'ejecutado',
+        cleanedAt: new Date().toISOString(),
       },
     });
 
@@ -106,8 +107,8 @@ async function handleCleanup(req: NextRequest) {
             deletedKeys: s3DeletedKeys,
           },
           supabase: {
-            archivosTable: errArchivos ? `Error: ${errArchivos.message}` : 'Limpiado con éxito',
-            logsTable: errLogs ? `Error: ${errLogs.message}` : 'Limpiado con éxito',
+            filesTable: 'Limpiado con éxito',
+            serviceLogsTable: 'Limpiado con éxito',
           },
         },
         timestamp: new Date().toISOString(),

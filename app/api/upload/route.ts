@@ -170,30 +170,52 @@ export async function POST(req: NextRequest) {
       isRealS3 = false;
     }
 
-    // 1. Guardar archivo en la tabla 'archivos' de Supabase
+    // 1. Guardar archivo en la base de datos (tabla estandarizada 'files' con fallback a 'archivos')
     try {
-      const { error: fileErr } = await supabase.from('archivos').insert({
+      const resourceTypeEnglish = tipo === 'imagenes' ? 'images' : (tipo === 'videos' ? 'videos' : 'documents');
+      const visibilityEnglish = visibilidad === 'publicos' ? 'public' : 'private';
+
+      const { error: englishErr } = await supabase.from('files').insert({
         id: fileId,
         ticket_id: ticketId,
         user_id: usuario.id,
         org_id: orgDestino.id,
-        nombre_original: fileName,
-        formato: fileType,
-        tamano_bytes: fileSize,
-        hash_sha256: hashSha256,
-        tipo_recurso: tipo,
-        visibilidad: visibilidad,
-        s3_key_pendiente: landingZoneKey,
-        s3_key_procesado: permanentTargetKey,
-        estado: 'pendiente_subida',
+        original_name: fileName,
+        mime_type: fileType,
+        size_bytes: fileSize,
+        sha256_hash: hashSha256,
+        resource_type: resourceTypeEnglish,
+        visibility: visibilityEnglish,
+        s3_pending_key: landingZoneKey,
+        s3_processed_key: permanentTargetKey,
+        status: 'pending_upload',
         created_at: new Date(timestamp).toISOString(),
       });
 
-      if (fileErr) {
-        console.warn('Advertencia insertando en tabla archivos de Supabase:', fileErr.message);
+      if (englishErr) {
+        // Fallback si la base de datos aún no ejecuta la migración a inglés
+        const { error: fileErr } = await supabase.from('archivos').insert({
+          id: fileId,
+          ticket_id: ticketId,
+          user_id: usuario.id,
+          org_id: orgDestino.id,
+          nombre_original: fileName,
+          formato: fileType,
+          tamano_bytes: fileSize,
+          hash_sha256: hashSha256,
+          tipo_recurso: tipo,
+          visibilidad: visibilidad,
+          s3_key_pendiente: landingZoneKey,
+          s3_key_procesado: permanentTargetKey,
+          estado: 'pendiente_subida',
+          created_at: new Date(timestamp).toISOString(),
+        });
+        if (fileErr) {
+          console.warn('Advertencia insertando en tabla archivos de Supabase:', fileErr.message);
+        }
       }
     } catch (dbErr: any) {
-      console.error('Error insertando en tabla archivos de Supabase:', dbErr.message);
+      console.error('Error insertando en tabla de archivos de Supabase:', dbErr.message);
     }
 
     // 2. Registrar evento en la tabla 'logs_servicio' de Supabase
@@ -266,19 +288,31 @@ export async function PUT(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const ticketId = searchParams.get('ticketId') || 'unknown';
 
-  // 1. Actualizar estado del archivo en la tabla 'archivos' de Supabase
+  // 1. Actualizar estado del archivo en Supabase (tabla 'files' con fallback a 'archivos')
   try {
-    const { error } = await supabase
-      .from('archivos')
+    const nowIso = new Date().toISOString();
+    const { error: errFiles } = await supabase
+      .from('files')
       .update({
-        estado: 'completado',
-        completado_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        status: 'completed',
+        completed_at: nowIso,
+        updated_at: nowIso,
       })
       .eq('ticket_id', ticketId);
 
-    if (error) {
-      console.warn('Advertencia actualizando archivo en Supabase:', error.message);
+    if (errFiles) {
+      const { error: errArchivos } = await supabase
+        .from('archivos')
+        .update({
+          estado: 'completado',
+          completado_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq('ticket_id', ticketId);
+
+      if (errArchivos) {
+        console.warn('Advertencia actualizando archivo en Supabase:', errArchivos.message);
+      }
     }
   } catch (dbErr: any) {
     console.error('Error actualizando archivo en Supabase:', dbErr.message);
