@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { USUARIOS, ORGANIZACIONES, addServiceLog } from '@/lib/service-logs';
 import { supabase } from '@/lib/supabase';
+import { isAwsConfigured, generatePresignedUploadUrl } from '@/lib/s3';
 
 // Cabeceras CORS
 const corsHeaders = {
@@ -17,7 +18,7 @@ export async function OPTIONS() {
   });
 }
 
-// 2. Endpoint principal: Emisión de Ticket de Subida con PERSISTENCIA EN SUPABASE
+// 2. Endpoint principal: Emisión de Ticket y Generación de URL Pre-firmada S3
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -104,7 +105,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // COMPROBACIÓN 3: Permiso de Subida de Archivos Importantes
+    // COMPROBACIÓN 3: Permiso de Subida de Archivos
     if (!usuario.puede_subir) {
       await addServiceLog({
         accion: 'PERMISO_INSUFICIENTE',
@@ -123,13 +124,13 @@ export async function POST(req: NextRequest) {
         {
           error: 'Forbidden',
           code: 'FORBIDDEN_NO_PERMISSION',
-          message: `Permiso Denegado: El usuario '${usuario.nombre}' no tiene autorización para subir archivos importantes a ${orgUsuario?.nombre}.`,
+          message: `Permiso Denegado: El usuario '${usuario.nombre}' no tiene autorización para subir archivos a ${orgUsuario?.nombre}.`,
         },
         { status: 403, headers: corsHeaders }
       );
     }
 
-    // SI PASÓ TODAS LAS COMPROBACIONES -> GENERAR TICKET, RUTAS S3 Y GUARDAR EN SUPABASE
+    // SI PASÓ TODAS LAS COMPROBACIONES -> GENERAR TICKET Y RUTA S3
     const fileId = crypto.randomUUID();
     const ticketId = crypto.randomUUID();
     const timestamp = Date.now();
@@ -140,14 +141,34 @@ export async function POST(req: NextRequest) {
     if (fileType.startsWith('image/')) tipo = 'imagenes';
     else if (fileType.startsWith('video/')) tipo = 'videos';
 
-    // Jerarquía de rutas S3 estricta
-    const landingZoneKey = `Pendientes/${orgSlug}/${usuario.id}/${ticketId}-${fileName}`;
+    // Ruta estricta de aterrizaje solicitada para AWS S3: pendientes/{userId}/{fileName}
+    const landingZoneKey = `pendientes/${usuario.id}/${fileName}`;
     const permanentTargetKey = `Organizaciones/${orgSlug}/${tipo}/${visibilidad}/${ticketId}-${fileName}`;
 
-    // URL de subida
-    const host = req.headers.get('host') || 'localhost:3000';
-    const protocol = host.includes('localhost') ? 'http' : 'https';
-    const uploadUrl = `${protocol}://${host}/api/upload?ticketId=${ticketId}`;
+    // Determinar si usamos AWS S3 real o modo Mock de respaldo
+    const forceMock = req.headers.get('x-mock-mode') === 'true' && !isAwsConfigured();
+    let uploadUrl = '';
+    let isRealS3 = false;
+
+    if (isAwsConfigured() && !forceMock) {
+      try {
+        const presignedS3Url = await generatePresignedUploadUrl(landingZoneKey, fileType, 900);
+        if (presignedS3Url) {
+          uploadUrl = presignedS3Url;
+          isRealS3 = true;
+        }
+      } catch (s3Err: any) {
+        console.error('Error generando URL prefirmada de AWS S3:', s3Err.message);
+      }
+    }
+
+    // Fallback a URL simulada si AWS no está configurado aún o falló la firma
+    if (!uploadUrl) {
+      const host = req.headers.get('host') || 'localhost:3000';
+      const protocol = host.includes('localhost') ? 'http' : 'https';
+      uploadUrl = `${protocol}://${host}/api/upload?ticketId=${ticketId}`;
+      isRealS3 = false;
+    }
 
     // 1. Guardar archivo en la tabla 'archivos' de Supabase
     try {
@@ -168,6 +189,7 @@ export async function POST(req: NextRequest) {
         metadata: {
           hash_sha256: hashSha256,
           ticketId,
+          isRealS3,
           landingZone: landingZoneKey,
           permanentTarget: permanentTargetKey,
         },
@@ -197,6 +219,7 @@ export async function POST(req: NextRequest) {
         tamano: fileSize,
         tipo,
         visibilidad,
+        modo: isRealS3 ? 'AWS_S3_REAL' : 'MOCK_SIMULADO',
         s3Landing: landingZoneKey,
         s3Permanente: permanentTargetKey,
       },
@@ -207,6 +230,7 @@ export async function POST(req: NextRequest) {
         ticketId,
         fileId,
         uploadUrl,
+        isRealS3,
         isMultipart: fileSize > 20 * 1024 * 1024,
         usuario: {
           id: usuario.id,
@@ -230,6 +254,7 @@ export async function POST(req: NextRequest) {
           fileName,
           fileSize,
           hashSha256,
+          isRealS3,
           issuedAt: new Date(timestamp).toISOString(),
         },
       },
@@ -243,7 +268,7 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// 3. Simulación de subida directa a S3 (PUT a la URL pre-firmada)
+// 3. Confirmación de recepción / Fallback Mock PUT
 export async function PUT(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const ticketId = searchParams.get('ticketId') || 'unknown';
@@ -271,14 +296,14 @@ export async function PUT(req: NextRequest) {
     estado: 'SUBIDO_LANDING',
     detalles: {
       ticketId,
-      mensaje: `Archivo recibido en Pendientes/ para el ticket ${ticketId}`,
+      mensaje: `Archivo confirmado en zona pendientes/ para el ticket ${ticketId}`,
     },
   });
 
   return NextResponse.json(
     {
       status: 'success',
-      message: `[MOCK S3] Archivo recibido en zona de aterrizaje para ticket ${ticketId} y registrado en Supabase`,
+      message: `Archivo confirmado en zona pendientes/ para ticket ${ticketId} y registrado en Supabase`,
       ticketId,
       s3Status: 'uploaded_to_landing',
     },

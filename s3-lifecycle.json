@@ -1,0 +1,17 @@
+{
+  "Rules": [
+    {
+      "ID": "EliminarPendientesDespuesDe1Dia",
+      "Filter": {
+        "Prefix": "pendientes/"
+      },
+      "Status": "Enabled",
+      "Expiration": {
+        "Days": 1
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 1
+      }
+    }
+  ]
+}
