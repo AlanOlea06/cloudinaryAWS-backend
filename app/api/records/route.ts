@@ -48,17 +48,22 @@ export async function GET() {
     }
 
     // Format output with unified English fields and backward-compatible fallbacks
-    const formattedRecords = (data || []).map((row: any) => ({
-      ...row,
-      fileName: row.original_name || row.nombre_original || 'unknown',
-      mimeType: row.mime_type || row.formato,
-      sizeBytes: row.size_bytes || row.tamano_bytes,
-      sha256Hash: row.sha256_hash || row.hash_sha256,
-      userName: row.users?.name || row.usuarios?.nombre || row.user_name || 'Unknown',
-      userEmail: row.users?.email || row.usuarios?.email || null,
-      orgName: row.organizations?.name || row.organizaciones?.nombre || null,
-      orgSlug: row.organizations?.slug || row.organizaciones?.slug || null,
-    }));
+    const formattedRecords = (data || []).map((row: any) => {
+      const fileName = row.original_name || row.nombre_original || 'unknown';
+      const extension = row.extension || (fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : '');
+      return {
+        ...row,
+        fileName,
+        extension,
+        mimeType: row.mime_type || row.formato,
+        sizeBytes: row.size_bytes || row.tamano_bytes,
+        sha256Hash: row.sha256_hash || row.hash_sha256,
+        userName: row.users?.name || row.usuarios?.nombre || row.user_name || 'Unknown',
+        userEmail: row.users?.email || row.usuarios?.email || null,
+        orgName: row.organizations?.name || row.organizaciones?.nombre || null,
+        orgSlug: row.organizations?.slug || row.organizaciones?.slug || null,
+      };
+    });
 
     return NextResponse.json(
       { records: formattedRecords, count: formattedRecords.length },

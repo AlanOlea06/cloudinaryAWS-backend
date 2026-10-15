@@ -22,6 +22,10 @@ interface FileRecord {
   user_name?: string;
   fileName?: string;
   nombre_original?: string;
+  extension?: string;
+  mimeType?: string;
+  mime_type?: string;
+  formato?: string;
   sizeBytes?: number;
   tamano_bytes?: number;
   resource_type?: string;
@@ -300,9 +304,10 @@ export default function ServiceLogsPage() {
                 <thead className="bg-slate-950/70 text-slate-400 uppercase text-[10px] border-b border-slate-800">
                   <tr>
                     <th className="py-2.5 px-4">Original Name</th>
+                    <th className="py-2.5 px-4">Ext</th>
                     <th className="py-2.5 px-4">User</th>
                     <th className="py-2.5 px-4">Status</th>
-                    <th className="py-2.5 px-4">Type / Access</th>
+                    <th className="py-2.5 px-4">MIME / Type</th>
                     <th className="py-2.5 px-4">Size</th>
                     <th className="py-2.5 px-4">S3 Key in DB</th>
                   </tr>
@@ -310,13 +315,15 @@ export default function ServiceLogsPage() {
                 <tbody className="divide-y divide-slate-800/60 text-slate-300">
                   {files.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="py-8 text-center text-slate-500 italic">
+                      <td colSpan={7} className="py-8 text-center text-slate-500 italic">
                         No files recorded yet in Supabase.
                       </td>
                     </tr>
                   ) : (
                     files.map((file) => {
                       const fileName = file.fileName || file.nombre_original || 'unknown';
+                      const ext = file.extension || (fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : '--');
+                      const mime = file.mimeType || file.mime_type || file.formato || '--';
                       const userName = file.userName || file.user_name || '--';
                       const status = file.status || file.estado || 'pending';
                       const sizeBytes = file.sizeBytes || file.tamano_bytes || 0;
@@ -327,9 +334,17 @@ export default function ServiceLogsPage() {
                       return (
                         <tr key={file.id} className="hover:bg-slate-800/40 transition">
                           <td className="py-3 px-4 font-bold text-slate-200">{fileName}</td>
+                          <td className="py-3 px-4">
+                            <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-amber-300 font-bold font-mono text-[11px]">
+                              {ext}
+                            </span>
+                          </td>
                           <td className="py-3 px-4 text-indigo-300">{userName}</td>
                           <td className="py-3 px-4">{getStatusBadge(status)}</td>
-                          <td className="py-3 px-4 text-slate-400">{resourceType} ({visibility})</td>
+                          <td className="py-3 px-4 text-slate-400">
+                            <div>{resourceType} ({visibility})</div>
+                            <div className="text-[10px] text-slate-500 truncate max-w-[140px]" title={mime}>{mime}</div>
+                          </td>
                           <td className="py-3 px-4 text-slate-400">{(sizeBytes / 1024).toFixed(1)} KB</td>
                           <td className="py-3 px-4 text-cyan-400 truncate max-w-xs" title={s3Key}>
                             {s3Key}

@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS public.files (
     org_id UUID NOT NULL REFERENCES public.organizations(id) ON DELETE CASCADE,
     user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
     original_name TEXT NOT NULL,
+    extension VARCHAR(20) NOT NULL DEFAULT '',       -- e.g. '.docx', '.html', '.png'
     mime_type TEXT NOT NULL,                         -- e.g. 'image/png', 'application/pdf'
     size_bytes BIGINT NOT NULL,                      -- Original file size in bytes
     final_size_bytes BIGINT,                         -- Post-optimization size

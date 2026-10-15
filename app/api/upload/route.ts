@@ -141,6 +141,9 @@ export async function POST(req: NextRequest) {
     if (fileType.startsWith('image/')) resourceType = 'images';
     else if (fileType.startsWith('video/')) resourceType = 'videos';
 
+    // File extension extraction (e.g. .docx, .html, .png)
+    const extension = fileName.lastIndexOf('.') !== -1 ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : '';
+
     // Standardized S3 Key hierarchy
     const landingZoneKey = `pending/${user.id}/${fileName}`;
     const permanentTargetKey = `organizations/${orgSlug}/${resourceType}/${visibility}/${ticketId}-${fileName}`;
@@ -178,6 +181,7 @@ export async function POST(req: NextRequest) {
         user_id: user.id,
         org_id: targetOrg.id,
         original_name: fileName,
+        extension,
         mime_type: fileType,
         size_bytes: fileSize,
         sha256_hash: sha256Hash,
@@ -264,6 +268,7 @@ export async function POST(req: NextRequest) {
           orgSlug,
           visibility,
           fileName,
+          extension,
           fileSize,
           sha256Hash,
           isRealS3,

@@ -30,18 +30,35 @@ END $$;
 -- ------------------------------------------------------------------------------
 DO $$
 BEGIN
-    -- Drop old constraints on files/archivos
-    ALTER TABLE public.files DROP CONSTRAINT IF EXISTS archivos_visibilidad_check;
-    ALTER TABLE public.files DROP CONSTRAINT IF EXISTS archivos_tipo_recurso_check;
-    ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_visibilidad_check;
-    ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_tipo_recurso_check;
-    ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_visibility_check;
-    ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_resource_type_check;
+    -- Drop old constraints on files or archivos if present
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'files') THEN
+        ALTER TABLE public.files DROP CONSTRAINT IF EXISTS archivos_visibilidad_check;
+        ALTER TABLE public.files DROP CONSTRAINT IF EXISTS archivos_tipo_recurso_check;
+        ALTER TABLE public.files DROP CONSTRAINT IF EXISTS archivos_estado_check;
+        ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_visibilidad_check;
+        ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_tipo_recurso_check;
+        ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_estado_check;
+        ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_visibility_check;
+        ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_resource_type_check;
+        ALTER TABLE public.files DROP CONSTRAINT IF EXISTS files_status_check;
+    END IF;
 
-    -- Drop old constraints on users/usuarios
-    ALTER TABLE public.users DROP CONSTRAINT IF EXISTS usuarios_rol_check;
-    ALTER TABLE public.users DROP CONSTRAINT IF EXISTS users_rol_check;
-    ALTER TABLE public.users DROP CONSTRAINT IF EXISTS users_role_check;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'archivos') THEN
+        ALTER TABLE public.archivos DROP CONSTRAINT IF EXISTS archivos_visibilidad_check;
+        ALTER TABLE public.archivos DROP CONSTRAINT IF EXISTS archivos_tipo_recurso_check;
+        ALTER TABLE public.archivos DROP CONSTRAINT IF EXISTS archivos_estado_check;
+    END IF;
+
+    -- Drop old constraints on users or usuarios
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users') THEN
+        ALTER TABLE public.users DROP CONSTRAINT IF EXISTS usuarios_rol_check;
+        ALTER TABLE public.users DROP CONSTRAINT IF EXISTS users_rol_check;
+        ALTER TABLE public.users DROP CONSTRAINT IF EXISTS users_role_check;
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'usuarios') THEN
+        ALTER TABLE public.usuarios DROP CONSTRAINT IF EXISTS usuarios_rol_check;
+    END IF;
 EXCEPTION
     WHEN undefined_table THEN null;
 END $$;
@@ -122,6 +139,11 @@ BEGIN
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'files' AND column_name = 'completado_at') THEN
         ALTER TABLE public.files RENAME COLUMN completado_at TO completed_at;
     END IF;
+
+    -- Add extension column if not present
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'files' AND column_name = 'extension') THEN
+        ALTER TABLE public.files ADD COLUMN extension VARCHAR(20);
+    END IF;
 END $$;
 
 -- ------------------------------------------------------------------------------
@@ -162,6 +184,13 @@ UPDATE public.files SET visibility = 'public' WHERE visibility IN ('publicos', '
 UPDATE public.files SET resource_type = 'images' WHERE resource_type IN ('imagenes', 'imagen');
 UPDATE public.files SET resource_type = 'documents' WHERE resource_type IN ('documentos', 'documento');
 UPDATE public.files SET resource_type = 'videos' WHERE resource_type IN ('videos', 'video');
+
+-- Extension (Extract suffix like .docx or .html from original_name)
+UPDATE public.files 
+SET extension = COALESCE('.' || LOWER(SUBSTRING(original_name FROM '\.([^\.]+)$')), '')
+WHERE extension IS NULL OR extension = '';
+
+ALTER TABLE public.files ALTER COLUMN extension SET DEFAULT '';
 
 -- Status
 UPDATE public.files SET status = 'pending_upload' WHERE status = 'pendiente_subida';
