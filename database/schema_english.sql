@@ -48,7 +48,6 @@ CREATE TABLE IF NOT EXISTS public.files (
     extension VARCHAR(20) NOT NULL DEFAULT '',       -- e.g. '.docx', '.html', '.png'
     mime_type TEXT NOT NULL,                         -- e.g. 'image/png', 'application/pdf'
     size_bytes BIGINT NOT NULL,                      -- Original file size in bytes
-    final_size_bytes BIGINT,                         -- Post-optimization size
     sha256_hash VARCHAR(64) NOT NULL,               -- Native SHA-256 integrity hash
     resource_type TEXT NOT NULL CHECK (resource_type IN ('images', 'documents', 'videos')),
     visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('public', 'private')),

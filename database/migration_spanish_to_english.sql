@@ -116,7 +116,10 @@ BEGIN
         ALTER TABLE public.files RENAME COLUMN tamano_bytes TO size_bytes;
     END IF;
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'files' AND column_name = 'tamano_final_bytes') THEN
-        ALTER TABLE public.files RENAME COLUMN tamano_final_bytes TO final_size_bytes;
+        ALTER TABLE public.files DROP COLUMN tamano_final_bytes;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'files' AND column_name = 'final_size_bytes') THEN
+        ALTER TABLE public.files DROP COLUMN final_size_bytes;
     END IF;
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'files' AND column_name = 'hash_sha256') THEN
         ALTER TABLE public.files RENAME COLUMN hash_sha256 TO sha256_hash;
