@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Cloudinary Clone - API",
-    "description": "Colección con variables libres. Rellena los valores en la pestaña Variables de la colección (o en un Environment) antes de ejecutar cada request.",
+    "description": "Standardized English Postman collection. Fill in the variables under the Collection Variables tab (or in an Environment) before sending requests.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -11,14 +11,14 @@
     { "key": "fileName", "value": "", "type": "string" },
     { "key": "fileType", "value": "", "type": "string" },
     { "key": "fileSize", "value": "", "type": "string" },
-    { "key": "visibilidad", "value": "", "type": "string" },
-    { "key": "hashSha256", "value": "", "type": "string" },
+    { "key": "visibility", "value": "", "type": "string" },
+    { "key": "sha256Hash", "value": "", "type": "string" },
     { "key": "ticketId", "value": "", "type": "string" },
     { "key": "uploadUrl", "value": "", "type": "string" }
   ],
   "item": [
     {
-      "name": "1. Solicitar Ticket (Presigned URL)",
+      "name": "1. Request Upload Ticket (Presigned URL)",
       "event": [
         {
           "listen": "test",
@@ -37,7 +37,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"orgId\": \"{{orgId}}\",\n  \"fileName\": \"{{fileName}}\",\n  \"fileType\": \"{{fileType}}\",\n  \"fileSize\": \"{{fileSize}}\",\n  \"visibilidad\": \"{{visibilidad}}\",\n  \"hashSha256\": \"{{hashSha256}}\"\n}",
+          "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"orgId\": \"{{orgId}}\",\n  \"fileName\": \"{{fileName}}\",\n  \"fileType\": \"{{fileType}}\",\n  \"fileSize\": \"{{fileSize}}\",\n  \"visibility\": \"{{visibility}}\",\n  \"sha256Hash\": \"{{sha256Hash}}\"\n}",
           "options": { "raw": { "language": "json" } }
         },
         "url": {
@@ -45,11 +45,11 @@
           "host": ["{{baseUrl}}"],
           "path": ["api", "upload"]
         },
-        "description": "Valida usuario/organización/permisos y devuelve ticketId + uploadUrl. Guarda ambos automáticamente en las variables de la colección."
+        "description": "Validates user/tenant/permissions and returns ticketId + S3 Presigned uploadUrl. Saves both automatically into collection variables."
       }
     },
     {
-      "name": "2. Subir Archivo a la URL Pre-firmada",
+      "name": "2. Direct Upload to S3 Presigned URL",
       "request": {
         "method": "PUT",
         "header": [{ "key": "Content-Type", "value": "{{fileType}}" }],
@@ -58,11 +58,11 @@
           "raw": "{{uploadUrl}}",
           "host": ["{{uploadUrl}}"]
         },
-        "description": "Selecciona el archivo en Body -> binary. El Content-Type debe ser el mismo fileType usado al pedir el ticket."
+        "description": "Select the binary file in Body -> binary. The Content-Type header must match the fileType sent in Step 1."
       }
     },
     {
-      "name": "3. Confirmar Subida",
+      "name": "3. Confirm Upload (Persist in Database)",
       "request": {
         "method": "PUT",
         "header": [],
@@ -72,11 +72,11 @@
           "path": ["api", "upload"],
           "query": [{ "key": "ticketId", "value": "{{ticketId}}" }]
         },
-        "description": "Marca el archivo como completado en Supabase y registra el log."
+        "description": "Notifies backend that upload completed to mark file as 'completed' and record audit log."
       }
     },
     {
-      "name": "4. Consultar Logs",
+      "name": "4. Get Service Logs",
       "request": {
         "method": "GET",
         "header": [],
@@ -84,11 +84,12 @@
           "raw": "{{baseUrl}}/api/logs",
           "host": ["{{baseUrl}}"],
           "path": ["api", "logs"]
-        }
+        },
+        "description": "Retrieves recent audit logs from Supabase (service_logs table)."
       }
     },
     {
-      "name": "5. Consultar Archivos",
+      "name": "5. Get File Records",
       "request": {
         "method": "GET",
         "header": [],
@@ -96,11 +97,12 @@
           "raw": "{{baseUrl}}/api/records",
           "host": ["{{baseUrl}}"],
           "path": ["api", "records"]
-        }
+        },
+        "description": "Retrieves recent file records from Supabase (files table with user & organization join)."
       }
     },
     {
-      "name": "6. Limpieza de Pruebas",
+      "name": "6. Test Environment Cleanup",
       "request": {
         "method": "DELETE",
         "header": [],
@@ -110,9 +112,10 @@
           "path": ["api", "test", "cleanup"],
           "query": [
             { "key": "userId", "value": "{{userId}}" },
-            { "key": "all", "value": "", "description": "true para limpiar todo pendientes/", "disabled": true }
+            { "key": "all", "value": "true", "description": "true to purge all test files under pending/", "disabled": true }
           ]
-        }
+        },
+        "description": "Purges S3 test objects under pending/ and cleans test rows from Supabase (5GB Free Tier Protection)."
       }
     }
   ]
