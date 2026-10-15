@@ -1,0 +1,316 @@
+{
+  "info": {
+    "_postman_id": "c7a8b912-4d22-4a9f-8012-32bdf591d8e1",
+    "name": "Cloudinary Clone - AWS S3 & Multi-Tenant Tests",
+    "description": "Colección completa de pruebas para la API desplegada en Vercel con integración AWS S3 y Supabase.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://cloudinary-aws-backend.vercel.app",
+      "type": "string"
+    },
+    {
+      "key": "ticketId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "uploadUrl",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Flujo de Subida (Direct Upload S3)",
+      "item": [
+        {
+          "name": "1.1 Solicitar Ticket y Presigned URL (Happy Path)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.ticketId) {",
+                  "    pm.collectionVariables.set('ticketId', json.ticketId);",
+                  "    console.log('ticketId guardado:', json.ticketId);",
+                  "}",
+                  "if (json.uploadUrl) {",
+                  "    pm.collectionVariables.set('uploadUrl', json.uploadUrl);",
+                  "    console.log('uploadUrl guardada:', json.uploadUrl);",
+                  "}",
+                  "pm.test('Status code es 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test('Devuelve ticketId y uploadUrl', function () {",
+                  "    pm.expect(json).to.have.property('ticketId');",
+                  "    pm.expect(json).to.have.property('uploadUrl');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"a1111111-0000-0000-0000-000000000001\",\n  \"orgId\": \"11111111-1111-1111-1111-111111111111\",\n  \"fileName\": \"foto-postman.png\",\n  \"fileType\": \"image/png\",\n  \"fileSize\": 1024,\n  \"visibilidad\": \"privados\",\n  \"hashSha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/upload",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "upload"]
+            },
+            "description": "Emite un ticket válido para Carlos Mendoza (Org 1). Si AWS está configurado en Vercel, genera una URL prefirmada de S3. Guarda automáticamente 'ticketId' y 'uploadUrl' para el siguiente paso."
+          }
+        },
+        {
+          "name": "1.2 Subida Directa a S3 (PUT a la URL Pre-firmada)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "image/png"
+              }
+            ],
+            "body": {
+              "mode": "file",
+              "file": {}
+            },
+            "url": {
+              "raw": "{{uploadUrl}}",
+              "host": ["{{uploadUrl}}"]
+            },
+            "description": "Envía el archivo binario directamente a AWS S3 usando la URL pre-firmada obtenida en el paso 1.1. Selecciona cualquier archivo de imagen en la pestaña Body -> binary/file."
+          }
+        },
+        {
+          "name": "1.3 Confirmar Subida en el Backend (Persistencia)",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/upload?ticketId={{ticketId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "upload"],
+              "query": [
+                {
+                  "key": "ticketId",
+                  "value": "{{ticketId}}"
+                }
+              ]
+            },
+            "description": "Notifica al servidor central que la subida a S3 fue completada. El servidor actualiza el registro a 'completado' en Supabase y crea el log de recepción."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Pruebas de Seguridad y Multi-Tenant",
+      "item": [
+        {
+          "name": "2.1 Ataque Subida Cruzada (Debe dar 403 Forbidden)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code es 403 Forbidden', function () {",
+                  "    pm.response.to.have.status(403);",
+                  "});",
+                  "pm.test('Código de error es FORBIDDEN_CROSS_ORGANIZATION', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.code).to.eql('FORBIDDEN_CROSS_ORGANIZATION');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"a1111111-0000-0000-0000-000000000001\",\n  \"orgId\": \"22222222-2222-2222-2222-222222222222\",\n  \"fileName\": \"documento_filtrado.pdf\",\n  \"fileType\": \"application/pdf\",\n  \"fileSize\": 2048\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/upload",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "upload"]
+            },
+            "description": "Carlos Mendoza (perteneciente a Org 1) intenta subir un archivo a la Organización 2. El servidor debe rechazarlo con 403 y registrar el incidente."
+          }
+        },
+        {
+          "name": "2.2 Usuario Visitante Sin Permiso (Debe dar 403 Forbidden)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code es 403 Forbidden', function () {",
+                  "    pm.response.to.have.status(403);",
+                  "});",
+                  "pm.test('Código de error es FORBIDDEN_NO_PERMISSION', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.code).to.eql('FORBIDDEN_NO_PERMISSION');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"a1111111-0000-0000-0000-000000000010\",\n  \"orgId\": \"11111111-1111-1111-1111-111111111111\",\n  \"fileName\": \"intento_visitante.png\",\n  \"fileType\": \"image/png\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/upload",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "upload"]
+            },
+            "description": "Valeria Ruiz es visitante con permiso puede_subir=false. El servidor debe denegar la emisión de ticket con 403."
+          }
+        },
+        {
+          "name": "2.3 Usuario Fantasma / No Registrado (Debe dar 401 Unauthorized)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status code es 401 Unauthorized', function () {",
+                  "    pm.response.to.have.status(401);",
+                  "});",
+                  "pm.test('Código de error es USER_NOT_REGISTERED', function () {",
+                  "    const json = pm.response.json();",
+                  "    pm.expect(json.code).to.eql('USER_NOT_REGISTERED');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"00000000-0000-0000-0000-000000000000\",\n  \"orgId\": \"11111111-1111-1111-1111-111111111111\",\n  \"fileName\": \"malware.exe\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/upload",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "upload"]
+            },
+            "description": "Intento de petición con un UUID de usuario que no existe en el sistema. Debe denegarse con 401 Unauthorized."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Auditoría y Base de Datos (Supabase)",
+      "item": [
+        {
+          "name": "3.1 Consultar Logs de Servicio",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/logs",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "logs"]
+            },
+            "description": "Devuelve los últimos 50 registros de auditoría almacenados en la tabla 'logs_servicio' de Supabase."
+          }
+        },
+        {
+          "name": "3.2 Consultar Archivos Registrados",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/records",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "records"]
+            },
+            "description": "Devuelve los archivos registrados en la tabla 'archivos' de Supabase con su estado (pendiente_subida o completado)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Limpieza de Pruebas (5GB Management)",
+      "item": [
+        {
+          "name": "4.1 Limpiar Pruebas de un Usuario Específico",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/test/cleanup?userId=a1111111-0000-0000-0000-000000000001",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "test", "cleanup"],
+              "query": [
+                {
+                  "key": "userId",
+                  "value": "a1111111-0000-0000-0000-000000000001"
+                }
+              ]
+            },
+            "description": "Borra los objetos bajo pendientes/a1111111-0000-0000-0000-000000000001/ en AWS S3 y depura sus registros en Supabase."
+          }
+        },
+        {
+          "name": "4.2 Limpiar TODO el Entorno de Test (Global)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/test/cleanup?all=true",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "test", "cleanup"],
+              "query": [
+                {
+                  "key": "all",
+                  "value": "true"
+                }
+              ]
+            },
+            "description": "Vacía todos los archivos temporales bajo 'pendientes/' en AWS S3 y purga las tablas de archivos y logs en Supabase para proteger tu capa gratuita de 5GB."
+          }
+        }
+      ]
+    }
+  ]
+}
