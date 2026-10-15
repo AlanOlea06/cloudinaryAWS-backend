@@ -176,23 +176,16 @@ export async function POST(req: NextRequest) {
         id: fileId,
         ticket_id: ticketId,
         user_id: usuario.id,
-        user_name: usuario.nombre,
         org_id: orgDestino.id,
         nombre_original: fileName,
         formato: fileType,
         tamano_bytes: fileSize,
+        hash_sha256: hashSha256,
         tipo_recurso: tipo,
         visibilidad: visibilidad,
         s3_key_pendiente: landingZoneKey,
         s3_key_procesado: permanentTargetKey,
         estado: 'pendiente_subida',
-        metadata: {
-          hash_sha256: hashSha256,
-          ticketId,
-          isRealS3,
-          landingZone: landingZoneKey,
-          permanentTarget: permanentTargetKey,
-        },
         created_at: new Date(timestamp).toISOString(),
       });
 
@@ -279,6 +272,7 @@ export async function PUT(req: NextRequest) {
       .from('archivos')
       .update({
         estado: 'completado',
+        completado_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })
       .eq('ticket_id', ticketId);
