@@ -9,6 +9,7 @@
     { "key": "userId", "value": "", "type": "string" },
     { "key": "orgId", "value": "", "type": "string" },
     { "key": "fileName", "value": "", "type": "string" },
+    { "key": "extension", "value": "", "type": "string" },
     { "key": "fileType", "value": "", "type": "string" },
     { "key": "fileSize", "value": "", "type": "string" },
     { "key": "visibility", "value": "", "type": "string" },
@@ -37,7 +38,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"orgId\": \"{{orgId}}\",\n  \"fileName\": \"{{fileName}}\",\n  \"fileType\": \"{{fileType}}\",\n  \"fileSize\": \"{{fileSize}}\",\n  \"visibility\": \"{{visibility}}\",\n  \"sha256Hash\": \"{{sha256Hash}}\"\n}",
+          "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"orgId\": \"{{orgId}}\",\n  \"fileName\": \"{{fileName}}\",\n  \"extension\": \"{{extension}}\",\n  \"fileType\": \"{{fileType}}\",\n  \"fileSize\": \"{{fileSize}}\",\n  \"visibility\": \"{{visibility}}\",\n  \"sha256Hash\": \"{{sha256Hash}}\"\n}",
           "options": { "raw": { "language": "json" } }
         },
         "url": {

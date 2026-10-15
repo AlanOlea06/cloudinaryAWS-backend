@@ -30,6 +30,7 @@ export async function POST(req: NextRequest) {
       fileSize = 1024,
       visibility = body.visibilidad || 'private',
       sha256Hash = body.hashSha256 || 'simulated-sha256-hash',
+      extension: incomingExtension,
     } = body;
 
     // CHECK 1: User Authentication / Registration
@@ -141,8 +142,14 @@ export async function POST(req: NextRequest) {
     if (fileType.startsWith('image/')) resourceType = 'images';
     else if (fileType.startsWith('video/')) resourceType = 'videos';
 
-    // File extension extraction (e.g. .docx, .html, .png)
-    const extension = fileName.lastIndexOf('.') !== -1 ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : '';
+    // File extension: prioritize explicit field sent in HTTP request, or extract from fileName
+    let extension = incomingExtension ? String(incomingExtension).trim().toLowerCase() : '';
+    if (extension && !extension.startsWith('.')) {
+      extension = `.${extension}`;
+    }
+    if (!extension && fileName.lastIndexOf('.') !== -1) {
+      extension = fileName.slice(fileName.lastIndexOf('.')).toLowerCase();
+    }
 
     // Standardized S3 Key hierarchy
     const landingZoneKey = `pending/${user.id}/${fileName}`;
@@ -198,7 +205,7 @@ export async function POST(req: NextRequest) {
         const spanishVisibility = visibility === 'private' ? 'privados' : 'publicos';
         const spanishType = resourceType === 'images' ? 'imagenes' : resourceType;
 
-        await supabase.from('archivos').insert({
+        const spanishPayload: any = {
           id: fileId,
           ticket_id: ticketId,
           user_id: user.id,
@@ -213,7 +220,17 @@ export async function POST(req: NextRequest) {
           s3_key_procesado: permanentTargetKey,
           estado: 'pendiente_subida',
           created_at: new Date(timestamp).toISOString(),
-        });
+        };
+        if (extension) {
+          spanishPayload.extension = extension;
+        }
+
+        const { error: spanishErr } = await supabase.from('archivos').insert(spanishPayload);
+        // If extension column doesn't exist on archivos yet, retry without it
+        if (spanishErr && spanishErr.message?.includes('extension')) {
+          delete spanishPayload.extension;
+          await supabase.from('archivos').insert(spanishPayload);
+        }
       }
     } catch (dbErr: any) {
       console.error('Error inserting file in Supabase:', dbErr.message);
