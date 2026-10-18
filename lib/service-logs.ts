@@ -1,7 +1,7 @@
 import { supabase } from './supabase';
 
 export interface ServiceLog {
-  id: string;
+  id: number | string;
   timestamp: string;
   method?: string | null;
   action: string;
@@ -136,8 +136,11 @@ export async function addServiceLog(logInput: {
     extension,
   };
 
+  const logs = globalForLogs.serviceLogs || [];
+  const nextLocalId = logs.length + 1;
+
   const newLog: ServiceLog = {
-    id: crypto.randomUUID(),
+    id: nextLocalId,
     timestamp: new Date().toISOString(),
     method,
     action,
@@ -167,46 +170,57 @@ export async function addServiceLog(logInput: {
     detalles: enrichedDetails,
   };
 
-  // 1. Keep in memory for immediate fallback retrieval
-  const logs = globalForLogs.serviceLogs || [];
-  logs.unshift(newLog);
-  if (logs.length > 100) logs.pop();
-  globalForLogs.serviceLogs = logs;
-
-  // 2. Persist to Supabase
+  // 1. Persist to Supabase (letting PostgreSQL generate sequential numeric id)
   try {
     const validOrgId = logInput.orgId && UUID_REGEX.test(logInput.orgId) ? logInput.orgId : (logInput.targetOrgId && UUID_REGEX.test(logInput.targetOrgId) ? logInput.targetOrgId : null);
     const validUserId = logInput.userId && UUID_REGEX.test(logInput.userId) && logInput.userId !== '00000000-0000-0000-0000-000000000000' ? logInput.userId : null;
 
     // Try primary English table: service_logs
-    const { error: englishErr } = await supabase.from('service_logs').insert({
-      id: newLog.id,
-      org_id: validOrgId,
-      user_id: validUserId,
-      action: newLog.action,
-      status: newLog.status,
-      file_name: fileName,
-      details: enrichedDetails,
-      ip_address: details.ip || '127.0.0.1',
-      created_at: newLog.timestamp,
-    });
-
-    // Fallback if table is still logs_servicio
-    if (englishErr) {
-      await supabase.from('logs_servicio').insert({
-        id: newLog.id,
+    const { data: insertedRow, error: englishErr } = await supabase
+      .from('service_logs')
+      .insert({
         org_id: validOrgId,
         user_id: validUserId,
-        accion: newLog.action,
-        estado: newLog.status,
-        detalles: enrichedDetails,
-        ip_origen: details.ip || '127.0.0.1',
+        action: newLog.action,
+        status: newLog.status,
+        file_name: fileName,
+        details: enrichedDetails,
+        ip_address: details.ip || '127.0.0.1',
         created_at: newLog.timestamp,
-      });
+      })
+      .select('id')
+      .single();
+
+    if (!englishErr && insertedRow?.id !== undefined) {
+      newLog.id = insertedRow.id;
+    } else if (englishErr) {
+      // Fallback if table is still logs_servicio
+      const { data: fallbackRow } = await supabase
+        .from('logs_servicio')
+        .insert({
+          org_id: validOrgId,
+          user_id: validUserId,
+          accion: newLog.action,
+          estado: newLog.status,
+          detalles: enrichedDetails,
+          ip_origen: details.ip || '127.0.0.1',
+          created_at: newLog.timestamp,
+        })
+        .select('id')
+        .single();
+
+      if (fallbackRow?.id !== undefined) {
+        newLog.id = fallbackRow.id;
+      }
     }
   } catch (err: any) {
     console.error('Error persisting log in Supabase:', err.message);
   }
+
+  // 2. Keep in memory for immediate fallback retrieval
+  logs.unshift(newLog);
+  if (logs.length > 100) logs.pop();
+  globalForLogs.serviceLogs = logs;
 
   return newLog;
 }
@@ -323,8 +337,8 @@ export async function getServiceLogs(): Promise<ServiceLog[]> {
 export async function clearServiceLogs(): Promise<void> {
   globalForLogs.serviceLogs = [];
   try {
-    await supabase.from('service_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-    await supabase.from('logs_servicio').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    await supabase.from('service_logs').delete().not('created_at', 'is', null);
+    await supabase.from('logs_servicio').delete().not('created_at', 'is', null);
   } catch (err) {
     console.error('Error clearing logs in Supabase:', err);
   }

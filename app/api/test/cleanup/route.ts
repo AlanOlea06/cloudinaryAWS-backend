@@ -67,8 +67,8 @@ async function handleCleanup(req: NextRequest) {
     // 3. Clean Audit Logs in Supabase (service_logs & legacy logs_servicio)
     try {
       if (cleanAll) {
-        await supabase.from('service_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-        await supabase.from('logs_servicio').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabase.from('service_logs').delete().not('created_at', 'is', null);
+        await supabase.from('logs_servicio').delete().not('created_at', 'is', null);
       } else {
         await supabase.from('service_logs').delete().eq('user_id', userId);
         await supabase.from('logs_servicio').delete().eq('user_id', userId);

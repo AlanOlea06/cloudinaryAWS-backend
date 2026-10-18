@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 
 interface LogEntry {
-  id: string;
+  id: number | string;
   timestamp: string;
   method?: string | null;
   action: string;
