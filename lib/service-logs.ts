@@ -3,13 +3,27 @@ import { supabase } from './supabase';
 export interface ServiceLog {
   id: string;
   timestamp: string;
+  method?: string | null;
   action: string;
-  status: 'ALLOWED' | 'DENIED_NOT_REGISTERED' | 'DENIED_CROSS_ORG' | 'DENIED_NO_PERMISSION' | 'UPLOADED_LANDING' | string;
-  userId?: string;
-  userName?: string;
-  orgId?: string;
-  orgName?: string;
-  targetOrgId?: string;
+  status: string;
+  ticketId?: string | null;
+  fileId?: string | null;
+  userId?: string | null;
+  userName?: string | null;
+  orgId?: string | null;
+  orgName?: string | null;
+  targetOrgId?: string | null;
+  fileName?: string | null;
+  extension?: string | null;
+  mimeType?: string | null;
+  fileSize?: number | null;
+  resourceType?: string | null;
+  visibility?: string | null;
+  uploadUrl?: string | null;
+  s3Landing?: string | null;
+  s3Permanent?: string | null;
+  ipAddress?: string | null;
+  message?: string | null;
   details: any;
   // Backward compatibility fields
   accion?: string;
@@ -91,6 +105,7 @@ if (!globalForLogs.serviceLogs) {
  * Persists an audit log event to memory and to Supabase (service_logs table with fallback to logs_servicio)
  */
 export async function addServiceLog(logInput: {
+  method?: string;
   action?: string;
   status?: string;
   accion?: string;
@@ -105,29 +120,54 @@ export async function addServiceLog(logInput: {
   detalles?: any;
 }): Promise<ServiceLog> {
   const action = logInput.action || logInput.accion || 'UNKNOWN_ACTION';
-  const status = (logInput.status || logInput.estado || 'ALLOWED') as any;
+  const status = (logInput.status || logInput.estado || 'ALLOWED') as string;
   const details = logInput.details || logInput.detalles || {};
-  const userName = logInput.userName || details.userName || 'Unknown User';
-  const orgName = logInput.orgName || logInput.orgNombre || details.orgName || details.orgNombre || 'Organization';
+  const method = logInput.method || details.method || (action === 'S3_UPLOAD_CONFIRMED' ? 'PUT' : 'POST');
+  const userName = logInput.userName || details.userName || (logInput.userId && USERS[logInput.userId]?.name) || null;
+  const orgName = logInput.orgName || logInput.orgNombre || details.orgName || details.orgNombre || (logInput.orgId && ORGANIZATIONS[logInput.orgId]?.name) || null;
+  const fileName = details.fileName || details.archivo || null;
+  const extension = details.extension || (fileName && fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : null);
+
+  const enrichedDetails = {
+    ...details,
+    method,
+    userName,
+    orgName,
+    extension,
+  };
 
   const newLog: ServiceLog = {
     id: crypto.randomUUID(),
     timestamp: new Date().toISOString(),
+    method,
     action,
     status,
+    ticketId: details.ticketId || null,
+    fileId: details.fileId || null,
+    userId: logInput.userId || null,
+    userName,
+    orgId: logInput.orgId || null,
+    orgName,
+    targetOrgId: logInput.targetOrgId || null,
+    fileName,
+    extension,
+    mimeType: details.mimeType || null,
+    fileSize: details.fileSize ?? null,
+    resourceType: details.resourceType || null,
+    visibility: details.visibility || null,
+    uploadUrl: details.uploadUrl || null,
+    s3Landing: details.s3Landing || null,
+    s3Permanent: details.s3Permanent || null,
+    ipAddress: details.ip || null,
+    message: details.message || details.reason || details.alert || null,
+    details: enrichedDetails,
     accion: action,
     estado: status,
-    userId: logInput.userId,
-    userName,
-    orgId: logInput.orgId,
-    orgName,
-    orgNombre: orgName,
-    targetOrgId: logInput.targetOrgId,
-    details,
-    detalles: details,
+    orgNombre: orgName || undefined,
+    detalles: enrichedDetails,
   };
 
-  // 1. Keep in memory for high-performance retrieval
+  // 1. Keep in memory for immediate fallback retrieval
   const logs = globalForLogs.serviceLogs || [];
   logs.unshift(newLog);
   if (logs.length > 100) logs.pop();
@@ -137,7 +177,6 @@ export async function addServiceLog(logInput: {
   try {
     const validOrgId = logInput.orgId && UUID_REGEX.test(logInput.orgId) ? logInput.orgId : (logInput.targetOrgId && UUID_REGEX.test(logInput.targetOrgId) ? logInput.targetOrgId : null);
     const validUserId = logInput.userId && UUID_REGEX.test(logInput.userId) && logInput.userId !== '00000000-0000-0000-0000-000000000000' ? logInput.userId : null;
-    const fileName = details.fileName || details.archivo || null;
 
     // Try primary English table: service_logs
     const { error: englishErr } = await supabase.from('service_logs').insert({
@@ -147,11 +186,7 @@ export async function addServiceLog(logInput: {
       action: newLog.action,
       status: newLog.status,
       file_name: fileName,
-      details: {
-        ...details,
-        userName,
-        orgName,
-      },
+      details: enrichedDetails,
       ip_address: details.ip || '127.0.0.1',
       created_at: newLog.timestamp,
     });
@@ -164,11 +199,7 @@ export async function addServiceLog(logInput: {
         user_id: validUserId,
         accion: newLog.action,
         estado: newLog.status,
-        detalles: {
-          ...details,
-          userName,
-          orgNombre: orgName,
-        },
+        detalles: enrichedDetails,
         ip_origen: details.ip || '127.0.0.1',
         created_at: newLog.timestamp,
       });
@@ -181,7 +212,7 @@ export async function addServiceLog(logInput: {
 }
 
 /**
- * Fetches recent audit logs from Supabase (service_logs or logs_servicio)
+ * Fetches recent audit logs from Supabase (service_logs or logs_servicio) and correlates with files table
  */
 export async function getServiceLogs(): Promise<ServiceLog[]> {
   try {
@@ -190,7 +221,7 @@ export async function getServiceLogs(): Promise<ServiceLog[]> {
       .from('service_logs')
       .select('*')
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(100);
 
     // 2. Fallback to Spanish table if not yet migrated
     if (error) {
@@ -198,34 +229,83 @@ export async function getServiceLogs(): Promise<ServiceLog[]> {
         .from('logs_servicio')
         .select('*')
         .order('created_at', { ascending: false })
-        .limit(50);
+        .limit(100);
 
       data = fallback.data;
       error = fallback.error;
     }
 
+    // 3. Query files table to correlate real ticket metadata stored in Supabase
+    const filesByTicket: Record<string, any> = {};
+    try {
+      const { data: filesData } = await supabase
+        .from('files')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+      if (filesData) {
+        for (const f of filesData) {
+          if (f.ticket_id) filesByTicket[f.ticket_id] = f;
+        }
+      }
+    } catch {
+      // Ignore if files table query fails
+    }
+
     if (!error && data && data.length > 0) {
       return data.map((row: any) => {
-        const action = row.action || row.accion || 'UNKNOWN';
-        const status = row.status || row.estado || 'ALLOWED';
+        const action = row.action || row.accion || '';
+        const status = row.status || row.estado || '';
         const details = row.details || row.detalles || {};
-        const userName = details.userName || 'Unknown';
-        const orgName = details.orgName || details.orgNombre || 'Organization';
+        const ticketId = details.ticketId || row.ticket_id || null;
+        const matchedFile = ticketId ? filesByTicket[ticketId] : null;
+
+        const userId = row.user_id || matchedFile?.user_id || details.userId || null;
+        const userName = details.userName || (userId && USERS[userId]?.name) || null;
+        const orgId = row.org_id || matchedFile?.org_id || details.orgId || null;
+        const orgName = details.orgName || details.orgNombre || (orgId && ORGANIZATIONS[orgId]?.name) || null;
+        const fileName = row.file_name || details.fileName || matchedFile?.original_name || matchedFile?.nombre_original || null;
+        const extension = details.extension || matchedFile?.extension || (fileName && fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : null);
+        const mimeType = details.mimeType || matchedFile?.mime_type || matchedFile?.formato || null;
+        const fileSize = details.fileSize ?? matchedFile?.size_bytes ?? matchedFile?.tamano_bytes ?? null;
+        const resourceType = details.resourceType || matchedFile?.resource_type || matchedFile?.tipo_recurso || null;
+        const visibility = details.visibility || matchedFile?.visibility || matchedFile?.visibilidad || null;
+        const uploadUrl = details.uploadUrl || null;
+        const s3Landing = details.s3Landing || matchedFile?.s3_pending_key || matchedFile?.s3_key_pendiente || null;
+        const s3Permanent = details.s3Permanent || matchedFile?.s3_processed_key || matchedFile?.s3_key_procesado || null;
+        const method = details.method || (action === 'S3_UPLOAD_CONFIRMED' ? 'PUT' : 'POST');
+        const ipAddress = row.ip_address || row.ip_origen || details.ip || null;
+        const message = details.message || details.reason || details.alert || null;
 
         return {
           id: row.id,
           timestamp: row.created_at,
+          method,
           action,
           status,
+          ticketId,
+          fileId: details.fileId || matchedFile?.id || null,
+          userId,
+          userName,
+          orgId,
+          orgName,
+          targetOrgId: details.targetOrgId || null,
+          fileName,
+          extension,
+          mimeType,
+          fileSize,
+          resourceType,
+          visibility,
+          uploadUrl,
+          s3Landing,
+          s3Permanent,
+          ipAddress,
+          message,
+          details,
           accion: action,
           estado: status,
-          userId: row.user_id,
-          userName,
-          orgId: row.org_id,
-          orgName,
-          orgNombre: orgName,
-          targetOrgId: details.targetOrgId,
-          details,
+          orgNombre: orgName || undefined,
           detalles: details,
         };
       });

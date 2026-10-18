@@ -1,8 +1,8 @@
 import React from 'react';
 
 export const metadata = {
-  title: 'Cloudinary AWS Service - Logs de Auditoría',
-  description: 'Monitoreo de logs de servicio y accesos multi-tenant en S3',
+  title: 'Service Logs - Bitacora de Eventos del Sistema',
+  description: 'Historial de eventos del sistema (service_logs)',
 };
 
 export default function RootLayout({
@@ -12,14 +12,16 @@ export default function RootLayout({
 }) {
   return (
     <html lang="es">
-      <head>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <link
-          rel="stylesheet"
-          href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
-        />
-      </head>
-      <body className="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased">
+      <body
+        style={{
+          margin: 0,
+          padding: '16px',
+          backgroundColor: '#ffffff',
+          color: '#000000',
+          fontFamily: 'monospace, sans-serif',
+          fontSize: '12px',
+        }}
+      >
         {children}
       </body>
     </html>

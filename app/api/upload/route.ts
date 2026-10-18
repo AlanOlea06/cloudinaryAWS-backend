@@ -37,15 +37,19 @@ export async function POST(req: NextRequest) {
     const user = userId ? USERS[userId] : null;
     if (!user) {
       await addServiceLog({
+        method: req.method,
         action: 'TICKET_REQUEST',
         status: 'DENIED_NOT_REGISTERED',
         userId: userId || 'unknown',
         userName: 'Unregistered User',
         targetOrgId: orgId,
         details: {
+          method: req.method,
           reason: 'User does not exist in the database.',
           ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
           fileName,
+          mimeType: fileType,
+          fileSize,
         },
       });
 
@@ -53,6 +57,7 @@ export async function POST(req: NextRequest) {
         {
           error: 'Unauthorized',
           code: 'USER_NOT_REGISTERED',
+          method: req.method,
           message: 'Access Denied: User is not registered in the system.',
         },
         { status: 401, headers: corsHeaders }
@@ -67,6 +72,7 @@ export async function POST(req: NextRequest) {
         {
           error: 'Not Found',
           code: 'ORGANIZATION_NOT_FOUND',
+          method: req.method,
           message: 'Target organization does not exist.',
         },
         { status: 404, headers: corsHeaders }
@@ -76,6 +82,7 @@ export async function POST(req: NextRequest) {
     // CHECK 2: Multi-Tenant Isolation (Disallow uploading to a foreign organization)
     if (user.orgId !== orgId) {
       await addServiceLog({
+        method: req.method,
         action: 'CROSS_ORG_VIOLATION',
         status: 'DENIED_CROSS_ORG',
         userId: user.id,
@@ -84,10 +91,13 @@ export async function POST(req: NextRequest) {
         orgName: userOrg?.name,
         targetOrgId: orgId,
         details: {
+          method: req.method,
           alert: 'CROSS-ORGANIZATION UPLOAD ATTEMPT BLOCKED',
           originOrg: userOrg?.name,
           destinationOrg: targetOrg.name,
           fileName,
+          mimeType: fileType,
+          fileSize,
           ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
         },
       });
@@ -96,6 +106,7 @@ export async function POST(req: NextRequest) {
         {
           error: 'Forbidden',
           code: 'FORBIDDEN_CROSS_ORGANIZATION',
+          method: req.method,
           message: `Multi-Tenant Security Violation: User '${user.name}' belongs to '${userOrg?.name}' and cannot upload files to '${targetOrg.name}'.`,
           details: {
             userOrg: userOrg?.name,
@@ -109,6 +120,7 @@ export async function POST(req: NextRequest) {
     // CHECK 3: Upload Permissions (RBAC)
     if (!user.canUpload) {
       await addServiceLog({
+        method: req.method,
         action: 'INSUFFICIENT_PERMISSIONS',
         status: 'DENIED_NO_PERMISSION',
         userId: user.id,
@@ -116,8 +128,12 @@ export async function POST(req: NextRequest) {
         orgId: user.orgId,
         orgName: userOrg?.name,
         details: {
+          method: req.method,
           reason: 'User has a viewer role and lacks upload authorization.',
           fileName,
+          mimeType: fileType,
+          fileSize,
+          ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
         },
       });
 
@@ -125,6 +141,7 @@ export async function POST(req: NextRequest) {
         {
           error: 'Forbidden',
           code: 'FORBIDDEN_NO_PERMISSION',
+          method: req.method,
           message: `Permission Denied: User '${user.name}' is not authorized to upload files to '${userOrg?.name}'.`,
         },
         { status: 403, headers: corsHeaders }
@@ -238,6 +255,7 @@ export async function POST(req: NextRequest) {
 
     // 2. Record audit log event in Supabase
     await addServiceLog({
+      method: req.method,
       action: 'TICKET_ISSUED',
       status: 'ALLOWED',
       userId: user.id,
@@ -246,15 +264,21 @@ export async function POST(req: NextRequest) {
       orgName: userOrg?.name,
       targetOrgId: orgId,
       details: {
+        method: req.method,
+        uploadMethod: 'PUT',
         ticketId,
         fileId,
         fileName,
+        extension,
+        mimeType: fileType,
         fileSize,
         resourceType,
         visibility,
+        uploadUrl,
         mode: isRealS3 ? 'REAL_AWS_S3' : 'MOCK_SIMULATED',
         s3Landing: landingZoneKey,
         s3Permanent: permanentTargetKey,
+        ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
       },
     });
 
@@ -263,6 +287,8 @@ export async function POST(req: NextRequest) {
         ticketId,
         fileId,
         uploadUrl,
+        method: req.method,
+        uploadMethod: 'PUT',
         isRealS3,
         isMultipart: fileSize > 20 * 1024 * 1024,
         user: {
@@ -286,8 +312,11 @@ export async function POST(req: NextRequest) {
           visibility,
           fileName,
           extension,
+          mimeType: fileType,
           fileSize,
           sha256Hash,
+          method: req.method,
+          uploadMethod: 'PUT',
           isRealS3,
           issuedAt: new Date(timestamp).toISOString(),
         },
@@ -316,40 +345,64 @@ export async function POST(req: NextRequest) {
 // 3. Upload Confirmation / Mock PUT Fallback
 export async function PUT(req: NextRequest) {
   const { searchParams } = new URL(req.url);
-  const ticketId = searchParams.get('ticketId') || 'unknown';
+  const ticketId = searchParams.get('ticketId') || '';
 
-  // 1. Update file status in Supabase
+  let fileRow: any = null;
+
+  // 1. Update file status in Supabase and retrieve real stored record
   try {
     const nowIso = new Date().toISOString();
-    const { error: errFiles } = await supabase
+    const { data: updatedFiles, error: errFiles } = await supabase
       .from('files')
       .update({
         status: 'completed',
         completed_at: nowIso,
         updated_at: nowIso,
       })
-      .eq('ticket_id', ticketId);
+      .eq('ticket_id', ticketId)
+      .select('*');
 
-    if (errFiles) {
-      await supabase
+    if (!errFiles && updatedFiles && updatedFiles.length > 0) {
+      fileRow = updatedFiles[0];
+    } else if (errFiles) {
+      const { data: updatedArchivos } = await supabase
         .from('archivos')
         .update({
           estado: 'completado',
           completado_at: nowIso,
           updated_at: nowIso,
         })
-        .eq('ticket_id', ticketId);
+        .eq('ticket_id', ticketId)
+        .select('*');
+
+      if (updatedArchivos && updatedArchivos.length > 0) {
+        fileRow = updatedArchivos[0];
+      }
     }
   } catch (dbErr: any) {
     console.error('Error updating file in Supabase:', dbErr.message);
   }
 
-  // 2. Record confirmation audit event
+  // 2. Record confirmation audit event with real database fields
   await addServiceLog({
+    method: req.method,
     action: 'S3_UPLOAD_CONFIRMED',
     status: 'UPLOADED_LANDING',
+    userId: fileRow?.user_id || undefined,
+    orgId: fileRow?.org_id || undefined,
     details: {
+      method: req.method,
       ticketId,
+      fileId: fileRow?.id || null,
+      fileName: fileRow?.original_name || fileRow?.nombre_original || null,
+      extension: fileRow?.extension || null,
+      mimeType: fileRow?.mime_type || fileRow?.formato || null,
+      fileSize: fileRow?.size_bytes ?? fileRow?.tamano_bytes ?? null,
+      resourceType: fileRow?.resource_type || fileRow?.tipo_recurso || null,
+      visibility: fileRow?.visibility || fileRow?.visibilidad || null,
+      s3Landing: fileRow?.s3_pending_key || fileRow?.s3_key_pendiente || null,
+      s3Permanent: fileRow?.s3_processed_key || fileRow?.s3_key_procesado || null,
+      ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
       message: `File confirmed in S3 landing zone for ticket ${ticketId}`,
     },
   });
@@ -357,6 +410,7 @@ export async function PUT(req: NextRequest) {
   return NextResponse.json(
     {
       status: 'success',
+      method: req.method,
       message: `File upload confirmed for ticket ${ticketId}`,
       ticketId,
       s3Status: 'uploaded_to_landing',

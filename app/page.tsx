@@ -2,363 +2,187 @@
 
 import React, { useState, useEffect } from 'react';
 
-interface ServiceLog {
+interface LogEntry {
   id: string;
   timestamp: string;
+  method?: string | null;
   action: string;
   status: string;
-  userId?: string;
-  userName?: string;
-  orgId?: string;
-  orgName?: string;
-  targetOrgId?: string;
-  details: any;
+  ticketId?: string | null;
+  fileId?: string | null;
+  userId?: string | null;
+  userName?: string | null;
+  orgId?: string | null;
+  orgName?: string | null;
+  targetOrgId?: string | null;
+  fileName?: string | null;
+  extension?: string | null;
+  mimeType?: string | null;
+  fileSize?: number | null;
+  resourceType?: string | null;
+  visibility?: string | null;
+  uploadUrl?: string | null;
+  s3Landing?: string | null;
+  s3Permanent?: string | null;
+  ipAddress?: string | null;
+  message?: string | null;
+  details?: any;
 }
 
-interface FileRecord {
-  id: string;
-  ticket_id: string;
-  userName?: string;
-  user_name?: string;
-  fileName?: string;
-  nombre_original?: string;
-  extension?: string;
-  mimeType?: string;
-  mime_type?: string;
-  formato?: string;
-  sizeBytes?: number;
-  tamano_bytes?: number;
-  resource_type?: string;
-  tipo_recurso?: string;
-  visibility?: string;
-  visibilidad?: string;
-  status?: string;
-  estado?: string;
-  s3_processed_key?: string;
-  s3_key_procesado?: string;
-  created_at: string;
-}
+const cellStyle: React.CSSProperties = {
+  border: '1px solid #cccccc',
+  padding: '6px 8px',
+  verticalAlign: 'top',
+  wordBreak: 'break-all',
+};
+
+const headerCellStyle: React.CSSProperties = {
+  ...cellStyle,
+  backgroundColor: '#e0e0e0',
+  fontWeight: 'bold',
+  whiteSpace: 'nowrap',
+};
 
 export default function ServiceLogsPage() {
-  const [logs, setLogs] = useState<ServiceLog[]>([]);
-  const [files, setFiles] = useState<FileRecord[]>([]);
-  const [activeTab, setActiveTab] = useState<'LOGS' | 'FILES'>('LOGS');
-  const [filter, setFilter] = useState<'ALL' | 'ALLOWED' | 'DENIED'>('ALL');
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
-  const [lastUpdated, setLastUpdated] = useState<string>('');
 
-  const fetchData = async () => {
+  const fetchLogs = async () => {
     try {
       setLoading(true);
-      // 1. Audit logs from Supabase
-      const resLogs = await fetch('/api/logs');
-      if (resLogs.ok) {
-        const dataLogs = await resLogs.json();
-        setLogs(dataLogs.logs || []);
+      const res = await fetch('/api/logs', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setLogs(Array.isArray(data.logs) ? data.logs : []);
       }
-
-      // 2. Files from Supabase
-      const resFiles = await fetch('/api/records');
-      if (resFiles.ok) {
-        const dataFiles = await resFiles.json();
-        setFiles(dataFiles.records || []);
-      }
-
-      setLastUpdated(new Date().toLocaleTimeString());
     } catch (err) {
-      console.error('Error fetching data:', err);
+      console.error('Error fetching logs:', err);
     } finally {
       setLoading(false);
     }
   };
 
-  const clearData = async () => {
-    const target = activeTab === 'LOGS' ? 'service logs' : 'file records';
-    if (!confirm(`Do you want to clear ${target} in Supabase?`)) return;
-    try {
-      const url = activeTab === 'LOGS' ? '/api/logs' : '/api/records';
-      await fetch(url, { method: 'DELETE' });
-      fetchData();
-    } catch (err) {
-      console.error('Error clearing data:', err);
-    }
+  const clearLogs = async () => {
+    if (!confirm('¿Limpiar todos los registros de service_logs en Supabase?')) return;
+    await fetch('/api/logs', { method: 'DELETE' });
+    fetchLogs();
   };
 
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 4000); // Polling every 4s
+    fetchLogs();
+    const interval = setInterval(fetchLogs, 4000);
     return () => clearInterval(interval);
   }, []);
 
-  const filteredLogs = logs.filter((l) => {
-    const status = l.status || (l as any).estado || '';
-    if (filter === 'ALL') return true;
-    if (filter === 'ALLOWED') return status === 'ALLOWED' || status === 'PERMITIDO' || status === 'UPLOADED_LANDING' || status === 'SUBIDO_LANDING';
-    if (filter === 'DENIED') return status.startsWith('DENIED') || status.startsWith('DENEGADO');
-    return true;
-  });
-
-  const getStatusBadge = (statusInput: string) => {
-    const status = statusInput?.toUpperCase() || '';
-    if (status === 'ALLOWED' || status === 'PERMITIDO') {
-      return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">ALLOWED</span>;
-    }
-    if (status === 'COMPLETED' || status === 'UPLOADED_LANDING' || status === 'SUBIDO_LANDING' || status === 'COMPLETADO') {
-      return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/10 text-cyan-400 border border-cyan-500/30">COMPLETED</span>;
-    }
-    if (status === 'PENDING' || status === 'PENDING_UPLOAD' || status === 'PENDIENTE_SUBIDA') {
-      return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">PENDING</span>;
-    }
-    if (status.includes('CROSS_ORG') || status.includes('OTRA_ORG')) {
-      return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/40">MULTI-TENANT VIOLATION</span>;
-    }
-    if (status.includes('PERMISSION') || status.includes('PERMISOS')) {
-      return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/40">NO PERMISSION</span>;
-    }
-    if (status.includes('NOT_REGISTERED') || status.includes('NO_REGISTRADO')) {
-      return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/40">NOT REGISTERED</span>;
-    }
-    return <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-700 text-slate-300">{statusInput}</span>;
-  };
-
   return (
-    <main className="max-w-6xl mx-auto p-4 md:p-8 space-y-6">
-      {/* Header */}
-      <header className="border-b border-slate-800 pb-5 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
-              <i className="fa-solid fa-server"></i>
-            </div>
-            <h1 className="text-xl font-bold text-white tracking-tight">
-              Supabase Database & Service Logs Monitor
-            </h1>
-            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-              🟢 Connected to Supabase
-            </span>
-          </div>
-          <p className="text-xs text-slate-400 mt-1">
-            Real-time persistence in PostgreSQL tables <code>service_logs</code> and <code>files</code>.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            onClick={fetchData}
-            disabled={loading}
-            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 border border-slate-700 transition flex items-center gap-1.5"
-          >
-            <i className={`fa-solid fa-arrows-rotate ${loading ? 'fa-spin' : ''}`}></i>
-            Refresh
-          </button>
-          <button
-            onClick={clearData}
-            className="px-3 py-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-xs text-rose-300 border border-rose-800/50 transition flex items-center gap-1.5"
-          >
-            <i className="fa-solid fa-trash-can"></i>
-            Clear {activeTab === 'LOGS' ? 'Logs' : 'Files'}
-          </button>
-        </div>
-      </header>
-
-      {/* Tabs Selector */}
-      <div className="flex items-center gap-3 border-b border-slate-800 pb-2">
-        <button
-          onClick={() => setActiveTab('LOGS')}
-          className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
-            activeTab === 'LOGS'
-              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/20'
-              : 'bg-slate-900 text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <i className="fa-solid fa-list-check"></i>
-          &apos;service_logs&apos; Table ({logs.length})
-        </button>
-        <button
-          onClick={() => setActiveTab('FILES')}
-          className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
-            activeTab === 'FILES'
-              ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20'
-              : 'bg-slate-900 text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <i className="fa-solid fa-database"></i>
-          &apos;files&apos; Table ({files.length})
-        </button>
+    <div>
+      <div style={{ marginBottom: '10px' }}>
+        <strong>BITACORA DE EVENTOS DEL SISTEMA (service_logs)</strong> | Total registros: {logs.length}{' '}
+        | <button onClick={fetchLogs} disabled={loading}>{loading ? 'Cargando...' : 'Actualizar'}</button>{' '}
+        <button onClick={clearLogs}>Limpiar Logs</button>
       </div>
 
-      {/* VIEW 1: SERVICE_LOGS TABLE */}
-      {activeTab === 'LOGS' && (
-        <section className="space-y-4">
-          {/* Quick Metrics */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4">
-              <span className="text-xs text-slate-400 uppercase font-mono">Total Logs</span>
-              <p className="text-2xl font-bold text-white mt-1">{logs.length}</p>
-            </div>
-            <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4">
-              <span className="text-xs text-emerald-400 uppercase font-mono">Allowed</span>
-              <p className="text-2xl font-bold text-emerald-400 mt-1">
-                {logs.filter((l) => (l.status || (l as any).estado) === 'ALLOWED' || (l.status || (l as any).estado) === 'PERMITIDO').length}
-              </p>
-            </div>
-            <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4">
-              <span className="text-xs text-rose-400 uppercase font-mono">Denied / Violations</span>
-              <p className="text-2xl font-bold text-rose-400 mt-1">
-                {logs.filter((l) => ((l.status || (l as any).estado) || '').startsWith('DENIED') || ((l.status || (l as any).estado) || '').startsWith('DENEGADO')).length}
-              </p>
-            </div>
-            <div className="bg-slate-900/80 border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
-              <span className="text-xs text-slate-400 font-mono">Filter:</span>
-              <div className="flex items-center gap-1 mt-1 text-xs">
-                <button
-                  onClick={() => setFilter('ALL')}
-                  className={`px-2.5 py-1 rounded transition ${filter === 'ALL' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}
-                >
-                  All
-                </button>
-                <button
-                  onClick={() => setFilter('ALLOWED')}
-                  className={`px-2.5 py-1 rounded transition ${filter === 'ALLOWED' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-400'}`}
-                >
-                  Allowed
-                </button>
-                <button
-                  onClick={() => setFilter('DENIED')}
-                  className={`px-2.5 py-1 rounded transition ${filter === 'DENIED' ? 'bg-rose-600 text-white' : 'bg-slate-800 text-slate-400'}`}
-                >
-                  Denied
-                </button>
-              </div>
-            </div>
-          </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table
+          style={{
+            width: '100%',
+            borderCollapse: 'collapse',
+            border: '1px solid #cccccc',
+            fontFamily: 'monospace',
+            fontSize: '12px',
+            textAlign: 'left',
+          }}
+        >
+          <thead>
+            <tr>
+              <th style={headerCellStyle}>id</th>
+              <th style={headerCellStyle}>timestamp</th>
+              <th style={headerCellStyle}>method</th>
+              <th style={headerCellStyle}>action</th>
+              <th style={headerCellStyle}>status</th>
+              <th style={headerCellStyle}>ticket_id</th>
+              <th style={headerCellStyle}>user_id</th>
+              <th style={headerCellStyle}>user_name</th>
+              <th style={headerCellStyle}>org_id</th>
+              <th style={headerCellStyle}>org_name</th>
+              <th style={headerCellStyle}>file_name</th>
+              <th style={headerCellStyle}>extension</th>
+              <th style={headerCellStyle}>mime_type</th>
+              <th style={headerCellStyle}>size_bytes</th>
+              <th style={headerCellStyle}>visibility</th>
+              <th style={headerCellStyle}>upload_url (link)</th>
+              <th style={headerCellStyle}>s3_pending_key</th>
+              <th style={headerCellStyle}>s3_processed_key</th>
+              <th style={headerCellStyle}>ip_address</th>
+              <th style={headerCellStyle}>message / detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {logs.length === 0 ? (
+              <tr style={{ backgroundColor: '#ffffff' }}>
+                <td colSpan={20} style={cellStyle}>
+                  Sin registros en service_logs.
+                </td>
+              </tr>
+            ) : (
+              logs.map((log, index) => {
+                const details = log.details || {};
+                const method = log.method || details.method || '-';
+                const ticketId = log.ticketId || details.ticketId || '-';
+                const userId = log.userId || details.userId || '-';
+                const userName = log.userName || details.userName || '-';
+                const orgId = log.orgId || details.orgId || '-';
+                const orgName = log.orgName || details.orgName || details.orgNombre || '-';
+                const fileName = log.fileName || details.fileName || '-';
+                const extension = log.extension || details.extension || '-';
+                const mimeType = log.mimeType || details.mimeType || '-';
+                const fileSize = log.fileSize ?? details.fileSize ?? '-';
+                const visibility = log.visibility || details.visibility || '-';
+                const uploadUrl = log.uploadUrl || details.uploadUrl || '-';
+                const s3Landing = log.s3Landing || details.s3Landing || '-';
+                const s3Permanent = log.s3Permanent || details.s3Permanent || '-';
+                const ipAddress = log.ipAddress || details.ip || '-';
+                const message =
+                  log.message ||
+                  details.message ||
+                  details.reason ||
+                  details.alert ||
+                  '-';
 
-          {/* Logs Table */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs font-mono">
-                <thead className="bg-slate-950/70 text-slate-400 uppercase text-[10px] border-b border-slate-800">
-                  <tr>
-                    <th className="py-2.5 px-4">Time</th>
-                    <th className="py-2.5 px-4">Action</th>
-                    <th className="py-2.5 px-4">Status</th>
-                    <th className="py-2.5 px-4">User</th>
-                    <th className="py-2.5 px-4">Organization</th>
-                    <th className="py-2.5 px-4">Details</th>
+                return (
+                  <tr
+                    key={log.id}
+                    style={{
+                      backgroundColor: index % 2 === 0 ? '#ffffff' : '#f2f2f2',
+                    }}
+                  >
+                    <td style={cellStyle}>{log.id}</td>
+                    <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>{log.timestamp}</td>
+                    <td style={cellStyle}>{method}</td>
+                    <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>{log.action}</td>
+                    <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>{log.status}</td>
+                    <td style={cellStyle}>{ticketId}</td>
+                    <td style={cellStyle}>{userId}</td>
+                    <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>{userName}</td>
+                    <td style={cellStyle}>{orgId}</td>
+                    <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>{orgName}</td>
+                    <td style={cellStyle}>{fileName}</td>
+                    <td style={cellStyle}>{extension}</td>
+                    <td style={cellStyle}>{mimeType}</td>
+                    <td style={cellStyle}>{fileSize}</td>
+                    <td style={cellStyle}>{visibility}</td>
+                    <td style={{ ...cellStyle, maxWidth: '320px' }}>{uploadUrl}</td>
+                    <td style={cellStyle}>{s3Landing}</td>
+                    <td style={cellStyle}>{s3Permanent}</td>
+                    <td style={cellStyle}>{ipAddress}</td>
+                    <td style={cellStyle}>{message}</td>
                   </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                  {filteredLogs.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="py-8 text-center text-slate-500 italic">
-                        No logs recorded yet in Supabase.
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredLogs.map((log) => {
-                      const time = new Date(log.timestamp).toLocaleTimeString();
-                      const status = log.status || (log as any).estado || '';
-                      const isDeny = status.startsWith('DENIED') || status.startsWith('DENEGADO');
-                      const details = log.details || (log as any).detalles || {};
-                      const action = log.action || (log as any).accion || '--';
-
-                      return (
-                        <tr key={log.id} className={`hover:bg-slate-800/40 transition ${isDeny ? 'bg-rose-950/10' : ''}`}>
-                          <td className="py-3 px-4 text-slate-400 whitespace-nowrap">{time}</td>
-                          <td className="py-3 px-4 font-bold text-slate-200">{action}</td>
-                          <td className="py-3 px-4">{getStatusBadge(status)}</td>
-                          <td className="py-3 px-4 text-indigo-300 font-medium">{log.userName || log.userId || '--'}</td>
-                          <td className="py-3 px-4 text-slate-300">{log.orgName || (log as any).orgNombre || log.orgId || '--'}</td>
-                          <td className="py-3 px-4 text-slate-400 max-w-md">
-                            {details.alert && (
-                              <div className="text-rose-400 font-bold text-[11px] mb-0.5">⚠️ {details.alert}</div>
-                            )}
-                            {details.reason && <div className="text-amber-300 text-[11px]">{details.reason}</div>}
-                            {details.motivo && <div className="text-amber-300 text-[11px]">{details.motivo}</div>}
-                            {(details.s3Permanent || details.s3Permanente) && (
-                              <div className="text-cyan-400 text-[10px] truncate" title={details.s3Permanent || details.s3Permanente}>
-                                ➔ {details.s3Permanent || details.s3Permanente}
-                              </div>
-                            )}
-                            {details.message && !details.s3Permanent && !details.s3Permanente && (
-                              <div className="text-[11px]">{details.message}</div>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {/* VIEW 2: FILES TABLE */}
-      {activeTab === 'FILES' && (
-        <section className="space-y-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs font-mono">
-                <thead className="bg-slate-950/70 text-slate-400 uppercase text-[10px] border-b border-slate-800">
-                  <tr>
-                    <th className="py-2.5 px-4">Original Name</th>
-                    <th className="py-2.5 px-4">Ext</th>
-                    <th className="py-2.5 px-4">User</th>
-                    <th className="py-2.5 px-4">Status</th>
-                    <th className="py-2.5 px-4">MIME / Type</th>
-                    <th className="py-2.5 px-4">Size</th>
-                    <th className="py-2.5 px-4">S3 Key in DB</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60 text-slate-300">
-                  {files.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="py-8 text-center text-slate-500 italic">
-                        No files recorded yet in Supabase.
-                      </td>
-                    </tr>
-                  ) : (
-                    files.map((file) => {
-                      const fileName = file.fileName || file.nombre_original || 'unknown';
-                      const ext = file.extension || (fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : '--');
-                      const mime = file.mimeType || file.mime_type || file.formato || '--';
-                      const userName = file.userName || file.user_name || '--';
-                      const status = file.status || file.estado || 'pending';
-                      const sizeBytes = file.sizeBytes || file.tamano_bytes || 0;
-                      const resourceType = file.resource_type || file.tipo_recurso || 'document';
-                      const visibility = file.visibility || file.visibilidad || 'private';
-                      const s3Key = file.s3_processed_key || file.s3_key_procesado || '--';
-
-                      return (
-                        <tr key={file.id} className="hover:bg-slate-800/40 transition">
-                          <td className="py-3 px-4 font-bold text-slate-200">{fileName}</td>
-                          <td className="py-3 px-4">
-                            <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-amber-300 font-bold font-mono text-[11px]">
-                              {ext}
-                            </span>
-                          </td>
-                          <td className="py-3 px-4 text-indigo-300">{userName}</td>
-                          <td className="py-3 px-4">{getStatusBadge(status)}</td>
-                          <td className="py-3 px-4 text-slate-400">
-                            <div>{resourceType} ({visibility})</div>
-                            <div className="text-[10px] text-slate-500 truncate max-w-[140px]" title={mime}>{mime}</div>
-                          </td>
-                          <td className="py-3 px-4 text-slate-400">{(sizeBytes / 1024).toFixed(1)} KB</td>
-                          <td className="py-3 px-4 text-cyan-400 truncate max-w-xs" title={s3Key}>
-                            {s3Key}
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-      )}
-    </main>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
