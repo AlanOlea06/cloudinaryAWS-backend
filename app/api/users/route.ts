@@ -31,25 +31,8 @@ export async function GET() {
         orgName: u.organizations?.name || 'Unknown Org',
         orgSlug: u.organizations?.slug || '',
       }));
-    } else {
-      // Fallback to legacy usuarios table if migration not completed
-      const { data: dbUsuarios } = await supabase
-        .from('usuarios')
-        .select('id, nombre, email, rol, puede_subir, org_id, organizaciones(id, nombre, slug)')
-        .order('nombre');
-
-      if (dbUsuarios) {
-        users = dbUsuarios.map((u: any) => ({
-          id: u.id,
-          name: u.nombre,
-          email: u.email,
-          role: u.rol,
-          canUpload: Boolean(u.puede_subir),
-          orgId: u.org_id,
-          orgName: u.organizaciones?.nombre || 'Unknown Org',
-          orgSlug: u.organizaciones?.slug || '',
-        }));
-      }
+    } else if (usersErr) {
+      console.error('Error querying users from Supabase:', usersErr.message);
     }
 
     // 2. Query organizations from Supabase
@@ -61,19 +44,8 @@ export async function GET() {
 
     if (!orgsErr && dbOrgs) {
       organizations = dbOrgs;
-    } else {
-      const { data: dbLegacyOrgs } = await supabase
-        .from('organizaciones')
-        .select('id, nombre, slug')
-        .order('nombre');
-
-      if (dbLegacyOrgs) {
-        organizations = dbLegacyOrgs.map((o: any) => ({
-          id: o.id,
-          name: o.nombre,
-          slug: o.slug,
-        }));
-      }
+    } else if (orgsErr) {
+      console.error('Error querying organizations from Supabase:', orgsErr.message);
     }
 
     return NextResponse.json(

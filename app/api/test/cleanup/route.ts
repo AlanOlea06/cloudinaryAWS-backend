@@ -36,41 +36,32 @@ async function handleCleanup(req: NextRequest) {
     let s3DeletedKeys: string[] = [];
     let s3Status = 'aws_not_configured';
 
-    // 1. Purge S3 Objects (both 'pending/' and legacy 'pendientes/')
+    // 1. Purge S3 Objects under 'pending/'
     if (isAwsConfigured()) {
       try {
         if (cleanAll) {
           const resPending = await deleteS3ObjectsByPrefix('pending/');
-          const resPendientes = await deleteS3ObjectsByPrefix('pendientes/');
-          s3DeletedCount = resPending.count + resPendientes.count;
-          s3DeletedKeys = [...resPending.keys, ...resPendientes.keys];
+          s3DeletedCount = resPending.count;
+          s3DeletedKeys = resPending.keys;
         } else {
-          // Look up user's pending keys from Supabase before deleting database records
+          // Look up user's pending keys from Supabase files table before deleting database records
           const { data: userFiles } = await supabase
             .from('files')
             .select('s3_pending_key')
-            .eq('user_id', userId);
-          const { data: userArchivos } = await supabase
-            .from('archivos')
-            .select('s3_key_pendiente')
             .eq('user_id', userId);
 
           const keysToDelete: string[] = [];
           (userFiles || []).forEach((f: any) => {
             if (f.s3_pending_key) keysToDelete.push(f.s3_pending_key);
           });
-          (userArchivos || []).forEach((a: any) => {
-            if (a.s3_key_pendiente) keysToDelete.push(a.s3_key_pendiente);
-          });
 
           // Delete specific keys (e.g. pending/{fileId}{ext})
           const resKeys = await deleteS3ObjectsByKeys(keysToDelete);
           // Also clean legacy user prefix (pending/{userId}/...) if present
           const resLegacyPending = await deleteS3ObjectsByPrefix(`pending/${userId}/`);
-          const resLegacyPendientes = await deleteS3ObjectsByPrefix(`pendientes/${userId}/`);
 
-          s3DeletedCount = resKeys.count + resLegacyPending.count + resLegacyPendientes.count;
-          s3DeletedKeys = [...resKeys.keys, ...resLegacyPending.keys, ...resLegacyPendientes.keys];
+          s3DeletedCount = resKeys.count + resLegacyPending.count;
+          s3DeletedKeys = [...resKeys.keys, ...resLegacyPending.keys];
         }
         s3Status = 'success';
       } catch (s3Err: any) {
@@ -79,30 +70,26 @@ async function handleCleanup(req: NextRequest) {
       }
     }
 
-    // 2. Clean File Records in Supabase (files & legacy archivos)
+    // 2. Clean File Records in Supabase (files table)
     try {
       if (cleanAll) {
         await supabase.from('files').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-        await supabase.from('archivos').delete().neq('id', '00000000-0000-0000-0000-000000000000');
       } else {
         await supabase.from('files').delete().eq('user_id', userId);
-        await supabase.from('archivos').delete().eq('user_id', userId);
       }
     } catch (e: any) {
       console.warn('Warning cleaning up files table:', e.message);
     }
 
-    // 3. Clean Audit Logs in Supabase (service_logs & legacy logs_servicio)
+    // 3. Clean Audit Logs in Supabase (service_logs table)
     try {
       if (cleanAll) {
         await supabase.from('service_logs').delete().not('created_at', 'is', null);
-        await supabase.from('logs_servicio').delete().not('created_at', 'is', null);
       } else {
         await supabase.from('service_logs').delete().eq('user_id', userId);
-        await supabase.from('logs_servicio').delete().eq('user_id', userId);
       }
     } catch (e: any) {
-      console.warn('Warning cleaning up logs table:', e.message);
+      console.warn('Warning cleaning up service_logs table:', e.message);
     }
 
     // Record cleanup audit log

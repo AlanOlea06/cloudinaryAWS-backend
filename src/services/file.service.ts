@@ -90,48 +90,40 @@ export class FileService {
       creado_en: new Date().toISOString(),
     };
 
-    // Objeto base para insertar
+    // Objeto base para insertar en files table
     const recordPayload: any = {
       id: fileId,
       ticket_id: ticketId,
       user_id: validUserId,
-      user_name: input.userName || 'Usuario',
-      nombre_original: input.fileName,
-      formato: input.fileType,
-      tamano_bytes: input.fileSize,
-      s3_key_pendiente: s3KeyPendiente,
-      estado: 'pendiente_subida',
-      metadata: initialMetadata,
+      org_id: validOrgId,
+      original_name: input.fileName,
+      mime_type: input.fileType,
+      size_bytes: input.fileSize,
+      resource_type: tipoRecurso === 'imagenes' ? 'images' : tipoRecurso === 'videos' ? 'videos' : 'documents',
+      visibility: visibilidad === 'privados' ? 'private' : 'public',
+      s3_pending_key: s3KeyPendiente,
+      status: 'pending_upload',
+      created_at: new Date().toISOString(),
     };
 
-    // Si la tabla ya tiene las columnas de organizaciones las incluimos
-    try {
-      recordPayload.org_id = validOrgId;
-      recordPayload.visibilidad = visibilidad;
-      recordPayload.tipo_recurso = tipoRecurso;
-    } catch {}
-
     const { data, error } = await supabase
-      .from('archivos')
+      .from('files')
       .insert(recordPayload)
       .select('*')
       .single();
 
     if (error) {
-      console.warn('Advertencia al insertar con columnas multi-tenant, reintentando con columnas base:', error.message);
-      // Reintento sin las columnas nuevas si no se ha corrido el script en Supabase
-      delete recordPayload.org_id;
-      delete recordPayload.visibilidad;
-      delete recordPayload.tipo_recurso;
-
-      const fallback = await supabase.from('archivos').insert(recordPayload).select('*').single();
-      if (fallback.error) {
-        throw new Error(`Error al persistir archivo en Supabase: ${fallback.error.message}`);
-      }
-      return fallback.data;
+      console.error('Error insertando en files de Supabase:', error.message);
+      throw new Error(`Error al persistir archivo en Supabase: ${error.message}`);
     }
 
-    return data;
+    return {
+      ...data,
+      nombre_original: data.original_name,
+      formato: data.mime_type,
+      tamano_bytes: data.size_bytes,
+      estado: data.status,
+    };
   }
 
   /**
@@ -146,9 +138,21 @@ export class FileService {
       metadata?: any;
     }
   ): Promise<FileRecord | null> {
+    const fileUpdates: any = {
+      updated_at: new Date().toISOString(),
+    };
+    if (updates.estado) {
+      fileUpdates.status = updates.estado === 'completado' ? 'completed' : updates.estado;
+      if (updates.estado === 'completado') {
+        fileUpdates.completed_at = new Date().toISOString();
+      }
+    }
+    if (updates.s3_key_procesado) fileUpdates.s3_processed_key = updates.s3_key_procesado;
+    if (updates.cloudfront_url) fileUpdates.cloudfront_url = updates.cloudfront_url;
+
     const { data, error } = await supabase
-      .from('archivos')
-      .update(updates)
+      .from('files')
+      .update(fileUpdates)
       .eq('ticket_id', ticketId)
       .select('*')
       .single();
@@ -166,7 +170,7 @@ export class FileService {
    */
   static async getRecentRecords(limit = 15): Promise<FileRecord[]> {
     const { data, error } = await supabase
-      .from('archivos')
+      .from('files')
       .select('*')
       .order('created_at', { ascending: false })
       .limit(limit);
@@ -176,7 +180,13 @@ export class FileService {
       return [];
     }
 
-    return data || [];
+    return (data || []).map((d: any) => ({
+      ...d,
+      nombre_original: d.original_name,
+      formato: d.mime_type,
+      tamano_bytes: d.size_bytes,
+      estado: d.status,
+    }));
   }
 
   /**
@@ -184,9 +194,9 @@ export class FileService {
    */
   static async clearSimulatedRecords(): Promise<number> {
     const { data, error } = await supabase
-      .from('archivos')
+      .from('files')
       .delete()
-      .filter('metadata->>modo_simulado', 'eq', 'true')
+      .neq('id', '00000000-0000-0000-0000-000000000000')
       .select('id');
 
     if (error) {

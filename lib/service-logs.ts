@@ -25,11 +25,6 @@ export interface ServiceLog {
   ipAddress?: string | null;
   message?: string | null;
   details: any;
-  // Backward compatibility fields
-  accion?: string;
-  estado?: string;
-  orgNombre?: string;
-  detalles?: any;
 }
 
 /**
@@ -57,7 +52,7 @@ if (!globalForLogs.serviceLogs) {
 }
 
 /**
- * Persists an audit log event to memory and to Supabase (service_logs table with fallback to logs_servicio)
+ * Persists an audit log event to memory and to Supabase (service_logs table)
  */
 export async function addServiceLog(logInput: {
   method?: string;
@@ -119,10 +114,6 @@ export async function addServiceLog(logInput: {
     ipAddress: details.ip || null,
     message: details.message || details.reason || details.alert || null,
     details: enrichedDetails,
-    accion: action,
-    estado: status,
-    orgNombre: orgName || undefined,
-    detalles: enrichedDetails,
   };
 
   // 1. Persist to Supabase (letting PostgreSQL generate sequential numeric id)
@@ -149,24 +140,7 @@ export async function addServiceLog(logInput: {
     if (!englishErr && insertedRow?.id !== undefined) {
       newLog.id = insertedRow.id;
     } else if (englishErr) {
-      // Fallback if table is still logs_servicio
-      const { data: fallbackRow } = await supabase
-        .from('logs_servicio')
-        .insert({
-          org_id: validOrgId,
-          user_id: validUserId,
-          accion: newLog.action,
-          estado: newLog.status,
-          detalles: enrichedDetails,
-          ip_origen: details.ip || '127.0.0.1',
-          created_at: newLog.timestamp,
-        })
-        .select('id')
-        .single();
-
-      if (fallbackRow?.id !== undefined) {
-        newLog.id = fallbackRow.id;
-      }
+      console.error('Error inserting log in service_logs:', englishErr.message);
     }
   } catch (err: any) {
     console.error('Error persisting log in Supabase:', err.message);
@@ -181,7 +155,7 @@ export async function addServiceLog(logInput: {
 }
 
 /**
- * Fetches recent audit logs from Supabase (service_logs or logs_servicio) and correlates with files table
+ * Fetches recent audit logs from Supabase (service_logs table) and correlates with files table
  */
 export async function getServiceLogs(): Promise<ServiceLog[]> {
   try {
@@ -192,19 +166,7 @@ export async function getServiceLogs(): Promise<ServiceLog[]> {
       .order('created_at', { ascending: false })
       .limit(100);
 
-    // 2. Fallback to Spanish table if not yet migrated
-    if (error) {
-      const fallback = await supabase
-        .from('logs_servicio')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(100);
-
-      data = fallback.data;
-      error = fallback.error;
-    }
-
-    // 3. Query files table to correlate real ticket metadata stored in Supabase
+    // 2. Query files table to correlate real ticket metadata stored in Supabase
     const filesByTicket: Record<string, any> = {};
     try {
       const { data: filesData } = await supabase
@@ -224,27 +186,27 @@ export async function getServiceLogs(): Promise<ServiceLog[]> {
 
     if (!error && data && data.length > 0) {
       return data.map((row: any) => {
-        const action = row.action || row.accion || '';
-        const status = row.status || row.estado || '';
-        const details = row.details || row.detalles || {};
+        const action = row.action || '';
+        const status = row.status || '';
+        const details = row.details || {};
         const ticketId = details.ticketId || row.ticket_id || null;
         const matchedFile = ticketId ? filesByTicket[ticketId] : null;
 
         const userId = row.user_id || matchedFile?.user_id || details.userId || null;
         const userName = details.userName || null;
         const orgId = row.org_id || matchedFile?.org_id || details.orgId || null;
-        const orgName = details.orgName || details.orgNombre || null;
-        const fileName = row.file_name || details.fileName || matchedFile?.original_name || matchedFile?.nombre_original || null;
+        const orgName = details.orgName || null;
+        const fileName = row.file_name || details.fileName || matchedFile?.original_name || null;
         const extension = details.extension || matchedFile?.extension || (fileName && fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : null);
-        const mimeType = details.mimeType || matchedFile?.mime_type || matchedFile?.formato || null;
-        const fileSize = details.fileSize ?? matchedFile?.size_bytes ?? matchedFile?.tamano_bytes ?? null;
-        const resourceType = details.resourceType || matchedFile?.resource_type || matchedFile?.tipo_recurso || null;
-        const visibility = details.visibility || matchedFile?.visibility || matchedFile?.visibilidad || null;
+        const mimeType = details.mimeType || matchedFile?.mime_type || null;
+        const fileSize = details.fileSize ?? matchedFile?.size_bytes ?? null;
+        const resourceType = details.resourceType || matchedFile?.resource_type || null;
+        const visibility = details.visibility || matchedFile?.visibility || null;
         const uploadUrl = details.uploadUrl || null;
-        const s3Landing = details.s3Landing || matchedFile?.s3_pending_key || matchedFile?.s3_key_pendiente || null;
-        const s3Permanent = details.s3Permanent || matchedFile?.s3_processed_key || matchedFile?.s3_key_procesado || null;
+        const s3Landing = details.s3Landing || matchedFile?.s3_pending_key || null;
+        const s3Permanent = details.s3Permanent || matchedFile?.s3_processed_key || null;
         const method = details.method || (action === 'S3_UPLOAD_CONFIRMED' ? 'PUT' : 'POST');
-        const ipAddress = row.ip_address || row.ip_origen || details.ip || null;
+        const ipAddress = row.ip_address || details.ip || null;
         const message = details.message || details.reason || details.alert || null;
 
         return {
@@ -272,10 +234,6 @@ export async function getServiceLogs(): Promise<ServiceLog[]> {
           ipAddress,
           message,
           details,
-          accion: action,
-          estado: status,
-          orgNombre: orgName || undefined,
-          detalles: details,
         };
       });
     }
@@ -293,7 +251,6 @@ export async function clearServiceLogs(): Promise<void> {
   globalForLogs.serviceLogs = [];
   try {
     await supabase.from('service_logs').delete().not('created_at', 'is', null);
-    await supabase.from('logs_servicio').delete().not('created_at', 'is', null);
   } catch (err) {
     console.error('Error clearing logs in Supabase:', err);
   }

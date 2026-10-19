@@ -52,24 +52,6 @@ export async function POST(req: NextRequest) {
           role: dbUser.role,
           canUpload: Boolean(dbUser.can_upload),
         };
-      } else {
-        // Fallback to legacy usuarios table if migration not completed
-        const { data: dbUsuario } = await supabase
-          .from('usuarios')
-          .select('id, org_id, nombre, email, rol, puede_subir')
-          .eq('id', userId)
-          .maybeSingle();
-
-        if (dbUsuario) {
-          user = {
-            id: dbUsuario.id,
-            orgId: dbUsuario.org_id,
-            name: dbUsuario.nombre,
-            email: dbUsuario.email,
-            role: dbUsuario.rol,
-            canUpload: Boolean(dbUsuario.puede_subir),
-          };
-        }
       }
     }
 
@@ -116,15 +98,6 @@ export async function POST(req: NextRequest) {
 
       if (dbUserOrg) {
         userOrg = dbUserOrg;
-      } else {
-        const { data: dbLegacyUserOrg } = await supabase
-          .from('organizaciones')
-          .select('id, nombre, slug')
-          .eq('id', user.orgId)
-          .maybeSingle();
-        if (dbLegacyUserOrg) {
-          userOrg = { id: dbLegacyUserOrg.id, name: dbLegacyUserOrg.nombre, slug: dbLegacyUserOrg.slug };
-        }
       }
     }
 
@@ -137,15 +110,6 @@ export async function POST(req: NextRequest) {
 
       if (dbTargetOrg) {
         targetOrg = dbTargetOrg;
-      } else {
-        const { data: dbLegacyTargetOrg } = await supabase
-          .from('organizaciones')
-          .select('id, nombre, slug')
-          .eq('id', orgId)
-          .maybeSingle();
-        if (dbLegacyTargetOrg) {
-          targetOrg = { id: dbLegacyTargetOrg.id, name: dbLegacyTargetOrg.nombre, slug: dbLegacyTargetOrg.slug };
-        }
       }
     }
 
@@ -259,34 +223,39 @@ export async function POST(req: NextRequest) {
     // Cryptographically signed confirmation token (HMAC-SHA256)
     const confirmToken = generateTicketConfirmToken(ticketId, user.id, expiresAt);
 
-    // Determine AWS S3 direct upload vs Mock fallback
-    const forceMock = req.headers.get('x-mock-mode') === 'true' && !isAwsConfigured();
-    let uploadUrl = '';
-    let isRealS3 = false;
-
-    if (isAwsConfigured() && !forceMock) {
-      try {
-        const presignedS3Url = await generatePresignedUploadUrl(landingZoneKey, fileType, TTL_SECONDS);
-        if (presignedS3Url) {
-          uploadUrl = presignedS3Url;
-          isRealS3 = true;
-        }
-      } catch (s3Err: any) {
-        console.error('Error generating AWS S3 Presigned URL:', s3Err.message);
-      }
+    // Generate AWS S3 Presigned Upload URL (Direct AWS S3 - No Simulation)
+    if (!isAwsConfigured()) {
+      return NextResponse.json(
+        {
+          error: 'Configuration Error',
+          code: 'AWS_S3_NOT_CONFIGURED',
+          message: 'AWS S3 storage is not properly configured on the server.',
+        },
+        { status: 500, headers: corsHeaders }
+      );
     }
 
-    // Fallback URL if AWS S3 is not yet configured
-    if (!uploadUrl) {
-      const host = req.headers.get('host') || 'localhost:3000';
-      const protocol = host.includes('localhost') ? 'http' : 'https';
-      uploadUrl = `${protocol}://${host}/api/upload?ticketId=${ticketId}`;
-      isRealS3 = false;
-    }
-
-    // 1. Insert file record into Supabase (files table with fallback to archivos)
+    let uploadUrl: string | null = null;
     try {
-      const filePayload: any = {
+      uploadUrl = await generatePresignedUploadUrl(landingZoneKey, fileType, TTL_SECONDS);
+    } catch (s3Err: any) {
+      console.error('Error generating AWS S3 Presigned URL:', s3Err.message);
+    }
+
+    if (!uploadUrl) {
+      return NextResponse.json(
+        {
+          error: 'Storage Error',
+          code: 'S3_PRESIGNED_URL_FAILED',
+          message: 'Failed to generate secure S3 presigned upload URL.',
+        },
+        { status: 500, headers: corsHeaders }
+      );
+    }
+
+    // 1. Insert file record into Supabase (files table - No Spanish fallbacks)
+    try {
+      const filePayload = {
         id: fileId,
         ticket_id: ticketId,
         user_id: user.id,
@@ -301,50 +270,12 @@ export async function POST(req: NextRequest) {
         s3_pending_key: landingZoneKey,
         s3_processed_key: permanentTargetKey,
         status: 'pending_upload',
-        expires_at: expiresAt,
         created_at: new Date(timestamp).toISOString(),
       };
 
-      let { error: englishErr } = await supabase.from('files').insert(filePayload);
-
-      // If expires_at column does not exist yet in Supabase files table, retry without it
-      if (englishErr && englishErr.message?.includes('expires_at')) {
-        delete filePayload.expires_at;
-        const retryRes = await supabase.from('files').insert(filePayload);
-        englishErr = retryRes.error;
-      }
-
-      if (englishErr) {
-        // Fallback to Spanish table if not yet migrated
-        const spanishVisibility = visibility === 'private' ? 'privados' : 'publicos';
-        const spanishType = resourceType === 'images' ? 'imagenes' : resourceType;
-
-        const spanishPayload: any = {
-          id: fileId,
-          ticket_id: ticketId,
-          user_id: user.id,
-          org_id: targetOrg.id,
-          nombre_original: fileName,
-          formato: fileType,
-          tamano_bytes: fileSize,
-          hash_sha256: sha256Hash,
-          tipo_recurso: spanishType,
-          visibilidad: spanishVisibility,
-          s3_key_pendiente: landingZoneKey,
-          s3_key_procesado: permanentTargetKey,
-          estado: 'pendiente_subida',
-          created_at: new Date(timestamp).toISOString(),
-        };
-        if (extension) {
-          spanishPayload.extension = extension;
-        }
-
-        const { error: spanishErr } = await supabase.from('archivos').insert(spanishPayload);
-        // If extension column doesn't exist on archivos yet, retry without it
-        if (spanishErr && spanishErr.message?.includes('extension')) {
-          delete spanishPayload.extension;
-          await supabase.from('archivos').insert(spanishPayload);
-        }
+      const { error: insertErr } = await supabase.from('files').insert(filePayload);
+      if (insertErr) {
+        console.error('Error inserting file in Supabase files table:', insertErr.message);
       }
     } catch (dbErr: any) {
       console.error('Error inserting file in Supabase:', dbErr.message);
@@ -372,7 +303,7 @@ export async function POST(req: NextRequest) {
         resourceType,
         visibility,
         uploadUrl,
-        mode: isRealS3 ? 'REAL_AWS_S3' : 'MOCK_SIMULATED',
+        mode: 'REAL_AWS_S3',
         s3Landing: landingZoneKey,
         s3Permanent: permanentTargetKey,
         expiresAt,
@@ -389,7 +320,7 @@ export async function POST(req: NextRequest) {
         uploadUrl,
         method: req.method,
         uploadMethod: 'PUT',
-        isRealS3,
+        isRealS3: true,
         isMultipart: fileSize > 20 * 1024 * 1024,
         expiresAt,
         expiresInSeconds: TTL_SECONDS,
@@ -420,7 +351,7 @@ export async function POST(req: NextRequest) {
           sha256Hash,
           method: req.method,
           uploadMethod: 'PUT',
-          isRealS3,
+          isRealS3: true,
           expiresAt,
           expiresInSeconds: TTL_SECONDS,
           issuedAt: new Date(timestamp).toISOString(),
@@ -474,9 +405,8 @@ export async function PUT(req: NextRequest) {
     );
   }
 
-  // 1. Retrieve file record from Supabase (files table with fallback to archivos)
+  // 1. Retrieve file record from Supabase (files table - No Spanish fallbacks)
   let fileRow: any = null;
-  let isLegacyTable = false;
 
   try {
     const { data: existingFiles, error: errFiles } = await supabase
@@ -487,17 +417,6 @@ export async function PUT(req: NextRequest) {
 
     if (!errFiles && existingFiles && existingFiles.length > 0) {
       fileRow = existingFiles[0];
-    } else {
-      const { data: existingArchivos } = await supabase
-        .from('archivos')
-        .select('*')
-        .eq('ticket_id', ticketId)
-        .limit(1);
-
-      if (existingArchivos && existingArchivos.length > 0) {
-        fileRow = existingArchivos[0];
-        isLegacyTable = true;
-      }
     }
   } catch (dbErr: any) {
     console.error('Error querying ticket in Supabase:', dbErr.message);
@@ -529,8 +448,8 @@ export async function PUT(req: NextRequest) {
   }
 
   // CHECK 2: Ticket Already Completed (Idempotency / Replay protection)
-  const currentStatus = fileRow.status || fileRow.estado;
-  if (currentStatus === 'completed' || currentStatus === 'completado') {
+  const currentStatus = fileRow.status;
+  if (currentStatus === 'completed') {
     return NextResponse.json(
       {
         error: 'Conflict',
@@ -538,7 +457,7 @@ export async function PUT(req: NextRequest) {
         method: req.method,
         message: `Upload ticket '${ticketId}' has already been confirmed and completed.`,
         ticketId,
-        completedAt: fileRow.completed_at || fileRow.completado_at || null,
+        completedAt: fileRow.completed_at || null,
       },
       { status: 409, headers: corsHeaders }
     );
@@ -546,49 +465,42 @@ export async function PUT(req: NextRequest) {
 
   // CHECK 3: Expiration Check (5-minute TTL + 2-minute grace window)
   const GRACE_PERIOD_MS = 2 * 60 * 1000;
-  const expiresAtStr = fileRow.expires_at || fileRow.expira_en;
-  if (expiresAtStr) {
-    const expirationTime = new Date(expiresAtStr).getTime();
-    if (!isNaN(expirationTime) && Date.now() > expirationTime + GRACE_PERIOD_MS) {
-      // Mark as expired in database
-      try {
-        if (!isLegacyTable) {
-          await supabase.from('files').update({ status: 'expired' }).eq('ticket_id', ticketId);
-        } else {
-          await supabase.from('archivos').update({ estado: 'expirado' }).eq('ticket_id', ticketId);
-        }
-      } catch (expErr: any) {
-        console.warn('Could not mark ticket expired in DB:', expErr.message);
-      }
-
-      await addServiceLog({
-        method: req.method,
-        action: 'TICKET_EXPIRED',
-        status: 'DENIED_EXPIRED',
-        userId: fileRow.user_id,
-        orgId: fileRow.org_id,
-        details: {
-          method: req.method,
-          ticketId,
-          fileId: fileRow.id,
-          expiresAt: expiresAtStr,
-          expiredAgoSeconds: Math.floor((Date.now() - expirationTime) / 1000),
-          reason: 'Ticket TTL exceeded (5 min window expired).',
-          ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
-        },
-      });
-
-      return NextResponse.json(
-        {
-          error: 'Gone',
-          code: 'TICKET_EXPIRED',
-          method: req.method,
-          message: `Upload ticket '${ticketId}' has expired (5-minute TTL exceeded). Request a new upload ticket.`,
-          expiresAt: expiresAtStr,
-        },
-        { status: 410, headers: corsHeaders }
-      );
+  const createdAtMs = new Date(fileRow.created_at).getTime();
+  const TTL_MS = 300 * 1000;
+  if (!isNaN(createdAtMs) && Date.now() > createdAtMs + TTL_MS + GRACE_PERIOD_MS) {
+    // Mark as expired in database
+    try {
+      await supabase.from('files').update({ status: 'expired' }).eq('ticket_id', ticketId);
+    } catch (expErr: any) {
+      console.warn('Could not mark ticket expired in DB:', expErr.message);
     }
+
+    await addServiceLog({
+      method: req.method,
+      action: 'TICKET_EXPIRED',
+      status: 'DENIED_EXPIRED',
+      userId: fileRow.user_id,
+      orgId: fileRow.org_id,
+      details: {
+        method: req.method,
+        ticketId,
+        fileId: fileRow.id,
+        createdAt: fileRow.created_at,
+        expiredAgoSeconds: Math.floor((Date.now() - (createdAtMs + TTL_MS)) / 1000),
+        reason: 'Ticket TTL exceeded (5 min window expired).',
+        ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
+      },
+    });
+
+    return NextResponse.json(
+      {
+        error: 'Gone',
+        code: 'TICKET_EXPIRED',
+        method: req.method,
+        message: `Upload ticket '${ticketId}' has expired (5-minute TTL exceeded). Request a new upload ticket.`,
+      },
+      { status: 410, headers: corsHeaders }
+    );
   }
 
   // CHECK 4: HMAC Cryptographic Signature (if token provided)
@@ -625,32 +537,17 @@ export async function PUT(req: NextRequest) {
   // 2. Mark ticket completed in Supabase
   const nowIso = new Date().toISOString();
   try {
-    if (!isLegacyTable) {
-      const { data: updated } = await supabase
-        .from('files')
-        .update({
-          status: 'completed',
-          completed_at: nowIso,
-          updated_at: nowIso,
-        })
-        .eq('ticket_id', ticketId)
-        .select('*');
-      if (updated && updated.length > 0) {
-        fileRow = updated[0];
-      }
-    } else {
-      const { data: updated } = await supabase
-        .from('archivos')
-        .update({
-          estado: 'completado',
-          completado_at: nowIso,
-          updated_at: nowIso,
-        })
-        .eq('ticket_id', ticketId)
-        .select('*');
-      if (updated && updated.length > 0) {
-        fileRow = updated[0];
-      }
+    const { data: updated } = await supabase
+      .from('files')
+      .update({
+        status: 'completed',
+        completed_at: nowIso,
+        updated_at: nowIso,
+      })
+      .eq('ticket_id', ticketId)
+      .select('*');
+    if (updated && updated.length > 0) {
+      fileRow = updated[0];
     }
   } catch (dbErr: any) {
     console.error('Error updating file status in Supabase:', dbErr.message);
@@ -667,14 +564,14 @@ export async function PUT(req: NextRequest) {
       method: req.method,
       ticketId,
       fileId: fileRow?.id || null,
-      fileName: fileRow?.original_name || fileRow?.nombre_original || null,
+      fileName: fileRow?.original_name || null,
       extension: fileRow?.extension || null,
-      mimeType: fileRow?.mime_type || fileRow?.formato || null,
-      fileSize: fileRow?.size_bytes ?? fileRow?.tamano_bytes ?? null,
-      resourceType: fileRow?.resource_type || fileRow?.tipo_recurso || null,
-      visibility: fileRow?.visibility || fileRow?.visibilidad || null,
-      s3Landing: fileRow?.s3_pending_key || fileRow?.s3_key_pendiente || null,
-      s3Permanent: fileRow?.s3_processed_key || fileRow?.s3_key_procesado || null,
+      mimeType: fileRow?.mime_type || null,
+      fileSize: fileRow?.size_bytes ?? null,
+      resourceType: fileRow?.resource_type || null,
+      visibility: fileRow?.visibility || null,
+      s3Landing: fileRow?.s3_pending_key || null,
+      s3Permanent: fileRow?.s3_processed_key || null,
       tokenVerified: Boolean(confirmToken),
       ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
       message: `File confirmed in S3 landing zone for ticket ${ticketId}`,
@@ -689,7 +586,7 @@ export async function PUT(req: NextRequest) {
       ticketId,
       fileId: fileRow?.id || null,
       s3Status: 'uploaded_to_landing',
-      s3Landing: fileRow?.s3_pending_key || fileRow?.s3_key_pendiente || null,
+      s3Landing: fileRow?.s3_pending_key || null,
       tokenVerified: Boolean(confirmToken),
     },
     { status: 200, headers: corsHeaders }
