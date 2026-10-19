@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { USERS, ORGANIZATIONS, addServiceLog } from '@/lib/service-logs';
 import { supabase } from '@/lib/supabase';
 import { isAwsConfigured, generatePresignedUploadUrl } from '@/lib/s3';
+import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/ticket-token';
 
 // CORS Headers
 const corsHeaders = {
@@ -152,6 +153,8 @@ export async function POST(req: NextRequest) {
     const fileId = crypto.randomUUID();
     const ticketId = crypto.randomUUID();
     const timestamp = Date.now();
+    const TTL_SECONDS = 300; // 5-minute TTL
+    const expiresAt = new Date(timestamp + TTL_SECONDS * 1000).toISOString();
     const orgSlug = targetOrg.slug;
 
     // Resource categorization (images, documents, videos)
@@ -168,9 +171,12 @@ export async function POST(req: NextRequest) {
       extension = fileName.slice(fileName.lastIndexOf('.')).toLowerCase();
     }
 
-    // Standardized S3 Key hierarchy
-    const landingZoneKey = `pending/${user.id}/${fileName}`;
+    // Standardized S3 Key hierarchy: pending/{fileId}{extension} (opaque, avoids overwrites and hides sensitive user IDs)
+    const landingZoneKey = `pending/${fileId}${extension}`;
     const permanentTargetKey = `organizations/${orgSlug}/${resourceType}/${visibility}/${ticketId}-${fileName}`;
+
+    // Cryptographically signed confirmation token (HMAC-SHA256)
+    const confirmToken = generateTicketConfirmToken(ticketId, user.id, expiresAt);
 
     // Determine AWS S3 direct upload vs Mock fallback
     const forceMock = req.headers.get('x-mock-mode') === 'true' && !isAwsConfigured();
@@ -179,7 +185,7 @@ export async function POST(req: NextRequest) {
 
     if (isAwsConfigured() && !forceMock) {
       try {
-        const presignedS3Url = await generatePresignedUploadUrl(landingZoneKey, fileType, 900);
+        const presignedS3Url = await generatePresignedUploadUrl(landingZoneKey, fileType, TTL_SECONDS);
         if (presignedS3Url) {
           uploadUrl = presignedS3Url;
           isRealS3 = true;
@@ -199,7 +205,7 @@ export async function POST(req: NextRequest) {
 
     // 1. Insert file record into Supabase (files table with fallback to archivos)
     try {
-      const { error: englishErr } = await supabase.from('files').insert({
+      const filePayload: any = {
         id: fileId,
         ticket_id: ticketId,
         user_id: user.id,
@@ -214,8 +220,18 @@ export async function POST(req: NextRequest) {
         s3_pending_key: landingZoneKey,
         s3_processed_key: permanentTargetKey,
         status: 'pending_upload',
+        expires_at: expiresAt,
         created_at: new Date(timestamp).toISOString(),
-      });
+      };
+
+      let { error: englishErr } = await supabase.from('files').insert(filePayload);
+
+      // If expires_at column does not exist yet in Supabase files table, retry without it
+      if (englishErr && englishErr.message?.includes('expires_at')) {
+        delete filePayload.expires_at;
+        const retryRes = await supabase.from('files').insert(filePayload);
+        englishErr = retryRes.error;
+      }
 
       if (englishErr) {
         // Fallback to Spanish table if not yet migrated
@@ -278,6 +294,9 @@ export async function POST(req: NextRequest) {
         mode: isRealS3 ? 'REAL_AWS_S3' : 'MOCK_SIMULATED',
         s3Landing: landingZoneKey,
         s3Permanent: permanentTargetKey,
+        expiresAt,
+        ttlSeconds: TTL_SECONDS,
+        confirmTokenPreview: confirmToken.substring(0, 20) + '...',
         ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
       },
     });
@@ -291,6 +310,9 @@ export async function POST(req: NextRequest) {
         uploadMethod: 'PUT',
         isRealS3,
         isMultipart: fileSize > 20 * 1024 * 1024,
+        expiresAt,
+        expiresInSeconds: TTL_SECONDS,
+        confirmToken,
         user: {
           id: user.id,
           name: user.name,
@@ -318,6 +340,8 @@ export async function POST(req: NextRequest) {
           method: req.method,
           uploadMethod: 'PUT',
           isRealS3,
+          expiresAt,
+          expiresInSeconds: TTL_SECONDS,
           issuedAt: new Date(timestamp).toISOString(),
         },
         // Backward compatibility fields for frontend/postman
@@ -346,26 +370,195 @@ export async function POST(req: NextRequest) {
 export async function PUT(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const ticketId = searchParams.get('ticketId') || '';
+  let confirmToken = searchParams.get('token') || searchParams.get('confirmToken') || '';
 
-  let fileRow: any = null;
-
-  // 1. Update file status in Supabase and retrieve real stored record
+  // Optional: Read confirmToken from request body if sent as JSON
   try {
-    const nowIso = new Date().toISOString();
-    const { data: updatedFiles, error: errFiles } = await supabase
-      .from('files')
-      .update({
-        status: 'completed',
-        completed_at: nowIso,
-        updated_at: nowIso,
-      })
-      .eq('ticket_id', ticketId)
-      .select('*');
+    const body = await req.json().catch(() => ({}));
+    if (body?.token) confirmToken = body.token;
+    if (body?.confirmToken) confirmToken = body.confirmToken;
+  } catch {
+    // Body is optional
+  }
 
-    if (!errFiles && updatedFiles && updatedFiles.length > 0) {
-      fileRow = updatedFiles[0];
-    } else if (errFiles) {
-      const { data: updatedArchivos } = await supabase
+  if (!ticketId) {
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'MISSING_TICKET_ID',
+        method: req.method,
+        message: 'A valid ticketId query parameter is required to confirm upload.',
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  // 1. Retrieve file record from Supabase (files table with fallback to archivos)
+  let fileRow: any = null;
+  let isLegacyTable = false;
+
+  try {
+    const { data: existingFiles, error: errFiles } = await supabase
+      .from('files')
+      .select('*')
+      .eq('ticket_id', ticketId)
+      .limit(1);
+
+    if (!errFiles && existingFiles && existingFiles.length > 0) {
+      fileRow = existingFiles[0];
+    } else {
+      const { data: existingArchivos } = await supabase
+        .from('archivos')
+        .select('*')
+        .eq('ticket_id', ticketId)
+        .limit(1);
+
+      if (existingArchivos && existingArchivos.length > 0) {
+        fileRow = existingArchivos[0];
+        isLegacyTable = true;
+      }
+    }
+  } catch (dbErr: any) {
+    console.error('Error querying ticket in Supabase:', dbErr.message);
+  }
+
+  // CHECK 1: Ticket Existence (Return 404 if ticket doesn't exist)
+  if (!fileRow) {
+    await addServiceLog({
+      method: req.method,
+      action: 'TICKET_CONFIRM_FAILED',
+      status: 'DENIED_NOT_FOUND',
+      details: {
+        method: req.method,
+        ticketId,
+        reason: 'Ticket not found in database.',
+        ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
+      },
+    });
+
+    return NextResponse.json(
+      {
+        error: 'Not Found',
+        code: 'TICKET_NOT_FOUND',
+        method: req.method,
+        message: `Upload ticket '${ticketId}' does not exist or has been removed.`,
+      },
+      { status: 404, headers: corsHeaders }
+    );
+  }
+
+  // CHECK 2: Ticket Already Completed (Idempotency / Replay protection)
+  const currentStatus = fileRow.status || fileRow.estado;
+  if (currentStatus === 'completed' || currentStatus === 'completado') {
+    return NextResponse.json(
+      {
+        error: 'Conflict',
+        code: 'TICKET_ALREADY_COMPLETED',
+        method: req.method,
+        message: `Upload ticket '${ticketId}' has already been confirmed and completed.`,
+        ticketId,
+        completedAt: fileRow.completed_at || fileRow.completado_at || null,
+      },
+      { status: 409, headers: corsHeaders }
+    );
+  }
+
+  // CHECK 3: Expiration Check (5-minute TTL + 2-minute grace window)
+  const GRACE_PERIOD_MS = 2 * 60 * 1000;
+  const expiresAtStr = fileRow.expires_at || fileRow.expira_en;
+  if (expiresAtStr) {
+    const expirationTime = new Date(expiresAtStr).getTime();
+    if (!isNaN(expirationTime) && Date.now() > expirationTime + GRACE_PERIOD_MS) {
+      // Mark as expired in database
+      try {
+        if (!isLegacyTable) {
+          await supabase.from('files').update({ status: 'expired' }).eq('ticket_id', ticketId);
+        } else {
+          await supabase.from('archivos').update({ estado: 'expirado' }).eq('ticket_id', ticketId);
+        }
+      } catch (expErr: any) {
+        console.warn('Could not mark ticket expired in DB:', expErr.message);
+      }
+
+      await addServiceLog({
+        method: req.method,
+        action: 'TICKET_EXPIRED',
+        status: 'DENIED_EXPIRED',
+        userId: fileRow.user_id,
+        orgId: fileRow.org_id,
+        details: {
+          method: req.method,
+          ticketId,
+          fileId: fileRow.id,
+          expiresAt: expiresAtStr,
+          expiredAgoSeconds: Math.floor((Date.now() - expirationTime) / 1000),
+          reason: 'Ticket TTL exceeded (5 min window expired).',
+          ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        },
+      });
+
+      return NextResponse.json(
+        {
+          error: 'Gone',
+          code: 'TICKET_EXPIRED',
+          method: req.method,
+          message: `Upload ticket '${ticketId}' has expired (5-minute TTL exceeded). Request a new upload ticket.`,
+          expiresAt: expiresAtStr,
+        },
+        { status: 410, headers: corsHeaders }
+      );
+    }
+  }
+
+  // CHECK 4: HMAC Cryptographic Signature (if token provided)
+  if (confirmToken) {
+    const tokenResult = verifyTicketConfirmToken(confirmToken, ticketId, fileRow.user_id);
+    if (!tokenResult.valid) {
+      await addServiceLog({
+        method: req.method,
+        action: 'TICKET_SIGNATURE_INVALID',
+        status: 'DENIED_FORGED_TOKEN',
+        userId: fileRow.user_id,
+        orgId: fileRow.org_id,
+        details: {
+          method: req.method,
+          ticketId,
+          reason: tokenResult.reason,
+          tokenPreview: confirmToken.substring(0, 16) + '...',
+          ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        },
+      });
+
+      return NextResponse.json(
+        {
+          error: 'Forbidden',
+          code: 'INVALID_CONFIRM_TOKEN',
+          method: req.method,
+          message: `Invalid or forged ticket confirmation token: ${tokenResult.reason}`,
+        },
+        { status: 403, headers: corsHeaders }
+      );
+    }
+  }
+
+  // 2. Mark ticket completed in Supabase
+  const nowIso = new Date().toISOString();
+  try {
+    if (!isLegacyTable) {
+      const { data: updated } = await supabase
+        .from('files')
+        .update({
+          status: 'completed',
+          completed_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq('ticket_id', ticketId)
+        .select('*');
+      if (updated && updated.length > 0) {
+        fileRow = updated[0];
+      }
+    } else {
+      const { data: updated } = await supabase
         .from('archivos')
         .update({
           estado: 'completado',
@@ -374,16 +567,15 @@ export async function PUT(req: NextRequest) {
         })
         .eq('ticket_id', ticketId)
         .select('*');
-
-      if (updatedArchivos && updatedArchivos.length > 0) {
-        fileRow = updatedArchivos[0];
+      if (updated && updated.length > 0) {
+        fileRow = updated[0];
       }
     }
   } catch (dbErr: any) {
-    console.error('Error updating file in Supabase:', dbErr.message);
+    console.error('Error updating file status in Supabase:', dbErr.message);
   }
 
-  // 2. Record confirmation audit event with real database fields
+  // 3. Record confirmation audit event in Supabase
   await addServiceLog({
     method: req.method,
     action: 'S3_UPLOAD_CONFIRMED',
@@ -402,6 +594,7 @@ export async function PUT(req: NextRequest) {
       visibility: fileRow?.visibility || fileRow?.visibilidad || null,
       s3Landing: fileRow?.s3_pending_key || fileRow?.s3_key_pendiente || null,
       s3Permanent: fileRow?.s3_processed_key || fileRow?.s3_key_procesado || null,
+      tokenVerified: Boolean(confirmToken),
       ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
       message: `File confirmed in S3 landing zone for ticket ${ticketId}`,
     },
@@ -413,7 +606,10 @@ export async function PUT(req: NextRequest) {
       method: req.method,
       message: `File upload confirmed for ticket ${ticketId}`,
       ticketId,
+      fileId: fileRow?.id || null,
       s3Status: 'uploaded_to_landing',
+      s3Landing: fileRow?.s3_pending_key || fileRow?.s3_key_pendiente || null,
+      tokenVerified: Boolean(confirmToken),
     },
     { status: 200, headers: corsHeaders }
   );

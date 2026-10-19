@@ -35,14 +35,14 @@ export function getS3Client(): S3Client | null {
 /**
  * Generates an AWS S3 Presigned URL for direct client upload (PUT)
  * 
- * @param key Destination path within the bucket (e.g. pending/{userId}/{fileName})
+ * @param key Destination path within the bucket (e.g. pending/{fileId}{extension})
  * @param contentType MIME type of the file (e.g. image/png)
- * @param expiresInSeconds Lifetime in seconds (default 900 = 15 minutes)
+ * @param expiresInSeconds Lifetime in seconds (default 300 = 5 minutes)
  */
 export async function generatePresignedUploadUrl(
   key: string,
   contentType: string = 'application/octet-stream',
-  expiresInSeconds: number = 900
+  expiresInSeconds: number = 300
 ): Promise<string | null> {
   const client = getS3Client();
   if (!client || !bucketName) {
@@ -109,3 +109,46 @@ export async function deleteS3ObjectsByPrefix(prefix: string): Promise<{ count: 
     throw error;
   }
 }
+
+/**
+ * Deletes specific S3 objects by their exact keys
+ * 
+ * @param keys Array of S3 keys to delete
+ * @returns Object with count and deleted keys
+ */
+export async function deleteS3ObjectsByKeys(keys: string[]): Promise<{ count: number; keys: string[] }> {
+  const client = getS3Client();
+  if (!client || !bucketName || keys.length === 0) {
+    return { count: 0, keys: [] };
+  }
+
+  try {
+    const validObjects = keys
+      .filter((k) => typeof k === 'string' && k.trim().length > 0)
+      .map((k) => ({ Key: k.trim() }));
+
+    if (validObjects.length === 0) {
+      return { count: 0, keys: [] };
+    }
+
+    const deleteCommand = new DeleteObjectsCommand({
+      Bucket: bucketName.trim(),
+      Delete: {
+        Objects: validObjects,
+        Quiet: false,
+      },
+    });
+
+    const deleteRes = await client.send(deleteCommand);
+    const deletedKeys = (deleteRes.Deleted || []).map((d) => d.Key || '').filter(Boolean);
+
+    return {
+      count: deletedKeys.length,
+      keys: deletedKeys,
+    };
+  } catch (error) {
+    console.error('Error deleting S3 objects by keys:', error);
+    throw error;
+  }
+}
+

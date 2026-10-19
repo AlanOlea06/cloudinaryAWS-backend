@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { isAwsConfigured, deleteS3ObjectsByPrefix } from '@/lib/s3';
+import { isAwsConfigured, deleteS3ObjectsByPrefix, deleteS3ObjectsByKeys } from '@/lib/s3';
 import { addServiceLog } from '@/lib/service-logs';
 
 const corsHeaders = {
@@ -32,7 +32,6 @@ async function handleCleanup(req: NextRequest) {
     }
 
     const s3PrefixPending = cleanAll ? 'pending/' : `pending/${userId}/`;
-    const s3PrefixPendientes = cleanAll ? 'pendientes/' : `pendientes/${userId}/`;
     let s3DeletedCount = 0;
     let s3DeletedKeys: string[] = [];
     let s3Status = 'aws_not_configured';
@@ -40,10 +39,39 @@ async function handleCleanup(req: NextRequest) {
     // 1. Purge S3 Objects (both 'pending/' and legacy 'pendientes/')
     if (isAwsConfigured()) {
       try {
-        const resPending = await deleteS3ObjectsByPrefix(s3PrefixPending);
-        const resPendientes = await deleteS3ObjectsByPrefix(s3PrefixPendientes);
-        s3DeletedCount = resPending.count + resPendientes.count;
-        s3DeletedKeys = [...resPending.keys, ...resPendientes.keys];
+        if (cleanAll) {
+          const resPending = await deleteS3ObjectsByPrefix('pending/');
+          const resPendientes = await deleteS3ObjectsByPrefix('pendientes/');
+          s3DeletedCount = resPending.count + resPendientes.count;
+          s3DeletedKeys = [...resPending.keys, ...resPendientes.keys];
+        } else {
+          // Look up user's pending keys from Supabase before deleting database records
+          const { data: userFiles } = await supabase
+            .from('files')
+            .select('s3_pending_key')
+            .eq('user_id', userId);
+          const { data: userArchivos } = await supabase
+            .from('archivos')
+            .select('s3_key_pendiente')
+            .eq('user_id', userId);
+
+          const keysToDelete: string[] = [];
+          (userFiles || []).forEach((f: any) => {
+            if (f.s3_pending_key) keysToDelete.push(f.s3_pending_key);
+          });
+          (userArchivos || []).forEach((a: any) => {
+            if (a.s3_key_pendiente) keysToDelete.push(a.s3_key_pendiente);
+          });
+
+          // Delete specific keys (e.g. pending/{fileId}{ext})
+          const resKeys = await deleteS3ObjectsByKeys(keysToDelete);
+          // Also clean legacy user prefix (pending/{userId}/...) if present
+          const resLegacyPending = await deleteS3ObjectsByPrefix(`pending/${userId}/`);
+          const resLegacyPendientes = await deleteS3ObjectsByPrefix(`pendientes/${userId}/`);
+
+          s3DeletedCount = resKeys.count + resLegacyPending.count + resLegacyPendientes.count;
+          s3DeletedKeys = [...resKeys.keys, ...resLegacyPending.keys, ...resLegacyPendientes.keys];
+        }
         s3Status = 'success';
       } catch (s3Err: any) {
         console.error('Error cleaning up S3 objects:', s3Err.message);

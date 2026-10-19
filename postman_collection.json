@@ -15,6 +15,7 @@
     { "key": "visibility", "value": "", "type": "string" },
     { "key": "sha256Hash", "value": "", "type": "string" },
     { "key": "ticketId", "value": "", "type": "string" },
+    { "key": "confirmToken", "value": "", "type": "string" },
     { "key": "uploadUrl", "value": "", "type": "string" }
   ],
   "item": [
@@ -28,6 +29,7 @@
             "exec": [
               "const json = pm.response.json();",
               "if (json.ticketId) pm.collectionVariables.set('ticketId', json.ticketId);",
+              "if (json.confirmToken) pm.collectionVariables.set('confirmToken', json.confirmToken);",
               "if (json.uploadUrl) pm.collectionVariables.set('uploadUrl', json.uploadUrl);"
             ]
           }
@@ -46,7 +48,7 @@
           "host": ["{{baseUrl}}"],
           "path": ["api", "upload"]
         },
-        "description": "Validates user/tenant/permissions and returns ticketId + S3 Presigned uploadUrl. Saves both automatically into collection variables."
+        "description": "Validates user/tenant/permissions and returns ticketId + S3 Presigned uploadUrl + confirmToken (TTL 5 min). Saves them automatically into collection variables."
       }
     },
     {
@@ -68,12 +70,15 @@
         "method": "PUT",
         "header": [],
         "url": {
-          "raw": "{{baseUrl}}/api/upload?ticketId={{ticketId}}",
+          "raw": "{{baseUrl}}/api/upload?ticketId={{ticketId}}&token={{confirmToken}}",
           "host": ["{{baseUrl}}"],
           "path": ["api", "upload"],
-          "query": [{ "key": "ticketId", "value": "{{ticketId}}" }]
+          "query": [
+            { "key": "ticketId", "value": "{{ticketId}}" },
+            { "key": "token", "value": "{{confirmToken}}" }
+          ]
         },
-        "description": "Notifies backend that upload completed to mark file as 'completed' and record audit log."
+        "description": "Notifies backend that upload completed, verifies HMAC signature & TTL expiration, marks file as 'completed', and records audit log."
       }
     },
     {
