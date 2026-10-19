@@ -68,10 +68,13 @@ Este archivo encapsula toda la comunicación con Amazon S3 utilizando el **AWS S
 
 ## 3. Módulo de Bitácora y Auditoría: `lib/service-logs.ts`
 
-Gestiona el catálogo de organizaciones/usuarios y las funciones que guardan y leen los eventos en la tabla `service_logs` de Supabase.
+Gestiona las funciones que guardan, correlacionan y consultan los eventos en la tabla `service_logs` de Supabase.
 
-### 3.1. Catálogos `ORGANIZATIONS` y `USERS`
-* Contienen las organizaciones registradas (`organization_1` y `organization_2`) y los 15 usuarios de prueba con sus respectivos roles (`admin`, `editor`, `viewer`) y su bandera de permiso `canUpload` (`true` o `false`).
+### 3.1. Evolución Arquitectónica (De Mocks en Memoria a Supabase 100% Real)
+* **Etapa Inicial (Prototipo Fase 1.1 – 1.4):**  
+  En las primeras pruebas locales del sistema, se utilizaron diccionarios constantes en memoria (`ORGANIZATIONS` y `USERS`) como trampolín inicial para probar el flujo de subida, los roles RBAC y el aislamiento entre organizaciones.
+* **Etapa Actual (Producción y Endurecimiento):**  
+  Todos los datos mock hardcodeados fueron **completamente eliminados** del código fuente. Actualmente, las 15 cuentas de usuarios y las organizaciones se consultan **en vivo directamente desde las tablas relacionales `public.users` y `public.organizations` en Supabase**, garantizando que cualquier usuario u organización creada o editada en la base de datos sea reconocida de inmediato por el sistema.
 
 ### 3.2. `addServiceLog(logInput): Promise<ServiceLog>`
 * **Qué hace:** Registra un nuevo evento en la bitácora del servidor cada vez que ocurre una acción (emisión de ticket, rechazo por seguridad 401/403, confirmación de subida a S3 o limpieza).
@@ -106,18 +109,20 @@ Cuando el cliente solicita subir un archivo, esta función ejecuta **6 fases en 
 
 1. **Lectura del Body JSON:**
    Extrae `userId`, `orgId`, `fileName`, `fileType` (MIME), `fileSize`, `visibility`, `sha256Hash` y `extension`.
-2. **CHECK 1 — Autenticación de Usuario (`401 Unauthorized`):**
-   * Busca `userId` en el catálogo `USERS`.
-   * Si no existe (ej. el *Ghost User*), llama a `addServiceLog` con `action: 'TICKET_REQUEST'` y `status: 'DENIED_NOT_REGISTERED'`, y corta el flujo devolviendo HTTP `401`.
+2. **CHECK 1 — Autenticación en Supabase en Tiempo Real (`401 Unauthorized`):**
+   * Realiza un `SELECT` a la tabla `public.users` en Supabase buscando por `id = userId`.
+   * Si no existe en la base de datos (ej. el *Ghost User* `00000000-...`), llama a `addServiceLog` con `action: 'TICKET_REQUEST'` y `status: 'DENIED_NOT_REGISTERED'`, y corta el flujo devolviendo HTTP `401`.
 3. **CHECK 2 — Aislamiento Multi-Tenant (`403 Forbidden - FORBIDDEN_CROSS_ORGANIZATION`):**
-   * Compara la organización a la que pertenece el usuario (`user.orgId`) contra la organización a la que intenta subir el archivo (`orgId`).
-   * Si son distintas (ej. un usuario de la Organización 1 intenta subir a la Organización 2), registra el incidente de seguridad `CROSS_ORG_VIOLATION` (`DENIED_CROSS_ORG`) en `service_logs` y bloquea la petición con HTTP `403`.
+   * Consulta las organizaciones del usuario y la organización destino en la tabla `public.organizations`.
+   * Si son distintas (ej. Carlos de Organización 1 intenta subir a Organización 2), registra el incidente de seguridad `CROSS_ORG_VIOLATION` (`DENIED_CROSS_ORG`) en `service_logs` y bloquea la petición con HTTP `403`.
 4. **CHECK 3 — Permisos por Rol RBAC (`403 Forbidden - FORBIDDEN_NO_PERMISSION`):**
-   * Revisa la bandera `user.canUpload`.
+   * Revisa la columna `can_upload` del usuario leída de Supabase.
    * Si es `false` (usuarios con rol `viewer`), registra `INSUFFICIENT_PERMISSIONS` (`DENIED_NO_PERMISSION`) en `service_logs` y devuelve HTTP `403`.
-5. **Generación de Ticket, Rutas S3 y Firma:**
-   * Si pasó los 3 filtros de seguridad, genera dos UUIDs únicos: `fileId` (ID del archivo) y `ticketId` (ID del ticket de autorización).
-   * Clasifica el recurso según su MIME (`images`, `videos` o `documents`).
+5. **Generación de Ticket, Rutas S3 Opacas y Firma Criptográfica:**
+   * Si pasó los 3 filtros de seguridad, genera `fileId` y `ticketId` únicos.
+   * Asigna la **zona de aterrizaje opaca anti-colisión**: `pending/{fileId}{extension}` (oculta el ID de usuario y el nombre original para evitar sobreescritura accidental y fuga de privacidad).
+   * Genera el token de confirmación firmado con HMAC-SHA256 (`confirmToken`) con un **TTL estricto de 5 minutos (300 s)**.
+   * Firma la URL de subida de AWS S3 mediante `generatePresignedUploadUrl(landingZoneKey, fileType, 300)`.
    * Determina la extensión con punto (ej. `.docx`, `.html`, `.png`) ya sea tomándola del body HTTP o extrayéndola de `fileName`.
    * Construye las dos rutas de S3:
      * **Zona de aterrizaje (`landingZoneKey`):** `pending/{user.id}/{fileName}`

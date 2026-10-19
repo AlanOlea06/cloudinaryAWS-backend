@@ -32,66 +32,21 @@ export interface ServiceLog {
   detalles?: any;
 }
 
-export interface MockUser {
-  id: string;
-  orgId: string;
-  name: string;
-  email: string;
-  role: 'admin' | 'editor' | 'viewer';
-  canUpload: boolean;
-  // Backward compatibility fields
-  nombre?: string;
-  rol?: string;
-  puede_subir?: boolean;
-}
-
-export interface MockOrg {
-  id: string;
-  name: string;
-  slug: string;
-  // Backward compatibility fields
-  nombre?: string;
-}
-
-export const ORGANIZATIONS: Record<string, MockOrg> = {
-  '11111111-1111-1111-1111-111111111111': {
-    id: '11111111-1111-1111-1111-111111111111',
-    name: 'Organization 1',
-    nombre: 'Organization 1',
-    slug: 'organization_1',
-  },
-  '22222222-2222-2222-2222-222222222222': {
-    id: '22222222-2222-2222-2222-222222222222',
-    name: 'Organization 2',
-    nombre: 'Organization 2',
-    slug: 'organization_2',
-  },
-};
-
-export const USERS: Record<string, MockUser> = {
-  // Organization 1 (10 members)
-  'a1111111-0000-0000-0000-000000000001': { id: 'a1111111-0000-0000-0000-000000000001', orgId: '11111111-1111-1111-1111-111111111111', name: 'Carlos Mendoza', nombre: 'Carlos Mendoza', email: 'carlos.mendoza@org1.com', role: 'admin', rol: 'admin', canUpload: true, puede_subir: true },
-  'a1111111-0000-0000-0000-000000000002': { id: 'a1111111-0000-0000-0000-000000000002', orgId: '11111111-1111-1111-1111-111111111111', name: 'Ana Beltran', nombre: 'Ana Beltran', email: 'ana.beltran@org1.com', role: 'editor', rol: 'editor', canUpload: true, puede_subir: true },
-  'a1111111-0000-0000-0000-000000000003': { id: 'a1111111-0000-0000-0000-000000000003', orgId: '11111111-1111-1111-1111-111111111111', name: 'Roberto Morales', nombre: 'Roberto Morales', email: 'roberto.morales@org1.com', role: 'editor', rol: 'editor', canUpload: true, puede_subir: true },
-  'a1111111-0000-0000-0000-000000000004': { id: 'a1111111-0000-0000-0000-000000000004', orgId: '11111111-1111-1111-1111-111111111111', name: 'Lucia Vega', nombre: 'Lucia Vega', email: 'lucia.vega@org1.com', role: 'editor', rol: 'editor', canUpload: true, puede_subir: true },
-  'a1111111-0000-0000-0000-000000000005': { id: 'a1111111-0000-0000-0000-000000000005', orgId: '11111111-1111-1111-1111-111111111111', name: 'Diego Solis', nombre: 'Diego Solis', email: 'diego.solis@org1.com', role: 'editor', rol: 'editor', canUpload: true, puede_subir: true },
-  'a1111111-0000-0000-0000-000000000006': { id: 'a1111111-0000-0000-0000-000000000006', orgId: '11111111-1111-1111-1111-111111111111', name: 'Elena Castillo', nombre: 'Elena Castillo', email: 'elena.castillo@org1.com', role: 'editor', rol: 'editor', canUpload: true, puede_subir: true },
-  'a1111111-0000-0000-0000-000000000007': { id: 'a1111111-0000-0000-0000-000000000007', orgId: '11111111-1111-1111-1111-111111111111', name: 'Javier Ramos', nombre: 'Javier Ramos', email: 'javier.ramos@org1.com', role: 'editor', rol: 'editor', canUpload: true, puede_subir: true },
-  'a1111111-0000-0000-0000-000000000008': { id: 'a1111111-0000-0000-0000-000000000008', orgId: '11111111-1111-1111-1111-111111111111', name: 'Sofia Pineda', nombre: 'Sofia Pineda', email: 'sofia.pineda@org1.com', role: 'editor', rol: 'editor', canUpload: true, puede_subir: true },
-  'a1111111-0000-0000-0000-000000000009': { id: 'a1111111-0000-0000-0000-000000000009', orgId: '11111111-1111-1111-1111-111111111111', name: 'Fernando Ortiz', nombre: 'Fernando Ortiz', email: 'fernando.ortiz@org1.com', role: 'editor', rol: 'editor', canUpload: true, puede_subir: true },
-  'a1111111-0000-0000-0000-000000000010': { id: 'a1111111-0000-0000-0000-000000000010', orgId: '11111111-1111-1111-1111-111111111111', name: 'Valeria Ruiz (Viewer)', nombre: 'Valeria Ruiz (Sin Permiso)', email: 'valeria.ruiz@org1.com', role: 'viewer', rol: 'visitante', canUpload: false, puede_subir: false },
-
-  // Organization 2 (5 members)
-  'b2222222-0000-0000-0000-000000000001': { id: 'b2222222-0000-0000-0000-000000000001', orgId: '22222222-2222-2222-2222-222222222222', name: 'Mateo Delgado', nombre: 'Mateo Delgado', email: 'mateo.delgado@org2.com', role: 'admin', rol: 'admin', canUpload: true, puede_subir: true },
-  'b2222222-0000-0000-0000-000000000002': { id: 'b2222222-0000-0000-0000-000000000002', orgId: '22222222-2222-2222-2222-222222222222', name: 'Camila Herrera', nombre: 'Camila Herrera', email: 'camila.herrera@org2.com', role: 'editor', rol: 'editor', canUpload: true, puede_subir: true },
-  'b2222222-0000-0000-0000-000000000003': { id: 'b2222222-0000-0000-0000-000000000003', orgId: '22222222-2222-2222-2222-222222222222', name: 'Andres Navarro', nombre: 'Andres Navarro', email: 'andres.navarro@org2.com', role: 'editor', rol: 'editor', canUpload: true, puede_subir: true },
-  'b2222222-0000-0000-0000-000000000004': { id: 'b2222222-0000-0000-0000-000000000004', orgId: '22222222-2222-2222-2222-222222222222', name: 'Paula Cardenas', nombre: 'Paula Cardenas', email: 'paula.cardenas@org2.com', role: 'editor', rol: 'editor', canUpload: true, puede_subir: true },
-  'b2222222-0000-0000-0000-000000000005': { id: 'b2222222-0000-0000-0000-000000000005', orgId: '22222222-2222-2222-2222-222222222222', name: 'Gabriel Fuentes (Viewer)', nombre: 'Gabriel Fuentes (Sin Permiso)', email: 'gabriel.fuentes@org2.com', role: 'viewer', rol: 'visitante', canUpload: false, puede_subir: false },
-};
-
-// Backward-compatible alias exports
-export const ORGANIZACIONES = ORGANIZATIONS;
-export const USUARIOS = USERS;
+/**
+ * ==============================================================================
+ * HISTORIAL DE ARQUITECTURA: TRANSICIÓN DE MOCKS A SUPABASE EN TIEMPO REAL
+ * ==============================================================================
+ * Durante las fases iniciales del prototipo (Fase 1.1 a 1.4), se utilizaron
+ * diccionarios constantes en memoria (ORGANIZATIONS y USERS) para validar
+ * las reglas de negocio (RBAC y Aislamiento Multi-Tenant) de manera local.
+ *
+ * En la fase de endurecimiento y producción, todos los datos estáticos fueron
+ * completamente eliminados y reemplazados al 100% por consultas relacionales
+ * directas a las tablas `public.users` y `public.organizations` en Supabase,
+ * tanto en el endpoint de validación (POST /api/upload) como en el de catálogo
+ * (GET /api/users).
+ * ==============================================================================
+ */
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -123,8 +78,8 @@ export async function addServiceLog(logInput: {
   const status = (logInput.status || logInput.estado || 'ALLOWED') as string;
   const details = logInput.details || logInput.detalles || {};
   const method = logInput.method || details.method || (action === 'S3_UPLOAD_CONFIRMED' ? 'PUT' : 'POST');
-  const userName = logInput.userName || details.userName || (logInput.userId && USERS[logInput.userId]?.name) || null;
-  const orgName = logInput.orgName || logInput.orgNombre || details.orgName || details.orgNombre || (logInput.orgId && ORGANIZATIONS[logInput.orgId]?.name) || null;
+  const userName = logInput.userName || details.userName || null;
+  const orgName = logInput.orgName || logInput.orgNombre || details.orgName || details.orgNombre || null;
   const fileName = details.fileName || details.archivo || null;
   const extension = details.extension || (fileName && fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : null);
 
@@ -276,9 +231,9 @@ export async function getServiceLogs(): Promise<ServiceLog[]> {
         const matchedFile = ticketId ? filesByTicket[ticketId] : null;
 
         const userId = row.user_id || matchedFile?.user_id || details.userId || null;
-        const userName = details.userName || (userId && USERS[userId]?.name) || null;
+        const userName = details.userName || null;
         const orgId = row.org_id || matchedFile?.org_id || details.orgId || null;
-        const orgName = details.orgName || details.orgNombre || (orgId && ORGANIZATIONS[orgId]?.name) || null;
+        const orgName = details.orgName || details.orgNombre || null;
         const fileName = row.file_name || details.fileName || matchedFile?.original_name || matchedFile?.nombre_original || null;
         const extension = details.extension || matchedFile?.extension || (fileName && fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : null);
         const mimeType = details.mimeType || matchedFile?.mime_type || matchedFile?.formato || null;
