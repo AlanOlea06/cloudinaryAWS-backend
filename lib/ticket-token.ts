@@ -5,20 +5,21 @@ const GRACE_PERIOD_MS = 2 * 60 * 1000; // 2 minutes grace period for network lat
 
 /**
  * Generates an HMAC-SHA256 signature for a ticket confirmation
- * Token format: `${expiresAt}.${hmacHex}`
+ * Token format: `${base64url(ticketId:userId:expiresAt)}.${hmacHex}`
  */
 export function generateTicketConfirmToken(ticketId: string, userId: string, expiresAt: string): string {
-  const payload = `${ticketId}:${userId}:${expiresAt}`;
+  const rawPayload = `${ticketId}:${userId}:${expiresAt}`;
+  const payloadB64 = Buffer.from(rawPayload, 'utf8').toString('base64url');
   const hmac = crypto
     .createHmac('sha256', TICKET_SECRET)
-    .update(payload)
+    .update(rawPayload)
     .digest('hex');
-  return `${expiresAt}.${hmac}`;
+  return `${payloadB64}.${hmac}`;
 }
 
 /**
  * Verifies a ticket confirmation token
- * Validates HMAC integrity and TTL expiration (with 2-minute grace window)
+ * Validates HMAC integrity, user/ticket binding, and TTL expiration (with 2-minute grace window)
  */
 export function verifyTicketConfirmToken(
   token: string,
@@ -34,11 +35,30 @@ export function verifyTicketConfirmToken(
     return { valid: false, reason: 'TOKEN_MALFORMED' };
   }
 
-  const [expiresAt, receivedHmac] = parts;
-  const payload = `${ticketId}:${userId}:${expiresAt}`;
+  const [payloadB64, receivedHmac] = parts;
+  let decodedPayload = '';
+  try {
+    decodedPayload = Buffer.from(payloadB64, 'base64url').toString('utf8');
+  } catch {
+    return { valid: false, reason: 'PAYLOAD_MALFORMED' };
+  }
+
+  const payloadParts = decodedPayload.split(':');
+  if (payloadParts.length < 3) {
+    return { valid: false, reason: 'PAYLOAD_INVALID' };
+  }
+
+  const tokenTicketId = payloadParts[0];
+  const tokenUserId = payloadParts[1];
+  const expiresAt = payloadParts.slice(2).join(':'); // Handles ISO timestamp colons cleanly
+
+  if (tokenTicketId !== ticketId || tokenUserId !== userId) {
+    return { valid: false, reason: 'TOKEN_MISMATCH' };
+  }
+
   const expectedHmac = crypto
     .createHmac('sha256', TICKET_SECRET)
-    .update(payload)
+    .update(decodedPayload)
     .digest('hex');
 
   // Constant-time comparison to prevent timing attacks
