@@ -56,7 +56,6 @@ export default function UploadSimulator() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(isMockMode ? { 'x-mock-mode': 'true' } : {}),
         },
         body: JSON.stringify({
           userId: 'a0000000-0000-0000-0000-000000000001',

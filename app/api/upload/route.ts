@@ -8,7 +8,7 @@ import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/tick
 const corsHeaders = {
   'Access-Control-Allow-Origin': 'http://localhost:3000',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-mock-mode',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
 // 1. Preflight OPTIONS handler
