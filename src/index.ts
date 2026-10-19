@@ -30,7 +30,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'cloudinary-clone-central-server',
-    mockMode: env.MOCK_MODE,
+    s3Bucket: env.AWS_S3_BUCKET_NAME,
     timestamp: new Date().toISOString(),
   });
 });
@@ -47,5 +47,5 @@ const port = Number(process.env.PORT || env.PORT);
 app.listen(port, '0.0.0.0', () => {
   console.log(`🚀 Servidor Central Cloudinary Clon corriendo en puerto ${port}`);
   console.log(`🌐 Health check disponible en: http://0.0.0.0:${port}/health`);
-  console.log(`🧪 Modo Simulación: ${env.MOCK_MODE ? 'ACTIVO (No requiere AWS)' : 'DESACTIVADO (Usa AWS real)'}`);
+  console.log(`☁️ AWS S3 Activo: Bucket "${env.AWS_S3_BUCKET_NAME}" en ${env.AWS_REGION}`);
 });

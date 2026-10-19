@@ -108,32 +108,18 @@ export class UploadController {
         },
       });
 
-      // Detectar modo simulación
-      const isMockMode =
-        req.headers['x-mock-mode'] === 'true' ||
-        env.MOCK_MODE ||
-        env.AWS_ACCESS_KEY_ID === 'tu_aws_access_key_id';
+      // 2. Persistir registro en Supabase (files table)
+      const fileRecord = await FileService.createPendingFileRecord({
+        ...parsedBody,
+        userName: user.nombre,
+      });
 
-      // 2. Persistir registro en Supabase
-      const fileRecord = await FileService.createPendingFileRecord(
-        {
-          ...parsedBody,
-          userName: user.nombre,
-        },
-        isMockMode
-      );
-
-      // 3. Determinar URL de subida
-      let uploadUrl: string;
-      if (isMockMode) {
-        uploadUrl = `/api/upload/mock-s3/${fileRecord.ticket_id}`;
-      } else {
-        uploadUrl = await S3Service.generateUploadPresignedUrl({
-          key: fileRecord.s3_key_pendiente,
-          contentType: parsedBody.fileType,
-          contentLength: parsedBody.fileSize,
-        });
-      }
+      // 3. Generar URL prefirmada real en AWS S3
+      const uploadUrl = await S3Service.generateUploadPresignedUrl({
+        key: fileRecord.s3_key_pendiente,
+        contentType: parsedBody.fileType,
+        contentLength: parsedBody.fileSize,
+      });
 
       // 4. Calcular la ruta definitiva futura que usará la Lambda
       const projectedProcessedKey = FileService.generateProcessedS3Key(
@@ -144,7 +130,7 @@ export class UploadController {
         parsedBody.fileName
       );
 
-      const isMultipart = parsedBody.fileSize > (isMockMode ? 5 * 1024 * 1024 : env.MAX_FILE_SIZE_BYTES);
+      const isMultipart = parsedBody.fileSize > env.MAX_FILE_SIZE_BYTES;
 
       // 5. Devolver la respuesta autorizada
       return res.status(200).json({
@@ -153,7 +139,7 @@ export class UploadController {
         fileId: fileRecord.id,
         uploadUrl,
         isMultipart,
-        isMock: isMockMode,
+        isRealS3: true,
         organizacion: org,
         usuario: { id: user.id, nombre: user.nombre, rol: user.rol },
         visibilidad,
@@ -161,11 +147,11 @@ export class UploadController {
         s3Hierarchy: {
           landingZone: fileRecord.s3_key_pendiente,
           permanentTarget: projectedProcessedKey,
-          auditDirectory: `logs de servicio/${orgSlug}/`,
+          auditDirectory: `logs/${orgSlug}/`,
         },
         metadata: {
           key: fileRecord.s3_key_pendiente,
-          bucket: isMockMode ? 'simulador-s3-pendientes' : env.AWS_S3_BUCKET_NAME,
+          bucket: env.AWS_S3_BUCKET_NAME,
           fileType: fileRecord.formato,
           fileSize: fileRecord.tamano_bytes,
           expiresIn: env.UPLOAD_URL_EXPIRATION_SECONDS,
