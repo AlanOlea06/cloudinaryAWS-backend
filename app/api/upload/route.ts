@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
       fileType = 'image/png',
       fileSize = 1024,
       visibility = body.visibilidad || 'private',
-      sha256Hash = body.hashSha256 || 'simulated-sha256-hash',
+      sha256Hash = body.sha256Hash || body.hashSha256 || null,
       extension: incomingExtension,
     } = body;
 
@@ -378,7 +378,7 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// 3. Upload Confirmation / Mock PUT Fallback
+// 3. Upload Confirmation (PUT)
 export async function PUT(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const ticketId = searchParams.get('ticketId') || '';

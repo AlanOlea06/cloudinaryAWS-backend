@@ -33,14 +33,11 @@
         </div>
       </div>
 
-      <!-- Selector de Modo -->
-      <div class="flex items-center bg-slate-800/80 p-1 rounded-xl border border-slate-700 text-xs">
-        <button id="btn-mode-mock" class="px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-medium shadow-sm transition">
-          <i class="fa-solid fa-vial mr-1.5"></i> Simulación Local (Supabase)
-        </button>
-        <button id="btn-mode-real" class="px-3 py-1.5 rounded-lg text-slate-400 hover:text-white transition">
-          <i class="fa-brands fa-aws mr-1.5"></i> Modo AWS S3 Real
-        </button>
+      <!-- Indicador de Producción Real -->
+      <div class="flex items-center bg-slate-800/80 px-3 py-1.5 rounded-xl border border-slate-700 text-xs">
+        <span class="text-emerald-400 font-semibold flex items-center gap-1.5">
+          <i class="fa-brands fa-aws text-sm"></i> AWS S3 & Supabase (100% Real)
+        </span>
       </div>
     </div>
   </header>
@@ -56,28 +53,7 @@
             <i class="fa-solid fa-user-circle text-indigo-400 text-sm"></i> Sesión / Usuario:
           </span>
           <select id="user-select" class="bg-slate-950 border border-slate-700 text-slate-200 rounded-lg px-3 py-1.5 focus:border-indigo-500 outline-none font-mono">
-            <optgroup label="🏢 Organización 1 (10 miembros)">
-              <option value="a1111111-0000-0000-0000-000000000001" data-org="11111111-1111-1111-1111-111111111111" data-perm="true" selected>Carlos Mendoza (Admin)</option>
-              <option value="a1111111-0000-0000-0000-000000000002" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Ana Beltrán (Editor)</option>
-              <option value="a1111111-0000-0000-0000-000000000003" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Roberto Morales (Editor)</option>
-              <option value="a1111111-0000-0000-0000-000000000004" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Lucía Vega (Editor)</option>
-              <option value="a1111111-0000-0000-0000-000000000005" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Diego Solís (Editor)</option>
-              <option value="a1111111-0000-0000-0000-000000000006" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Elena Castillo (Editor)</option>
-              <option value="a1111111-0000-0000-0000-000000000007" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Javier Ramos (Editor)</option>
-              <option value="a1111111-0000-0000-0000-000000000008" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Sofía Pineda (Editor)</option>
-              <option value="a1111111-0000-0000-0000-000000000009" data-org="11111111-1111-1111-1111-111111111111" data-perm="true">Fernando Ortiz (Editor)</option>
-              <option value="a1111111-0000-0000-0000-000000000010" data-org="11111111-1111-1111-1111-111111111111" data-perm="false" class="text-rose-400 font-bold">⛔ Valeria Ruiz (SIN PERMISOS)</option>
-            </optgroup>
-            <optgroup label="🏢 Organización 2 (5 miembros)">
-              <option value="b2222222-0000-0000-0000-000000000001" data-org="22222222-2222-2222-2222-222222222222" data-perm="true">Mateo Delgado (Admin)</option>
-              <option value="b2222222-0000-0000-0000-000000000002" data-org="22222222-2222-2222-2222-222222222222" data-perm="true">Camila Herrera (Editor)</option>
-              <option value="b2222222-0000-0000-0000-000000000003" data-org="22222222-2222-2222-2222-222222222222" data-perm="true">Andrés Navarro (Editor)</option>
-              <option value="b2222222-0000-0000-0000-000000000004" data-org="22222222-2222-2222-2222-222222222222" data-perm="true">Paula Cárdenas (Editor)</option>
-              <option value="b2222222-0000-0000-0000-000000000005" data-org="22222222-2222-2222-2222-222222222222" data-perm="false" class="text-rose-400 font-bold">⛔ Gabriel Fuentes (SIN PERMISOS)</option>
-            </optgroup>
-            <optgroup label="⚠️ Pruebas de Ataque / No Registrado">
-              <option value="00000000-0000-0000-0000-000000000000" data-org="11111111-1111-1111-1111-111111111111" data-perm="false" class="text-amber-400">❓ Usuario Fantasma (No Registrado)</option>
-            </optgroup>
+            <option value="">Cargando usuarios desde Supabase...</option>
           </select>
         </div>
 
@@ -87,9 +63,7 @@
             <i class="fa-solid fa-sitemap text-cyan-400 text-sm"></i> Subir hacia Organización:
           </span>
           <select id="target-org-select" class="bg-slate-950 border border-slate-700 text-slate-200 rounded-lg px-3 py-1.5 focus:border-cyan-500 outline-none font-mono">
-            <option value="11111111-1111-1111-1111-111111111111" selected>Organización 1 (organizacion_1)</option>
-            <option value="22222222-2222-2222-2222-222222222222">Organización 2 (organizacion_2)</option>
-            <option value="99999999-9999-9999-9999-999999999999" class="text-red-400">Organización Inexistente</option>
+            <option value="">Cargando organizaciones...</option>
           </select>
         </div>
 
@@ -122,12 +96,12 @@
     <div class="p-3 bg-slate-900 border border-slate-800 rounded-xl flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
       <div class="flex items-center gap-2 text-slate-300">
         <span class="text-slate-500">Jerarquía S3 calculada:</span>
-        <span class="text-indigo-400 font-bold" id="path-preview-landing">Pendientes/organizacion_1/{user}/...</span>
+        <span class="text-indigo-400 font-bold" id="path-preview-landing">pending/{userId}/...</span>
         <span class="text-slate-600">➔</span>
-        <span class="text-emerald-400 font-bold" id="path-preview-final">Organizaciones/organizacion_1/imagenes/privados/...</span>
+        <span class="text-emerald-400 font-bold" id="path-preview-final">organizations/organization_1/images/private/...</span>
       </div>
       <div class="flex items-center gap-3 text-[11px] text-slate-500">
-        <span>Auditoría: <strong class="text-cyan-400">logs de servicio/</strong></span>
+        <span>Auditoría: <strong class="text-cyan-400">service_logs (PostgreSQL)</strong></span>
       </div>
     </div>
   </div>
@@ -235,10 +209,10 @@
 
           <div class="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2 text-xs font-mono">
             <div class="flex justify-between text-slate-400 text-[11px]">
-              <span>Ruta en S3 (Organizaciones/):</span>
+              <span>Ruta en S3 (organizations/):</span>
               <span class="text-indigo-400 cursor-pointer hover:underline" id="btn-copy-s3">Copiar</span>
             </div>
-            <div id="result-s3-key" class="text-cyan-300 truncate text-[11px]">Organizaciones/...</div>
+            <div id="result-s3-key" class="text-cyan-300 truncate text-[11px]">organizations/...</div>
           </div>
 
           <div class="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2 text-xs font-mono">
@@ -287,7 +261,7 @@
       <div class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
         <div>
           <h3 class="text-base font-bold text-white flex items-center gap-2">
-            <i class="fa-solid fa-database text-emerald-400"></i> Tabla <code class="text-emerald-300 text-xs bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30">archivos</code> en Supabase
+            <i class="fa-solid fa-database text-emerald-400"></i> Tabla <code class="text-emerald-300 text-xs bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30">files</code> en Supabase
           </h3>
           <p class="text-xs text-slate-400 mt-0.5">Control de aislamiento por organización, tipología y visibilidad</p>
         </div>
@@ -296,8 +270,8 @@
           <button id="btn-refresh-records" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 border border-slate-700 transition flex items-center gap-1.5">
             <i class="fa-solid fa-arrows-rotate"></i> Actualizar
           </button>
-          <button id="btn-clear-simulated" class="px-3 py-1.5 rounded-lg bg-red-950/50 hover:bg-red-900/60 text-xs font-medium text-red-300 border border-red-800/50 transition flex items-center gap-1.5">
-            <i class="fa-solid fa-trash-can"></i> Limpiar pruebas
+          <button id="btn-clear-records" class="px-3 py-1.5 rounded-lg bg-red-950/50 hover:bg-red-900/60 text-xs font-medium text-red-300 border border-red-800/50 transition flex items-center gap-1.5">
+            <i class="fa-solid fa-trash-can"></i> Limpiar registros
           </button>
         </div>
       </div>
@@ -329,8 +303,9 @@
   <script>
     let currentFile = null;
     let fileHash = '';
-    let isMockMode = true;
     let isUploading = false;
+    let allUsers = [];
+    let allOrganizations = [];
 
     // DOM ELEMENTS
     const dropZone = document.getElementById('drop-zone');
@@ -349,47 +324,94 @@
     const progressBarFill = document.getElementById('progress-bar-fill');
     const progressPercent = document.getElementById('progress-percent');
     const progressPhase = document.getElementById('progress-phase');
-    const multipartBadges = document.getElementById('multipart-badges');
-    const multipartChunkStatus = document.getElementById('multipart-chunk-status');
     const resultCard = document.getElementById('result-card');
     const resultS3Key = document.getElementById('result-s3-key');
     const resultCdnUrl = document.getElementById('result-cdn-url');
     const resultOrgBadge = document.getElementById('result-org-badge');
-    const btnModeMock = document.getElementById('btn-mode-mock');
-    const btnModeReal = document.getElementById('btn-mode-real');
     const terminalStepBadge = document.getElementById('terminal-step-badge');
     const recordsTableBody = document.getElementById('records-table-body');
     const btnRefreshRecords = document.getElementById('btn-refresh-records');
-    const btnClearSimulated = document.getElementById('btn-clear-simulated');
+    const btnClearRecords = document.getElementById('btn-clear-records');
     const userSelect = document.getElementById('user-select');
     const targetOrgSelect = document.getElementById('target-org-select');
     const btnSimulateCrossAttack = document.getElementById('btn-simulate-cross-attack');
     const pathPreviewLanding = document.getElementById('path-preview-landing');
     const pathPreviewFinal = document.getElementById('path-preview-final');
 
-    // MODO SELECTOR
-    btnModeMock.addEventListener('click', () => {
-      isMockMode = true;
-      btnModeMock.className = 'px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-medium shadow-sm transition';
-      btnModeReal.className = 'px-3 py-1.5 rounded-lg text-slate-400 hover:text-white transition';
-      addLog('SISTEMA', 'Modo: Simulación de S3 activa con persistencia en Supabase.', 'cyan');
-    });
+    async function loadAuthData() {
+      try {
+        const res = await fetch('/api/upload/auth-data');
+        const data = await res.json();
+        allUsers = data.usuarios || [];
+        allOrganizations = data.organizaciones || [];
 
-    btnModeReal.addEventListener('click', () => {
-      isMockMode = false;
-      btnModeReal.className = 'px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-medium shadow-sm transition';
-      btnModeMock.className = 'px-3 py-1.5 rounded-lg text-slate-400 hover:text-white transition';
-      addLog('SISTEMA', 'Modo: AWS S3 Real activado.', 'amber');
-    });
+        // Agrupar usuarios por organización
+        userSelect.innerHTML = '';
+        allOrganizations.forEach(org => {
+          const group = document.createElement('optgroup');
+          group.label = `🏢 ${org.nombre}`;
+          const orgUsers = allUsers.filter(u => u.org_id === org.id);
+          orgUsers.forEach(u => {
+            const opt = document.createElement('option');
+            opt.value = u.id;
+            opt.dataset.org = u.org_id;
+            opt.dataset.perm = u.puede_subir;
+            opt.textContent = `${u.nombre} (${u.rol})${!u.puede_subir ? ' ⛔ SIN PERMISOS' : ''}`;
+            if (!u.puede_subir) opt.className = 'text-rose-400 font-bold';
+            group.appendChild(opt);
+          });
+          userSelect.appendChild(group);
+        });
+
+        // Opción para simulación de ataque / usuario no registrado
+        const ghostGroup = document.createElement('optgroup');
+        ghostGroup.label = '⚠️ Pruebas de Seguridad (401 / 403)';
+        const ghostOpt = document.createElement('option');
+        ghostOpt.value = '00000000-0000-0000-0000-000000000000';
+        ghostOpt.textContent = '❓ Usuario Fantasma (No Registrado)';
+        ghostOpt.className = 'text-amber-400';
+        ghostGroup.appendChild(ghostOpt);
+        userSelect.appendChild(ghostGroup);
+
+        // Llenar organizaciones destino
+        targetOrgSelect.innerHTML = '';
+        allOrganizations.forEach(org => {
+          const opt = document.createElement('option');
+          opt.value = org.id;
+          opt.textContent = `${org.nombre} (${org.slug})`;
+          targetOrgSelect.appendChild(opt);
+        });
+        const fakeOrg = document.createElement('option');
+        fakeOrg.value = '99999999-9999-9999-9999-999999999999';
+        fakeOrg.textContent = 'Organización Inexistente (403)';
+        fakeOrg.className = 'text-rose-400';
+        targetOrgSelect.appendChild(fakeOrg);
+
+        if (userSelect.options.length > 0) {
+          userSelect.selectedIndex = 0;
+          const firstOpt = userSelect.selectedOptions[0];
+          if (firstOpt && firstOpt.dataset.org) {
+            targetOrgSelect.value = firstOpt.dataset.org;
+          }
+        }
+
+        updatePathPreviews();
+        addLog('SISTEMA', `Cargados ${allUsers.length} usuarios y ${allOrganizations.length} organizaciones reales desde Supabase.`, 'emerald');
+      } catch (err) {
+        console.error('Error cargando auth-data:', err);
+        addLog('ERROR', 'No se pudieron cargar usuarios de Supabase.', 'red');
+      }
+    }
 
     function updatePathPreviews() {
       const selectedUserOpt = userSelect.selectedOptions[0];
-      const targetOrg = targetOrgSelect.value === '11111111-1111-1111-1111-111111111111' ? 'organizacion_1' : 'organizacion_2';
-      const visibilidad = document.querySelector('input[name="visibilidad"]:checked').value;
-      const userName = selectedUserOpt ? selectedUserOpt.text.split(' ')[0] : 'usuario';
+      const targetOrg = allOrganizations.find(o => o.id === targetOrgSelect.value);
+      const orgSlug = targetOrg ? targetOrg.slug : 'organization_1';
+      const visibilidad = document.querySelector('input[name="visibilidad"]:checked')?.value === 'publicos' ? 'public' : 'private';
+      const userId = userSelect.value || 'user_id';
 
-      pathPreviewLanding.textContent = `Pendientes/${targetOrg}/${userName}/...`;
-      pathPreviewFinal.textContent = `Organizaciones/${targetOrg}/imagenes/${visibilidad}/...`;
+      pathPreviewLanding.textContent = `pending/${userId}/...`;
+      pathPreviewFinal.textContent = `organizations/${orgSlug}/images/${visibilidad}/...`;
     }
 
     userSelect.addEventListener('change', () => {
@@ -406,11 +428,16 @@
 
     // PRUEBA DE ATAQUE CRUZADO
     btnSimulateCrossAttack.addEventListener('click', () => {
-      // Carlos Mendoza de Org 1 intentando subir a Org 2
-      userSelect.value = 'a1111111-0000-0000-0000-000000000001'; // Carlos (Org 1)
-      targetOrgSelect.value = '22222222-2222-2222-2222-222222222222'; // Org 2
-      updatePathPreviews();
-      addLog('SIMULADOR', '⚠️ Configurado escenario de ataque: Usuario de Organización 1 intentará forzar subida en Organización 2.', 'amber');
+      const org1 = allOrganizations[0];
+      const org2 = allOrganizations[1];
+      const org1User = allUsers.find(u => u.org_id === org1?.id && u.puede_subir);
+
+      if (org1User && org2) {
+        userSelect.value = org1User.id;
+        targetOrgSelect.value = org2.id;
+        updatePathPreviews();
+        addLog('SIMULADOR', `⚠️ Configurado escenario de ataque: ${org1User.nombre} de ${org1?.nombre} intentará forzar subida en ${org2?.nombre}.`, 'amber');
+      }
     });
 
     function addLog(source, message, color = 'slate') {
@@ -541,11 +568,11 @@
       const selectedUserOpt = userSelect.selectedOptions[0];
       const userId = userSelect.value;
       const targetOrgId = targetOrgSelect.value;
-      const visibilidad = document.querySelector('input[name="visibilidad"]:checked').value;
+      const visibilidad = document.querySelector('input[name="visibilidad"]:checked')?.value || 'privados';
 
       try {
         terminalStepBadge.textContent = 'Verificando Permisos';
-        addLog('PASO 1', `Solicitando ticket para usuario: <strong>${selectedUserOpt.text}</strong>...`, 'indigo');
+        addLog('PASO 1', `Solicitando ticket para usuario: <strong>${selectedUserOpt?.text || userId}</strong>...`, 'indigo');
 
         let detectedType = currentFile.type;
         if (!detectedType) {
@@ -565,14 +592,11 @@
           hashSha256: fileHash,
         };
 
-        const headers = { 'Content-Type': 'application/json' };
-        if (isMockMode) headers['x-mock-mode'] = 'true';
-
         addLog('SERVIDOR', `Ejecutando comprobaciones en BD para usuario y organización destino...`, 'slate');
 
         const resTicket = await fetch('/api/upload/ticket', {
           method: 'POST',
-          headers,
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(ticketPayload),
         });
 
@@ -582,13 +606,13 @@
         if (!resTicket.ok) {
           if (resTicket.status === 401) {
             addLog('COMPROBACIÓN 1', `❌ <strong>RECHAZADO (401 Unauthorized)</strong>: ${ticketData.message}`, 'red');
-            addLog('AUDITORÍA', `Evento registrado en <code>logs de servicio/</code>: DENEGADO_NO_REGISTRADO.`, 'amber');
+            addLog('AUDITORÍA', `Evento registrado en <code>service_logs</code>: DENEGADO_NO_REGISTRADO.`, 'amber');
           } else if (ticketData.code === 'FORBIDDEN_ORGANIZATION') {
             addLog('COMPROBACIÓN 2', `❌ <strong>RECHAZADO (403 Forbidden)</strong>: ${ticketData.message}`, 'red');
-            addLog('AUDITORÍA', `Violación Multi-Tenant registrada en <code>logs de servicio/</code>: DENEGADO_OTRA_ORG.`, 'amber');
+            addLog('AUDITORÍA', `Violación Multi-Tenant registrada en <code>service_logs</code>: DENEGADO_OTRA_ORG.`, 'amber');
           } else if (ticketData.code === 'FORBIDDEN_NO_PERMISSION') {
             addLog('COMPROBACIÓN 3', `❌ <strong>RECHAZADO (403 Forbidden)</strong>: ${ticketData.message}`, 'red');
-            addLog('AUDITORÍA', `Intento sin permiso registrado en <code>logs de servicio/</code>: DENEGADO_SIN_PERMISO.`, 'amber');
+            addLog('AUDITORÍA', `Intento sin permiso registrado en <code>service_logs</code>: DENEGADO_SIN_PERMISO.`, 'amber');
           } else {
             addLog('ERROR', ticketData.message || 'Error en servidor', 'red');
           }
@@ -598,7 +622,7 @@
         }
 
         // SI PASÓ TODAS LAS COMPROBACIONES
-        addLog('COMPROBACIÓN 1', `✅ Usuario autenticado y registrado en el sistema.`, 'emerald');
+        addLog('COMPROBACIÓN 1', `✅ Usuario autenticado y registrado en Supabase.`, 'emerald');
         addLog('COMPROBACIÓN 2', `✅ Aislamiento Multi-Tenant verificado: Pertenece a ${ticketData.organizacion?.nombre}.`, 'emerald');
         addLog('COMPROBACIÓN 3', `✅ Permiso de subida verificado (puede_subir: true).`, 'emerald');
 
@@ -607,50 +631,51 @@
 
         loadSupabaseRecords();
 
-        // Iniciar subida directa
+        // Iniciar subida directa real a AWS S3
         progressCard.classList.remove('hidden');
-        terminalStepBadge.textContent = 'Subiendo a S3 Pendientes';
-        addLog('PASO 2', `Cliente enviando paquetes a la Pre-signed URL...`, 'indigo');
+        progressBarFill.style.width = '50%';
+        progressPercent.textContent = '50%';
+        terminalStepBadge.textContent = 'Subiendo a AWS S3';
+        addLog('PASO 2', `Subiendo binario directamente a AWS S3 (Presigned URL)...`, 'indigo');
 
-        await simulateUploadProgress(ticketData.isMultipart);
-
-        const resS3Mock = await fetch(ticketData.uploadUrl, { method: 'PUT' });
-        await resS3Mock.json();
-        addLog('AWS S3', `Archivo recibido en: <code>${ticketData.s3Hierarchy.landingZone}</code>`, 'emerald');
-        loadSupabaseRecords();
-
-        // Lambda y GuardDuty
-        terminalStepBadge.textContent = 'Lambda y Mover a Organizaciones/';
-        addLog('AWS S3', `Evento S3 disparado. Activando Lambda procesadora...`, 'cyan');
-        addLog('GUARDDUTY', `Escaneo de seguridad antivirus: <strong class="text-emerald-400">CLEAN</strong> (Sin amenazas).`, 'emerald');
-
-        const resProcess = await fetch(`/api/upload/mock-process/${ticketData.ticketId}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            fileType: detectedType,
-            fileName: currentFile.name,
-            fileSize: currentFile.size,
-            hashSha256: fileHash,
-            orgSlug: ticketData.organizacion?.slug,
-            visibilidad,
-          }),
+        const resS3 = await fetch(ticketData.uploadUrl, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': detectedType,
+          },
+          body: currentFile,
         });
 
-        const processData = await resProcess.json();
+        if (!resS3.ok) {
+          throw new Error(`Error en subida a AWS S3 (HTTP ${resS3.status})`);
+        }
 
-        addLog('AWS LAMBDA', `Archivo movido exitosamente a su destino permanente:`, 'emerald');
-        addLog('S3 DESTINO', `<code>${processData.s3_key_procesado}</code>`, 'emerald');
+        progressBarFill.style.width = '85%';
+        progressPercent.textContent = '85%';
+        addLog('AWS S3', `✅ Archivo almacenado exitosamente en S3: <code>${ticketData.s3Hierarchy.landingZone}</code>`, 'emerald');
+
+        // Confirmación en Supabase
+        terminalStepBadge.textContent = 'Confirmando en Supabase';
+        addLog('SUPABASE', `Confirmando subida en base de datos PostgreSQL...`, 'cyan');
+
+        const resConfirm = await fetch(`/api/upload/confirm/${ticketData.ticketId}`, {
+          method: 'PUT',
+        });
+        const confirmData = await resConfirm.json();
+
+        progressBarFill.style.width = '100%';
+        progressPercent.textContent = '100%';
+        terminalStepBadge.textContent = 'Completado';
+        addLog('SUPABASE', `✅ Estado actualizado a 'completed' en tabla <code>files</code>`, 'emerald');
 
         loadSupabaseRecords();
 
-        terminalStepBadge.textContent = 'Completado';
         resultCard.classList.remove('hidden');
-        resultS3Key.textContent = processData.s3_key_procesado;
-        resultCdnUrl.textContent = processData.cloudfront_url;
+        resultS3Key.textContent = ticketData.s3Hierarchy.permanentTarget;
+        resultCdnUrl.textContent = ticketData.uploadUrl.split('?')[0];
         resultOrgBadge.textContent = `Guardado bajo ${ticketData.organizacion?.nombre} (${visibilidad.toUpperCase()})`;
 
-        addLog('CLIENTE', `¡Subida y aislamiento completados exitosamente!`, 'emerald');
+        addLog('CLIENTE', `¡Subida directa a AWS S3 completada con éxito!`, 'emerald');
 
       } catch (err) {
         addLog('ERROR', err.message, 'red');
@@ -660,32 +685,6 @@
         btnUpload.disabled = false;
       }
     });
-
-    function simulateUploadProgress(isMultipart) {
-      return new Promise((resolve) => {
-        let currentPercent = 0;
-        const totalChunks = isMultipart ? 4 : 1;
-        let currentChunk = 1;
-
-        const interval = setInterval(() => {
-          currentPercent += Math.floor(Math.random() * 15) + 12;
-          if (currentPercent > 100) currentPercent = 100;
-
-          progressBarFill.style.width = currentPercent + '%';
-          progressPercent.textContent = currentPercent + '%';
-
-          if (isMultipart) {
-            currentChunk = Math.min(Math.ceil((currentPercent / 100) * totalChunks), totalChunks);
-            multipartChunkStatus.textContent = `Parte ${currentChunk} de ${totalChunks} enviada`;
-          }
-
-          if (currentPercent >= 100) {
-            clearInterval(interval);
-            setTimeout(resolve, 300);
-          }
-        }, 100);
-      });
-    }
 
     async function loadSupabaseRecords() {
       try {
@@ -702,10 +701,8 @@
         }
 
         const statusBadges = {
-          'pendiente_subida': 'bg-amber-500/10 text-amber-400 border-amber-500/30',
-          'subido_pendiente_proc': 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30',
-          'procesando': 'bg-indigo-500/10 text-indigo-400 border-indigo-500/30',
-          'completado': 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
+          'pending_upload': 'bg-amber-500/10 text-amber-400 border-amber-500/30',
+          'completed': 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
           'error': 'bg-red-500/10 text-red-400 border-red-500/30',
         };
 
@@ -713,8 +710,8 @@
           const badgeClass = statusBadges[r.estado] || 'bg-slate-700 text-slate-300';
           const fecha = new Date(r.created_at).toLocaleTimeString();
           const targetKey = r.s3_key_procesado || r.s3_key_pendiente || '--';
-          const vis = r.metadata?.visibilidad || r.visibilidad || 'privado';
-          const tipo = r.metadata?.tipo_recurso || r.tipo_recurso || 'multimedia';
+          const vis = r.visibility || r.visibilidad || 'private';
+          const tipo = r.resource_type || r.tipo_recurso || 'documents';
 
           return `
             <tr class="hover:bg-slate-800/40 transition">
@@ -740,12 +737,12 @@
       }
     }
 
-    btnClearSimulated.addEventListener('click', async () => {
-      if (!confirm('¿Deseas eliminar las entradas de prueba de Supabase?')) return;
+    btnClearRecords.addEventListener('click', async () => {
+      if (!confirm('¿Deseas vaciar los registros de archivos en Supabase?')) return;
       try {
-        const res = await fetch('/api/upload/records/simulated', { method: 'DELETE' });
+        const res = await fetch('/api/upload/records', { method: 'DELETE' });
         const data = await res.json();
-        addLog('SUPABASE', `🧹 ${data.message}`, 'amber');
+        addLog('SUPABASE', `🧹 ${data.message || 'Registros eliminados'}`, 'amber');
         loadSupabaseRecords();
       } catch (err) {
         alert('Error al limpiar registros');
@@ -754,7 +751,7 @@
 
     btnRefreshRecords.addEventListener('click', () => {
       loadSupabaseRecords();
-      addLog('SISTEMA', 'Tabla actualizada.', 'slate');
+      addLog('SISTEMA', 'Tabla de Supabase actualizada.', 'slate');
     });
 
     document.getElementById('btn-copy-url').addEventListener('click', () => {
@@ -767,10 +764,9 @@
       addLog('CLIENTE', 'Ruta S3 copiada.', 'cyan');
     });
 
-    updatePathPreviews();
+    loadAuthData();
     loadSupabaseRecords();
-    addLog('SISTEMA', 'Simulador Multi-Tenant inicializado con 2 Organizaciones y 15 Usuarios.', 'emerald');
-    addLog('INFO', 'Prueba cambiando de usuario o intentando subir a la otra organización para ver las comprobaciones.', 'cyan');
+    addLog('SISTEMA', 'Servicio Central inicializado con conexión directa a AWS S3 y Supabase.', 'emerald');
   </script>
 </body>
 </html>

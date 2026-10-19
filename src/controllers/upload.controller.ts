@@ -121,11 +121,14 @@ export class UploadController {
         contentLength: parsedBody.fileSize,
       });
 
+      const resourceTypeEnglish = tipoRecurso === 'imagenes' ? 'images' : tipoRecurso === 'videos' ? 'videos' : 'documents';
+      const visibilityEnglish = visibilidad === 'privados' ? 'private' : 'public';
+
       // 4. Calcular la ruta definitiva futura que usará la Lambda
       const projectedProcessedKey = FileService.generateProcessedS3Key(
         orgSlug,
-        tipoRecurso,
-        visibilidad,
+        resourceTypeEnglish,
+        visibilityEnglish,
         fileRecord.id,
         parsedBody.fileName
       );
@@ -175,128 +178,44 @@ export class UploadController {
   }
 
   /**
-   * Endpoint mock para subida directa (PUT)
+   * Endpoint oficial de confirmación de subida a S3
    */
-  static async mockS3Upload(req: Request, res: Response) {
+  static async confirmUpload(req: Request, res: Response) {
     const { ticketId } = req.params;
 
     try {
-      await FileService.updateFileRecordByTicket(ticketId, {
-        estado: 'subido_pendiente_proc',
+      const updatedRecord = await FileService.updateFileRecordByTicket(ticketId, {
+        estado: 'completado',
       });
 
-      res.setHeader('ETag', `"mock-etag-${Date.now()}"`);
+      if (!updatedRecord) {
+        return res.status(404).json({
+          status: 'error',
+          message: `Ticket "${ticketId}" no encontrado en Supabase`,
+        });
+      }
+
+      await AuthService.logAuditoria({
+        orgId: updatedRecord.org_id,
+        userId: updatedRecord.user_id,
+        accion: 'S3_UPLOAD_CONFIRMED',
+        estado: 'ALLOWED',
+        detalles: {
+          ticketId,
+          fileName: updatedRecord.nombre_original,
+          status: 'completed',
+        },
+      });
+
       return res.status(200).json({
-        message: 'Simulación: Archivo recibido exitosamente en S3 /Pendientes',
+        status: 'success',
+        message: 'Subida confirmada exitosamente en S3 y Supabase',
         ticketId,
-        s3Status: 200,
-        estadoSupabase: 'subido_pendiente_proc',
+        record: updatedRecord,
         timestamp: new Date().toISOString(),
       });
     } catch (error: any) {
-      console.error('Error actualizando estado en Supabase:', error);
-      return res.status(500).json({ status: 'error', message: error.message });
-    }
-  }
-
-  /**
-   * Endpoint mock de la Lambda: Mueve a Organizaciones/{org}/{tipo}/{visibilidad}/
-   */
-  static async mockLambdaProcess(req: Request, res: Response) {
-    const { ticketId } = req.params;
-    const {
-      fileType = '',
-      fileName = '',
-      fileSize = 1024000,
-      hashSha256,
-      orgSlug = 'organizacion_1',
-      visibilidad = 'privados',
-    } = req.body || {};
-
-    try {
-      const isImage = fileType.startsWith('image/');
-      const isVideo = fileType.startsWith('video/');
-      const tipoRecurso = isImage ? 'imagenes' : isVideo ? 'videos' : 'documentos';
-
-      let extensionOverride: string | undefined;
-      let finalSize = fileSize;
-      let savingsPercent = '0%';
-      let pipelineEngine = 'AWS GuardDuty / ClamAV';
-      let transformations: string[] = [];
-
-      if (isImage) {
-        extensionOverride = 'webp';
-        finalSize = Math.round(fileSize * 0.22);
-        savingsPercent = '78%';
-        pipelineEngine = 'Sharp v0.33';
-        transformations = ['strip_exif', 'convert_webp', 'auto_compress'];
-      } else if (isVideo) {
-        extensionOverride = 'mp4';
-        finalSize = Math.round(fileSize * 0.65);
-        savingsPercent = '35%';
-        pipelineEngine = 'AWS Elemental MediaConvert';
-        transformations = ['h264_transcode', 'generate_thumbnail', 'metadata_extract'];
-      } else {
-        finalSize = fileSize;
-        savingsPercent = '0% (Original)';
-        pipelineEngine = 'AWS GuardDuty Document Pipeline';
-        transformations = ['antivirus_scan', 'checksum_verification', 'mime_validation', 'secure_retention'];
-      }
-
-      // Estructura exacta requerida: Organizaciones/{org}/{tipo}/{visibilidad}/{archivo}
-      const processedKey = FileService.generateProcessedS3Key(
-        orgSlug,
-        tipoRecurso,
-        visibilidad,
-        ticketId,
-        fileName,
-        extensionOverride
-      );
-
-      const cloudfrontUrl = visibilidad === 'privados'
-        ? `https://cdn.simulador-cloudinary.local/${processedKey}?signed=true&expires=300`
-        : `https://cdn.simulador-cloudinary.local/${processedKey}`;
-
-      const metadataLambda = {
-        hash_sha256: hashSha256 || null,
-        org_slug: orgSlug,
-        tipo_recurso: tipoRecurso,
-        visibilidad,
-        guardDutyScan: {
-          status: 'CLEAN',
-          threatDetected: false,
-          scanTimestamp: new Date().toISOString(),
-        },
-        pipeline: {
-          engine: pipelineEngine,
-          transformations,
-          originalSize: fileSize,
-          finalSize,
-          savingsPercent,
-        },
-        completado_en: new Date().toISOString(),
-      };
-
-      const updatedRecord = await FileService.updateFileRecordByTicket(ticketId, {
-        estado: 'completado',
-        s3_key_procesado: processedKey,
-        cloudfront_url: cloudfrontUrl,
-        metadata: metadataLambda,
-      });
-
-      return res.status(200).json({
-        status: 'completado',
-        ticketId,
-        categoria: tipoRecurso,
-        visibilidad,
-        record: updatedRecord,
-        s3_key_procesado: processedKey,
-        cloudfront_url: cloudfrontUrl,
-        lambdaProcessing: metadataLambda.pipeline,
-        guardDutyScan: metadataLambda.guardDutyScan,
-      });
-    } catch (error: any) {
-      console.error('Error finalizando procesamiento:', error);
+      console.error('Error confirmando subida en Supabase:', error);
       return res.status(500).json({ status: 'error', message: error.message });
     }
   }
@@ -327,13 +246,13 @@ export class UploadController {
   }
 
   /**
-   * Limpiar registros simulados
+   * Limpiar registros de la tabla files
    */
-  static async clearSimulatedRecords(_req: Request, res: Response) {
+  static async clearFileRecords(_req: Request, res: Response) {
     try {
-      const count = await FileService.clearSimulatedRecords();
+      const count = await FileService.clearFileRecords();
       return res.status(200).json({
-        message: `Se eliminaron ${count} registros simulados de Supabase exitosamente.`,
+        message: `Se eliminaron ${count} registros de Supabase exitosamente.`,
         deletedCount: count,
       });
     } catch (error: any) {

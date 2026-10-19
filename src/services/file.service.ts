@@ -36,37 +36,36 @@ export class FileService {
   }
 
   /**
-   * Genera la ruta en S3 para la zona de aterrizaje: Pendientes/
-   * Estructura: Pendientes/{orgSlug}/{userId}/{fileId}-{filename}
+   * Genera la ruta en S3 para la zona de aterrizaje: pending/
+   * Estructura: pending/{userId}/{fileId}-{filename}
    */
-  static generatePendingS3Key(orgSlug: string, userId: string, fileId: string, fileName: string): string {
+  static generatePendingS3Key(userId: string, fileId: string, fileName: string): string {
     const sanitizedFileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-    return `Pendientes/${orgSlug}/${userId}/${fileId}-${sanitizedFileName}`;
+    return `pending/${userId}/${fileId}-${sanitizedFileName}`;
   }
 
   /**
    * Genera la ruta definitiva en S3 según la jerarquía multi-tenant:
-   * Organizaciones/{Organizacion}/{tipo_recurso}/{visibilidad}/{archivo}
+   * organizations/{orgSlug}/{tipo_recurso}/{visibilidad}/{archivo}
    */
   static generateProcessedS3Key(
     orgSlug: string,
-    tipoRecurso: 'imagenes' | 'documentos' | 'videos',
-    visibilidad: 'publicos' | 'privados',
+    tipoRecurso: 'images' | 'documents' | 'videos',
+    visibilidad: 'public' | 'private',
     fileId: string,
     fileName: string,
     extensionOverride?: string
   ): string {
     const sanitizedBase = fileName.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/\.[^/.]+$/, '');
     const ext = extensionOverride || (fileName.includes('.') ? fileName.split('.').pop() : 'bin');
-    return `Organizaciones/${orgSlug}/${tipoRecurso}/${visibilidad}/${fileId}-${sanitizedBase}.${ext}`;
+    return `organizations/${orgSlug}/${tipoRecurso}/${visibilidad}/${fileId}-${sanitizedBase}.${ext}`;
   }
 
   /**
    * Registra el ticket de subida en Supabase
    */
   static async createPendingFileRecord(
-    input: RequestUploadTicketInput,
-    isMock = false
+    input: RequestUploadTicketInput
   ): Promise<FileRecord> {
     const fileId = randomUUID();
     const ticketId = randomUUID();
@@ -75,15 +74,16 @@ export class FileService {
     const validOrgId = UUID_REGEX.test(input.orgId) ? input.orgId : randomUUID();
 
     const org = await AuthService.findOrganizacion(input.orgId);
-    const orgSlug = org ? org.slug : 'organizacion_desconocida';
+    const orgSlug = org ? org.slug : 'organization_1';
     const tipoRecurso = this.getTipoRecurso(input.fileType);
     const visibilidad = input.visibilidad || 'privados';
+    const resourceTypeEnglish = tipoRecurso === 'imagenes' ? 'images' : tipoRecurso === 'videos' ? 'videos' : 'documents';
+    const visibilityEnglish = visibilidad === 'privados' ? 'private' : 'public';
 
-    const s3KeyPendiente = this.generatePendingS3Key(orgSlug, validUserId, fileId, input.fileName);
+    const s3KeyPendiente = this.generatePendingS3Key(validUserId, fileId, input.fileName);
 
     const initialMetadata = {
       hash_sha256: input.hashSha256 || null,
-      modo_simulado: isMock,
       org_slug: orgSlug,
       tipo_recurso: tipoRecurso,
       visibilidad,
@@ -99,8 +99,8 @@ export class FileService {
       original_name: input.fileName,
       mime_type: input.fileType,
       size_bytes: input.fileSize,
-      resource_type: tipoRecurso === 'imagenes' ? 'images' : tipoRecurso === 'videos' ? 'videos' : 'documents',
-      visibility: visibilidad === 'privados' ? 'private' : 'public',
+      resource_type: resourceTypeEnglish,
+      visibility: visibilityEnglish,
       s3_pending_key: s3KeyPendiente,
       status: 'pending_upload',
       created_at: new Date().toISOString(),
@@ -190,9 +190,9 @@ export class FileService {
   }
 
   /**
-   * Elimina todos los registros de prueba simulados
+   * Elimina los registros de la tabla files
    */
-  static async clearSimulatedRecords(): Promise<number> {
+  static async clearFileRecords(): Promise<number> {
     const { data, error } = await supabase
       .from('files')
       .delete()
@@ -200,7 +200,7 @@ export class FileService {
       .select('id');
 
     if (error) {
-      console.error('Error eliminando registros simulados en Supabase:', error);
+      console.error('Error eliminando registros en Supabase:', error);
       throw new Error(`Error al eliminar registros: ${error.message}`);
     }
 
