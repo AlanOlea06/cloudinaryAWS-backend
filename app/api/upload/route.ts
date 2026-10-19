@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { USERS, ORGANIZATIONS, addServiceLog } from '@/lib/service-logs';
+import { addServiceLog } from '@/lib/service-logs';
 import { supabase } from '@/lib/supabase';
 import { isAwsConfigured, generatePresignedUploadUrl } from '@/lib/s3';
 import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/ticket-token';
@@ -34,8 +34,46 @@ export async function POST(req: NextRequest) {
       extension: incomingExtension,
     } = body;
 
+    // 1. Query User from Supabase (Real Database Lookup - No Hardcoding)
+    let user: any = null;
+    if (userId) {
+      const { data: dbUser } = await supabase
+        .from('users')
+        .select('id, org_id, name, email, role, can_upload')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (dbUser) {
+        user = {
+          id: dbUser.id,
+          orgId: dbUser.org_id,
+          name: dbUser.name,
+          email: dbUser.email,
+          role: dbUser.role,
+          canUpload: Boolean(dbUser.can_upload),
+        };
+      } else {
+        // Fallback to legacy usuarios table if migration not completed
+        const { data: dbUsuario } = await supabase
+          .from('usuarios')
+          .select('id, org_id, nombre, email, rol, puede_subir')
+          .eq('id', userId)
+          .maybeSingle();
+
+        if (dbUsuario) {
+          user = {
+            id: dbUsuario.id,
+            orgId: dbUsuario.org_id,
+            name: dbUsuario.nombre,
+            email: dbUsuario.email,
+            role: dbUsuario.rol,
+            canUpload: Boolean(dbUsuario.puede_subir),
+          };
+        }
+      }
+    }
+
     // CHECK 1: User Authentication / Registration
-    const user = userId ? USERS[userId] : null;
     if (!user) {
       await addServiceLog({
         method: req.method,
@@ -65,8 +103,51 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const userOrg = ORGANIZATIONS[user.orgId];
-    const targetOrg = orgId ? ORGANIZATIONS[orgId] : null;
+    // 2. Query Organizations from Supabase (Real Database Lookup - No Hardcoding)
+    let userOrg: any = null;
+    let targetOrg: any = null;
+
+    if (user.orgId) {
+      const { data: dbUserOrg } = await supabase
+        .from('organizations')
+        .select('id, name, slug')
+        .eq('id', user.orgId)
+        .maybeSingle();
+
+      if (dbUserOrg) {
+        userOrg = dbUserOrg;
+      } else {
+        const { data: dbLegacyUserOrg } = await supabase
+          .from('organizaciones')
+          .select('id, nombre, slug')
+          .eq('id', user.orgId)
+          .maybeSingle();
+        if (dbLegacyUserOrg) {
+          userOrg = { id: dbLegacyUserOrg.id, name: dbLegacyUserOrg.nombre, slug: dbLegacyUserOrg.slug };
+        }
+      }
+    }
+
+    if (orgId) {
+      const { data: dbTargetOrg } = await supabase
+        .from('organizations')
+        .select('id, name, slug')
+        .eq('id', orgId)
+        .maybeSingle();
+
+      if (dbTargetOrg) {
+        targetOrg = dbTargetOrg;
+      } else {
+        const { data: dbLegacyTargetOrg } = await supabase
+          .from('organizaciones')
+          .select('id, nombre, slug')
+          .eq('id', orgId)
+          .maybeSingle();
+        if (dbLegacyTargetOrg) {
+          targetOrg = { id: dbLegacyTargetOrg.id, name: dbLegacyTargetOrg.nombre, slug: dbLegacyTargetOrg.slug };
+        }
+      }
+    }
 
     if (!targetOrg) {
       return NextResponse.json(
