@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { supabase } from '@/lib/supabase';
+import { addServiceLog } from '@/lib/service-logs';
 
 // Cabeceras CORS para permitir consumo desde Postman o clientes web
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
 };
 
@@ -172,3 +173,136 @@ export async function GET(
     );
   }
 }
+
+// 3. DELETE /api/files/[id]: Elimina físicamente el archivo en AWS S3, borra la fila en public.files y registra auditoría
+export async function DELETE(
+  req: NextRequest,
+  context: { params: { id: string } | Promise<{ id: string }> }
+) {
+  try {
+    const resolvedParams = await Promise.resolve(context.params);
+    const fileId = resolvedParams?.id?.trim();
+
+    if (!fileId) {
+      return NextResponse.json(
+        {
+          error: 'Bad Request',
+          code: 'MISSING_FILE_ID',
+          message: 'El identificador del archivo (id) es requerido en la ruta.',
+        },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    // 1. Consultar el archivo en Supabase
+    const { data: fileRow, error: dbError } = await supabase
+      .from('files')
+      .select('*')
+      .eq('id', fileId)
+      .maybeSingle();
+
+    if (dbError) {
+      return NextResponse.json(
+        { error: 'Database Error', message: dbError.message },
+        { status: 500, headers: corsHeaders }
+      );
+    }
+
+    if (!fileRow) {
+      return NextResponse.json(
+        {
+          error: 'Not Found',
+          code: 'FILE_NOT_FOUND',
+          message: `El archivo con id '${fileId}' no existe en la base de datos.`,
+        },
+        { status: 404, headers: corsHeaders }
+      );
+    }
+
+    // 2. Validación Multi-Tenant defensiva (Edge Middleware inyecta x-validated-org-id si se usó API Key)
+    const validatedOrgId = req.headers.get('x-validated-org-id');
+    if (validatedOrgId && validatedOrgId !== fileRow.org_id) {
+      return NextResponse.json(
+        {
+          error: 'Forbidden',
+          code: 'FORBIDDEN_TENANT_MISMATCH',
+          message: 'Acceso Denegado: La llave API provista no pertenece a la organización del archivo.',
+        },
+        { status: 403, headers: corsHeaders }
+      );
+    }
+
+    // 3. Eliminar de AWS S3 si tiene s3_pending_key o s3_processed_key
+    const region = process.env.AWS_REGION || 'us-east-1';
+    const bucketName = process.env.AWS_S3_BUCKET_NAME || '';
+
+    if (bucketName && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
+      const s3Client = new S3Client({
+        region,
+        credentials: {
+          accessKeyId: process.env.AWS_ACCESS_KEY_ID.trim(),
+          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY.trim(),
+        },
+      });
+
+      const keysToDelete = [fileRow.s3_pending_key, fileRow.s3_processed_key].filter(Boolean);
+      for (const k of keysToDelete) {
+        try {
+          await s3Client.send(new DeleteObjectCommand({
+            Bucket: bucketName.trim(),
+            Key: k,
+          }));
+        } catch (s3Err: any) {
+          console.warn(`Error eliminando ${k} de S3:`, s3Err.message);
+        }
+      }
+    }
+
+    // 4. Eliminar el registro de public.files en Supabase
+    const { error: delError } = await supabase
+      .from('files')
+      .delete()
+      .eq('id', fileId);
+
+    if (delError) {
+      return NextResponse.json(
+        { error: 'Database Error', message: delError.message },
+        { status: 500, headers: corsHeaders }
+      );
+    }
+
+    // 5. Registrar log de auditoría en service_logs (3NF puro relacional)
+    await addServiceLog({
+      method: 'DELETE',
+      action: 'FILE_DELETED',
+      status: 'ALLOWED',
+      userId: fileRow.user_id,
+      orgId: fileRow.org_id,
+      fileId: fileRow.id,
+      ticketId: fileRow.ticket_id,
+      fileName: fileRow.original_name,
+      ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+      message: `File '${fileRow.original_name}' permanently deleted from S3 and Supabase.`,
+    });
+
+    return NextResponse.json(
+      {
+        status: 'success',
+        message: `El archivo '${fileRow.original_name}' fue eliminado exitosamente de S3 y de Supabase.`,
+        deletedFileId: fileId,
+        ticketId: fileRow.ticket_id,
+      },
+      { status: 200, headers: corsHeaders }
+    );
+  } catch (error: any) {
+    console.error('Error al eliminar archivo:', error);
+    return NextResponse.json(
+      {
+        error: 'Internal Server Error',
+        message: error.message || 'Error inesperado al eliminar el archivo.',
+      },
+      { status: 500, headers: corsHeaders }
+    );
+  }
+}
+
