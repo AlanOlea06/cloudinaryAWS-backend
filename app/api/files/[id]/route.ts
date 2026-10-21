@@ -140,8 +140,8 @@ export async function GET(
       ResponseContentDisposition: disposition,
     });
 
-    // 5. Generar URL prefirmada temporal con expiración de 5 minutos (300 segundos)
-    const EXPIRES_IN_SECONDS = 300;
+    // 5. Generar URL prefirmada temporal con expiración de 1 hora (3600 segundos)
+    const EXPIRES_IN_SECONDS = 3600;
     const presignedDownloadUrl = await getSignedUrl(s3Client, getCommand, {
       expiresIn: EXPIRES_IN_SECONDS,
     });
