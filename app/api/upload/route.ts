@@ -64,14 +64,9 @@ export async function POST(req: NextRequest) {
         userId: userId || 'unknown',
         userName: 'Unregistered User',
         targetOrgId: orgId,
-        details: {
-          method: req.method,
-          reason: 'User does not exist in the database.',
-          ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
-          fileName,
-          mimeType: fileType,
-          fileSize,
-        },
+        fileName,
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        message: 'User does not exist in the database.',
       });
 
       return NextResponse.json(
@@ -136,11 +131,8 @@ export async function POST(req: NextRequest) {
         userName: user.name,
         orgId: validatedOrgId,
         targetOrgId: orgId,
-        details: {
-          method: req.method,
-          reason: 'API Key does not belong to destination organization.',
-          ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
-        },
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        message: 'API Key does not belong to destination organization.',
       });
 
       return NextResponse.json(
@@ -165,16 +157,9 @@ export async function POST(req: NextRequest) {
         orgId: user.orgId,
         orgName: userOrg?.name,
         targetOrgId: orgId,
-        details: {
-          method: req.method,
-          alert: 'CROSS-ORGANIZATION UPLOAD ATTEMPT BLOCKED',
-          originOrg: userOrg?.name,
-          destinationOrg: targetOrg.name,
-          fileName,
-          mimeType: fileType,
-          fileSize,
-          ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
-        },
+        fileName,
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        message: `CROSS-ORGANIZATION UPLOAD ATTEMPT BLOCKED: User '${user.name}' (${userOrg?.name}) attempted to upload to '${targetOrg.name}'.`,
       });
 
       return NextResponse.json(
@@ -202,14 +187,9 @@ export async function POST(req: NextRequest) {
         userName: user.name,
         orgId: user.orgId,
         orgName: userOrg?.name,
-        details: {
-          method: req.method,
-          reason: 'User has a viewer role and lacks upload authorization.',
-          fileName,
-          mimeType: fileType,
-          fileSize,
-          ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
-        },
+        fileName,
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        message: 'User has a viewer role and lacks upload authorization.',
       });
 
       return NextResponse.json(
@@ -320,26 +300,11 @@ export async function POST(req: NextRequest) {
       orgId: user.orgId,
       orgName: userOrg?.name,
       targetOrgId: orgId,
-      details: {
-        method: req.method,
-        uploadMethod: 'PUT',
-        ticketId,
-        fileId,
-        fileName,
-        extension,
-        mimeType: fileType,
-        fileSize,
-        resourceType,
-        visibility,
-        uploadUrl,
-        mode: 'REAL_AWS_S3',
-        s3Landing: landingZoneKey,
-        s3Permanent: permanentTargetKey,
-        expiresAt,
-        ttlSeconds: TTL_SECONDS,
-        confirmTokenPreview: confirmToken.substring(0, 20) + '...',
-        ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
-      },
+      ticketId,
+      fileId,
+      fileName,
+      ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+      message: `Presigned S3 upload URL issued for file '${fileName}' (${fileType}, ${fileSize} bytes)`,
     });
 
     return NextResponse.json(
@@ -457,12 +422,9 @@ export async function PUT(req: NextRequest) {
       method: req.method,
       action: 'TICKET_CONFIRM_FAILED',
       status: 'DENIED_NOT_FOUND',
-      details: {
-        method: req.method,
-        ticketId,
-        reason: 'Ticket not found in database.',
-        ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
-      },
+      ticketId,
+      ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+      message: 'Ticket not found in database.',
     });
 
     return NextResponse.json(
@@ -510,15 +472,10 @@ export async function PUT(req: NextRequest) {
       status: 'DENIED_EXPIRED',
       userId: fileRow.user_id,
       orgId: fileRow.org_id,
-      details: {
-        method: req.method,
-        ticketId,
-        fileId: fileRow.id,
-        createdAt: fileRow.created_at,
-        expiredAgoSeconds: Math.floor((Date.now() - (createdAtMs + TTL_MS)) / 1000),
-        reason: 'Ticket TTL exceeded (5 min window expired).',
-        ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
-      },
+      ticketId,
+      fileId: fileRow.id,
+      ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+      message: 'Ticket TTL exceeded (5 min window expired).',
     });
 
     return NextResponse.json(
@@ -542,13 +499,10 @@ export async function PUT(req: NextRequest) {
         status: 'DENIED_FORGED_TOKEN',
         userId: fileRow.user_id,
         orgId: fileRow.org_id,
-        details: {
-          method: req.method,
-          ticketId,
-          reason: tokenResult.reason,
-          tokenPreview: confirmToken.substring(0, 16) + '...',
-          ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
-        },
+        ticketId,
+        fileId: fileRow.id,
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        message: `Invalid or forged ticket confirmation token: ${tokenResult.reason}`,
       });
 
       return NextResponse.json(
@@ -589,22 +543,11 @@ export async function PUT(req: NextRequest) {
     status: 'UPLOADED_LANDING',
     userId: fileRow?.user_id || undefined,
     orgId: fileRow?.org_id || undefined,
-    details: {
-      method: req.method,
-      ticketId,
-      fileId: fileRow?.id || null,
-      fileName: fileRow?.original_name || null,
-      extension: fileRow?.extension || null,
-      mimeType: fileRow?.mime_type || null,
-      fileSize: fileRow?.size_bytes ?? null,
-      resourceType: fileRow?.resource_type || null,
-      visibility: fileRow?.visibility || null,
-      s3Landing: fileRow?.s3_pending_key || null,
-      s3Permanent: fileRow?.s3_processed_key || null,
-      tokenVerified: Boolean(confirmToken),
-      ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
-      message: `File confirmed in S3 landing zone for ticket ${ticketId}`,
-    },
+    ticketId,
+    fileId: fileRow?.id || undefined,
+    fileName: fileRow?.original_name || undefined,
+    ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+    message: `File confirmed in S3 landing zone for ticket ${ticketId}`,
   });
 
   return NextResponse.json(

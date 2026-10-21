@@ -24,22 +24,18 @@ export interface ServiceLog {
   s3Permanent?: string | null;
   ipAddress?: string | null;
   message?: string | null;
-  details: any;
+  details?: any; // Kept optional for backward compatibility in UI, never stored as JSON in DB
 }
 
 /**
  * ==============================================================================
- * HISTORIAL DE ARQUITECTURA: TRANSICIÓN DE MOCKS A SUPABASE EN TIEMPO REAL
+ * HISTORIAL DE ARQUITECTURA: MODELO RELACIONAL PURO (3NF / ZERO JSON)
  * ==============================================================================
- * Durante las fases iniciales del prototipo (Fase 1.1 a 1.4), se utilizaron
- * diccionarios constantes en memoria (ORGANIZATIONS y USERS) para validar
- * las reglas de negocio (RBAC y Aislamiento Multi-Tenant) de manera local.
- *
- * En la fase de endurecimiento y producción, todos los datos estáticos fueron
- * completamente eliminados y reemplazados al 100% por consultas relacionales
- * directas a las tablas `public.users` y `public.organizations` en Supabase,
- * tanto en el endpoint de validación (POST /api/upload) como en el de catálogo
- * (GET /api/users).
+ * La tabla `service_logs` almacena exclusivamente eventos de auditoría y
+ * seguridad atómicos (método HTTP, acción, estado, IP, mensaje, ticket_id, file_id).
+ * Toda la información de archivos, usuarios y organizaciones se resuelve
+ * a través de claves foráneas relacionales en PostgreSQL (JOINs en Supabase),
+ * garantizando cero redundancia y eliminación total de columnas JSON/JSONB.
  * ==============================================================================
  */
 
@@ -53,6 +49,7 @@ if (!globalForLogs.serviceLogs) {
 
 /**
  * Persists an audit log event to memory and to Supabase (service_logs table)
+ * completely normalized without any JSONB column.
  */
 export async function addServiceLog(logInput: {
   method?: string;
@@ -66,25 +63,31 @@ export async function addServiceLog(logInput: {
   orgName?: string;
   orgNombre?: string;
   targetOrgId?: string;
+  ticketId?: string;
+  fileId?: string;
+  fileName?: string;
+  ip?: string;
+  ipAddress?: string;
+  message?: string;
+  reason?: string;
+  alert?: string;
   details?: any;
   detalles?: any;
 }): Promise<ServiceLog> {
   const action = logInput.action || logInput.accion || 'UNKNOWN_ACTION';
   const status = (logInput.status || logInput.estado || 'ALLOWED') as string;
-  const details = logInput.details || logInput.detalles || {};
-  const method = logInput.method || details.method || (action === 'S3_UPLOAD_CONFIRMED' ? 'PUT' : 'POST');
-  const userName = logInput.userName || details.userName || null;
-  const orgName = logInput.orgName || logInput.orgNombre || details.orgName || details.orgNombre || null;
-  const fileName = details.fileName || details.archivo || null;
-  const extension = details.extension || (fileName && fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : null);
+  const legacyDetails = logInput.details || logInput.detalles || {};
 
-  const enrichedDetails = {
-    ...details,
-    method,
-    userName,
-    orgName,
-    extension,
-  };
+  const method = logInput.method || legacyDetails.method || (action === 'S3_UPLOAD_CONFIRMED' ? 'PUT' : 'POST');
+  const userName = logInput.userName || legacyDetails.userName || null;
+  const orgName = logInput.orgName || logInput.orgNombre || legacyDetails.orgName || legacyDetails.orgNombre || null;
+  const ticketId = logInput.ticketId || legacyDetails.ticketId || null;
+  const fileId = logInput.fileId || legacyDetails.fileId || null;
+  const ipAddress = logInput.ipAddress || logInput.ip || legacyDetails.ip || '127.0.0.1';
+  const message = logInput.message || logInput.reason || logInput.alert || legacyDetails.message || legacyDetails.reason || legacyDetails.alert || null;
+
+  const fileName = logInput.fileName || legacyDetails.fileName || legacyDetails.archivo || null;
+  const extension = legacyDetails.extension || (fileName && fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : null);
 
   const logs = globalForLogs.serviceLogs || [];
   const nextLocalId = logs.length + 1;
@@ -95,8 +98,8 @@ export async function addServiceLog(logInput: {
     method,
     action,
     status,
-    ticketId: details.ticketId || null,
-    fileId: details.fileId || null,
+    ticketId,
+    fileId,
     userId: logInput.userId || null,
     userName,
     orgId: logInput.orgId || null,
@@ -104,42 +107,64 @@ export async function addServiceLog(logInput: {
     targetOrgId: logInput.targetOrgId || null,
     fileName,
     extension,
-    mimeType: details.mimeType || null,
-    fileSize: details.fileSize ?? null,
-    resourceType: details.resourceType || null,
-    visibility: details.visibility || null,
-    uploadUrl: details.uploadUrl || null,
-    s3Landing: details.s3Landing || null,
-    s3Permanent: details.s3Permanent || null,
-    ipAddress: details.ip || null,
-    message: details.message || details.reason || details.alert || null,
-    details: enrichedDetails,
+    mimeType: legacyDetails.mimeType || null,
+    fileSize: legacyDetails.fileSize ?? null,
+    resourceType: legacyDetails.resourceType || null,
+    visibility: legacyDetails.visibility || null,
+    uploadUrl: legacyDetails.uploadUrl || null,
+    s3Landing: legacyDetails.s3Landing || null,
+    s3Permanent: legacyDetails.s3Permanent || null,
+    ipAddress,
+    message,
+    details: legacyDetails,
   };
 
-  // 1. Persist to Supabase (letting PostgreSQL generate sequential numeric id)
+  // 1. Persist to Supabase (pure relational columns, NO json details)
   try {
     const validOrgId = logInput.orgId && UUID_REGEX.test(logInput.orgId) ? logInput.orgId : (logInput.targetOrgId && UUID_REGEX.test(logInput.targetOrgId) ? logInput.targetOrgId : null);
     const validUserId = logInput.userId && UUID_REGEX.test(logInput.userId) && logInput.userId !== '00000000-0000-0000-0000-000000000000' ? logInput.userId : null;
+    const validFileId = fileId && UUID_REGEX.test(fileId) ? fileId : null;
+    const validTicketId = ticketId && UUID_REGEX.test(ticketId) ? ticketId : null;
 
-    // Try primary English table: service_logs
-    const { data: insertedRow, error: englishErr } = await supabase
+    const payload: Record<string, any> = {
+      org_id: validOrgId,
+      user_id: validUserId,
+      action: newLog.action,
+      status: newLog.status,
+      ip_address: ipAddress,
+      created_at: newLog.timestamp,
+      http_method: method,
+      file_id: validFileId,
+      ticket_id: validTicketId,
+      message: message,
+    };
+
+    let { data: insertedRow, error: insertErr } = await supabase
       .from('service_logs')
-      .insert({
+      .insert(payload)
+      .select('id')
+      .single();
+
+    // Resilient fallback if ALTER TABLE hasn't been executed yet in Supabase
+    if (insertErr && insertErr.message.includes('in the schema cache')) {
+      console.warn('Supabase missing new columns, falling back to base columns:', insertErr.message);
+      const fallbackPayload = {
         org_id: validOrgId,
         user_id: validUserId,
         action: newLog.action,
         status: newLog.status,
-        details: enrichedDetails,
-        ip_address: details.ip || '127.0.0.1',
+        ip_address: ipAddress,
         created_at: newLog.timestamp,
-      })
-      .select('id')
-      .single();
+      };
+      const retry = await supabase.from('service_logs').insert(fallbackPayload).select('id').single();
+      insertedRow = retry.data;
+      insertErr = retry.error;
+    }
 
-    if (!englishErr && insertedRow?.id !== undefined) {
+    if (!insertErr && insertedRow?.id !== undefined) {
       newLog.id = insertedRow.id;
-    } else if (englishErr) {
-      console.error('Error inserting log in service_logs:', englishErr.message);
+    } else if (insertErr) {
+      console.error('Error inserting log in service_logs:', insertErr.message);
     }
   } catch (err: any) {
     console.error('Error persisting log in Supabase:', err.message);
@@ -154,59 +179,71 @@ export async function addServiceLog(logInput: {
 }
 
 /**
- * Fetches recent audit logs from Supabase (service_logs table) and correlates with files table
+ * Fetches recent audit logs from Supabase (service_logs table) and correlates with files, users, and organizations
  */
 export async function getServiceLogs(): Promise<ServiceLog[]> {
   try {
-    // 1. Query English table: service_logs
-    let { data, error } = await supabase
+    // 1. Query service_logs
+    const { data, error } = await supabase
       .from('service_logs')
       .select('*')
       .order('created_at', { ascending: false })
       .limit(100);
 
-    // 2. Query files table to correlate real ticket metadata stored in Supabase
-    const filesByTicket: Record<string, any> = {};
-    try {
-      const { data: filesData } = await supabase
-        .from('files')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(100);
+    // 2. Correlate with files, users, and organizations in parallel
+    const [filesRes, usersRes, orgsRes] = await Promise.all([
+      supabase.from('files').select('*').limit(100),
+      supabase.from('users').select('id, name').limit(100),
+      supabase.from('organizations').select('id, name').limit(100),
+    ]);
 
-      if (filesData) {
-        for (const f of filesData) {
-          if (f.ticket_id) filesByTicket[f.ticket_id] = f;
-        }
+    const filesByTicket: Record<string, any> = {};
+    const filesById: Record<string, any> = {};
+    if (filesRes.data) {
+      for (const f of filesRes.data) {
+        if (f.ticket_id) filesByTicket[f.ticket_id] = f;
+        if (f.id) filesById[f.id] = f;
       }
-    } catch {
-      // Ignore if files table query fails
+    }
+
+    const usersById: Record<string, string> = {};
+    if (usersRes.data) {
+      for (const u of usersRes.data) {
+        usersById[u.id] = u.name;
+      }
+    }
+
+    const orgsById: Record<string, string> = {};
+    if (orgsRes.data) {
+      for (const o of orgsRes.data) {
+        orgsById[o.id] = o.name;
+      }
     }
 
     if (!error && data && data.length > 0) {
       return data.map((row: any) => {
         const action = row.action || '';
         const status = row.status || '';
-        const details = row.details || {};
-        const ticketId = details.ticketId || row.ticket_id || null;
-        const matchedFile = ticketId ? filesByTicket[ticketId] : null;
+        const ticketId = row.ticket_id || row.details?.ticketId || null;
+        const fileId = row.file_id || row.details?.fileId || null;
+        const matchedFile = (ticketId ? filesByTicket[ticketId] : null) || (fileId ? filesById[fileId] : null);
 
-        const userId = row.user_id || matchedFile?.user_id || details.userId || null;
-        const userName = details.userName || null;
-        const orgId = row.org_id || matchedFile?.org_id || details.orgId || null;
-        const orgName = details.orgName || null;
-        const fileName = row.file_name || details.fileName || matchedFile?.original_name || null;
-        const extension = details.extension || matchedFile?.extension || (fileName && fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : null);
-        const mimeType = details.mimeType || matchedFile?.mime_type || null;
-        const fileSize = details.fileSize ?? matchedFile?.size_bytes ?? null;
-        const resourceType = details.resourceType || matchedFile?.resource_type || null;
-        const visibility = details.visibility || matchedFile?.visibility || null;
-        const uploadUrl = details.uploadUrl || null;
-        const s3Landing = details.s3Landing || matchedFile?.s3_pending_key || null;
-        const s3Permanent = details.s3Permanent || matchedFile?.s3_processed_key || null;
-        const method = details.method || (action === 'S3_UPLOAD_CONFIRMED' ? 'PUT' : 'POST');
-        const ipAddress = row.ip_address || details.ip || null;
-        const message = details.message || details.reason || details.alert || null;
+        const userId = row.user_id || matchedFile?.user_id || null;
+        const userName = (userId && usersById[userId]) || row.details?.userName || null;
+        const orgId = row.org_id || matchedFile?.org_id || null;
+        const orgName = (orgId && orgsById[orgId]) || row.details?.orgName || null;
+
+        const fileName = matchedFile?.original_name || row.file_name || row.details?.fileName || null;
+        const extension = matchedFile?.extension || (fileName && fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : null);
+        const mimeType = matchedFile?.mime_type || row.details?.mimeType || null;
+        const fileSize = matchedFile?.size_bytes ?? row.details?.fileSize ?? null;
+        const resourceType = matchedFile?.resource_type || row.details?.resourceType || null;
+        const visibility = matchedFile?.visibility || row.details?.visibility || null;
+        const s3Landing = matchedFile?.s3_pending_key || row.details?.s3Landing || null;
+        const s3Permanent = matchedFile?.s3_processed_key || row.details?.s3Permanent || null;
+        const method = row.http_method || row.details?.method || (action === 'S3_UPLOAD_CONFIRMED' ? 'PUT' : 'POST');
+        const ipAddress = row.ip_address || row.details?.ip || null;
+        const message = row.message || row.details?.message || row.details?.reason || row.details?.alert || null;
 
         return {
           id: row.id,
@@ -215,24 +252,24 @@ export async function getServiceLogs(): Promise<ServiceLog[]> {
           action,
           status,
           ticketId,
-          fileId: details.fileId || matchedFile?.id || null,
+          fileId: fileId || matchedFile?.id || null,
           userId,
           userName,
           orgId,
           orgName,
-          targetOrgId: details.targetOrgId || null,
+          targetOrgId: null,
           fileName,
           extension,
           mimeType,
           fileSize,
           resourceType,
           visibility,
-          uploadUrl,
+          uploadUrl: null,
           s3Landing,
           s3Permanent,
           ipAddress,
           message,
-          details,
+          details: {},
         };
       });
     }
