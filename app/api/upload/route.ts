@@ -6,9 +6,9 @@ import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/tick
 
 // CORS Headers
 const corsHeaders = {
-  'Access-Control-Allow-Origin': 'http://localhost:3000',
+  'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
 };
 
 // 1. Preflight OPTIONS handler
@@ -122,6 +122,35 @@ export async function POST(req: NextRequest) {
           message: 'Target organization does not exist.',
         },
         { status: 404, headers: corsHeaders }
+      );
+    }
+
+    // CHECK 1.5: API Key Tenant Matching (Injected by Edge Middleware)
+    const validatedOrgId = req.headers.get('x-validated-org-id');
+    if (validatedOrgId && validatedOrgId !== orgId) {
+      await addServiceLog({
+        method: req.method,
+        action: 'API_KEY_ORG_MISMATCH',
+        status: 'DENIED_CROSS_ORG',
+        userId: user.id,
+        userName: user.name,
+        orgId: validatedOrgId,
+        targetOrgId: orgId,
+        details: {
+          method: req.method,
+          reason: 'API Key does not belong to destination organization.',
+          ip: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        },
+      });
+
+      return NextResponse.json(
+        {
+          error: 'Forbidden',
+          code: 'FORBIDDEN_API_KEY_ORG_MISMATCH',
+          method: req.method,
+          message: 'Multi-Tenant Security Violation: The provided API Key does not belong to the requested target organization.',
+        },
+        { status: 403, headers: corsHeaders }
       );
     }
 

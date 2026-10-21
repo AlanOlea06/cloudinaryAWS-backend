@@ -129,7 +129,6 @@ export async function addServiceLog(logInput: {
         user_id: validUserId,
         action: newLog.action,
         status: newLog.status,
-        file_name: fileName,
         details: enrichedDetails,
         ip_address: details.ip || '127.0.0.1',
         created_at: newLog.timestamp,

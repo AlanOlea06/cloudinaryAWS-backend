@@ -8,14 +8,19 @@ Esta documentación explica la arquitectura interna del backend (`servicio`), de
 
 ```text
 servicio/
+├── middleware.ts            # Interceptor perimetral Edge: Autenticación de API Keys con crypto.subtle y RBAC
+├── database/
+│   └── api_keys_schema.sql  # Script DDL de tabla api_keys, índices y políticas RLS
 ├── lib/
 │   ├── supabase.ts          # Conexión cliente a PostgreSQL en Supabase
 │   ├── s3.ts                # Cliente AWS S3, firma de URLs (Presigned URLs) y borrado por prefijo
-│   └── service-logs.ts      # Registro, correlación y consulta de la bitácora (service_logs)
+│   ├── service-logs.ts      # Registro, correlación y consulta de la bitácora (service_logs)
+│   └── ticket-token.ts      # Generación y verificación HMAC-SHA256 de tokens de confirmación
 └── app/
     ├── layout.tsx           # Contenedor raíz HTML plano sin estilos decorativos
     ├── page.tsx             # Vista del servidor: Tabla plana de bitácora de eventos (service_logs)
-    └── api/
+        ├── keys/route.ts            # Generador y gestor de API Keys (POST máx 3 por org, GET, DELETE)
+        ├── files/[id]/route.ts      # Consumo directo: URL prefirmada de lectura hacia S3 (GET Direct Download)
         ├── upload/route.ts          # Flujo principal: Emisión de tickets (POST) y confirmación (PUT)
         ├── logs/route.ts            # Consulta (GET) y limpieza (DELETE) de logs
         ├── records/route.ts         # Consulta (GET) y limpieza (DELETE) de la tabla files
@@ -178,3 +183,83 @@ Una vez que el cliente terminó de subir los bytes del archivo a AWS S3 usando e
   Ejecuta `fetchLogs()` al abrir la página y configura un temporizador (`setInterval`) que refresca la tabla automáticamente cada 4 segundos (`4000 ms`).
 * **Renderizado de la Tabla (`<table>`):**
   Recorre `logs.map((log, index) => ...)` aplicando color de fondo blanco (`#ffffff`) a las filas pares (`index % 2 === 0`) y gris claro (`#f2f2f2`) a las filas impares, colocando cada propiedad del log (`id`, `timestamp`, `method`, `action`, `status`, `ticket_id`, `user_id`, `user_name`, `org_id`, `org_name`, `file_name`, `extension`, `mime_type`, `size_bytes`, `visibility`, `upload_url`, `s3_pending_key`, `s3_processed_key`, `ip_address`, `message`) en su propia celda `<td>`.
+
+---
+
+## 7. Módulo de Autenticación por API Keys: `middleware.ts` y `app/api/keys/route.ts`
+
+Este módulo implementa el control de acceso perimetral y el Principio de Menor Privilegio (PoLP) para proteger las rutas críticas del servicio sin depender de componentes externos adicionales.
+
+### 7.1. Decisión Arquitectónica: Vercel Edge + Supabase vs. AWS API Gateway
+* **Motivación y Descarte de AWS API Gateway:**  
+  Se evaluó el uso de **AWS API Gateway** para autenticar clientes mediante API Keys y Usage Plans. Sin embargo, se descartó formalmente debido a:
+  1. **Sobrecarga de Costos y Complejidad:** AWS API Gateway requiere configurar VPC Links, Lambdas autorizadoras personalizadas (Custom Authorizers) y mapeos REST complejos que duplican la infraestructura fuera del entorno Serverless en Vercel.
+  2. **Latencia Perimetral (Edge Computing):** El `middleware.ts` de Next.js se ejecuta en la red global Edge de Vercel (< 10 ms), validando la cabecera `x-api-key` en el nodo geográfico más cercano al cliente antes de que la petición toque los servidores de aplicación.
+  3. **Alineación Multi-Tenant Directa:** Las llaves están vinculadas directamente a la tabla `organizations` de Supabase PostgreSQL, facilitando la auditoría, revocación instantánea y validación de cuotas sin necesidad de sincronizaciones entre nubes heterogéneas.
+  4. **Omisión de Rate Limiting:** Se decidió posponer el Rate Limiting para mantener una arquitectura ligera orientada al flujo de carga y validación estricta de permisos.
+
+### 7.2. Tabla de Base de Datos: `public.api_keys`
+El script DDL [`servicio/database/api_keys_schema.sql`](file:///C:/Users/alano/Desktop/github/cloudinary-project/servicio/database/api_keys_schema.sql) define el almacenamiento seguro:
+* `id` (`UUID PRIMARY KEY`): Identificador único de la llave (`gen_random_uuid()`).
+* `org_id` (`UUID NOT NULL REFERENCES organizations(id)`): Organización propietaria de la llave.
+* `name` (`TEXT NOT NULL`): Etiqueta descriptiva (ej. "Postman CI", "Frontend App").
+* `hashed_key` (`TEXT UNIQUE NOT NULL`): Digest SHA-256 de la llave plana. **Nunca se almacena la llave en texto plano.**
+* `can_read` (`BOOLEAN DEFAULT false`): Permite consultar archivos y metadatos (`GET /api/files`).
+* `can_upload` (`BOOLEAN DEFAULT false`): Permite solicitar tickets de subida y confirmar cargas (`POST /api/upload`, `PUT /api/upload`).
+* `can_delete` (`BOOLEAN DEFAULT false`): Permite eliminar recursos (`DELETE /api/files`).
+* `is_active` (`BOOLEAN DEFAULT true`): Bandera para revocación inmediata (soft delete).
+* `created_at` (`TIMESTAMP WITH TIME ZONE`): Fecha de creación en UTC.
+* **Índices de Aceleración:**
+  * `idx_api_keys_hashed_key`: Búsqueda en tiempo constante ($O(1)$) en el Edge.
+  * `idx_api_keys_org_id_active`: Conteo eficiente de cuota por organización.
+
+### 7.3. Generador de Llaves: `app/api/keys/route.ts`
+* **`POST /api/keys`:**
+  1. **Límite de Cuota (Máx. 3 llaves activas):** Ejecuta un `COUNT` en Supabase filtrando por `org_id` y `is_active = true`. Si `count >= 3`, rechaza con `400 Bad Request` (`API_KEY_LIMIT_REACHED`).
+  2. **Generación Criptosegura:** Utiliza `crypto.randomBytes(32)` de Node.js produciendo una llave con formato `sk_live_<64_hex_chars>`.
+  3. **Hasheo Unidireccional:** Calcula el hash SHA-256 de la llave y persiste únicamente el digest y los permisos booleanos en `public.api_keys`.
+  4. **Entrega Única:** Responde con código `201 Created` entregando la llave plana al usuario una sola vez.
+* **`GET /api/keys?orgId=...`:** Lista las llaves registradas para la organización sin revelar secretos ni hashes.
+* **`DELETE /api/keys?keyId=...`:** Revoca la llave marcando `is_active = false`.
+
+### 7.4. Interceptor Perimetral: `middleware.ts`
+Intercepta todas las peticiones dirigidas a `/api/upload` y `/api/files`:
+1. **Bypass Preflight CORS:** Si `req.method === 'OPTIONS'`, permite el paso libre para no romper la negociación de navegadores y Postman.
+2. **Extracción:** Extrae `x-api-key`. Si no está presente, rechaza inmediatamente con `401 Unauthorized` (`MISSING_API_KEY`).
+3. **Hasheo Web Crypto:** Hashea la llave entrante mediante la API nativa de navegadores/Edge `crypto.subtle.digest('SHA-256', ...)`.
+4. **Validación en Supabase:** Realiza un `fetch` directo al API REST de Supabase (`/rest/v1/api_keys`) validando coincidencia exacta del hash y `is_active = true`. Si no existe, rechaza con `401 Unauthorized` (`INVALID_API_KEY`).
+5. **Comprobación de Privilegios (PoLP):**
+   * En peticiones `POST` o `PUT` hacia `/api/upload` o `/api/files`, valida que `can_upload === true`. De lo contrario, devuelve `403 Forbidden` (`FORBIDDEN_INSUFFICIENT_PERMISSIONS`).
+   * En peticiones `GET` hacia `/api/files`, exige `can_read === true`.
+   * En peticiones `DELETE` hacia `/api/files`, exige `can_delete === true`.
+6. **Inyección de Contexto:** Si la llave es válida y tiene permisos suficientes, inyecta la cabecera oculta `x-validated-org-id` y `x-api-key-id` en la petición entrante antes de transferir el control a la ruta de aplicación con `NextResponse.next()`.
+
+---
+
+## 8. Endpoint de Consumo Directo (Direct Download / View): `app/api/files/[id]/route.ts`
+
+Este endpoint permite la descarga o visualización de archivos mediante **URLs prefirmadas de lectura (`GetObjectCommand`)**, garantizando una arquitectura Zero-Proxy donde el servidor de aplicación nunca transmite los bytes binarios por su memoria ni consume ancho de banda en Vercel.
+
+### 8.1. Flujo Lógico y Principios de Diseño
+1. **Identificación del Archivo:** Recibe el parámetro dinámico `id` (UUID del archivo) desde la URL (`/api/files/[id]`).
+2. **Consulta a Supabase:** Busca el registro en la tabla `public.files`. Extrae:
+   * `s3_processed_key` (o `s3_pending_key` como fallback).
+   * `org_id` (para corroboración Multi-Tenant).
+   * `original_name` y `mime_type`.
+   * Si no existe el registro, responde inmediatamente con código `404 Not Found` (`FILE_NOT_FOUND`).
+3. **Validación Perimetral Heredada:** El acceso a esta ruta está protegido por `middleware.ts`, el cual exige una llave válida con el permiso `can_read = true`. Como medida de defensa en profundidad, el endpoint corrobora que la organización de la llave (`x-validated-org-id`) coincida con la organización del archivo (`org_id`).
+4. **Instanciación y Firma con AWS SDK v3:**
+   * Prepara un comando `GetObjectCommand({ Bucket, Key: s3Key })`.
+   * Firma temporalmente la URL con `getSignedUrl(s3Client, getCommand, { expiresIn: 300 })` asignando un TTL estricto de **5 minutos (300 segundos)**.
+5. **Respuesta Directa:** Responde en formato JSON con la URL firmada lista para consumo directo:
+   ```json
+   {
+     "url": "https://<bucket>.s3.<region>.amazonaws.com/<key>?X-Amz-Signature=...",
+     "fileId": "<uuid>",
+     "fileName": "<nombre_original>",
+     "orgId": "<uuid_org>",
+     "s3Key": "<ruta_en_s3>",
+     "expiresInSeconds": 300
+   }
+   ```
+El cliente o navegador utiliza directamente esta URL para descargar o renderizar el archivo directamente desde los servidores de AWS S3.

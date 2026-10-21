@@ -1,24 +1,78 @@
 {
   "info": {
     "name": "Cloudinary Clone - API",
-    "description": "Standardized English Postman collection. Fill in the variables under the Collection Variables tab (or in an Environment) before sending requests.",
+    "description": "Standardized English Postman collection with Edge API Key authentication. Fill in the variables under the Collection Variables tab (or in an Environment) before sending requests.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     { "key": "baseUrl", "value": "https://cloudinary-aws-backend.vercel.app", "type": "string" },
-    { "key": "userId", "value": "", "type": "string" },
-    { "key": "orgId", "value": "", "type": "string" },
-    { "key": "fileName", "value": "", "type": "string" },
-    { "key": "extension", "value": "", "type": "string" },
-    { "key": "fileType", "value": "", "type": "string" },
-    { "key": "fileSize", "value": "", "type": "string" },
-    { "key": "visibility", "value": "", "type": "string" },
-    { "key": "sha256Hash", "value": "", "type": "string" },
+    { "key": "apiKey", "value": "", "type": "string" },
+    { "key": "userId", "value": "a1111111-0000-0000-0000-000000000001", "type": "string" },
+    { "key": "orgId", "value": "11111111-1111-1111-1111-111111111111", "type": "string" },
+    { "key": "fileName", "value": "test-document.png", "type": "string" },
+    { "key": "extension", "value": ".png", "type": "string" },
+    { "key": "fileType", "value": "image/png", "type": "string" },
+    { "key": "fileSize", "value": "1024", "type": "string" },
+    { "key": "visibility", "value": "private", "type": "string" },
+    { "key": "sha256Hash", "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "type": "string" },
     { "key": "ticketId", "value": "", "type": "string" },
+    { "key": "fileId", "value": "", "type": "string" },
     { "key": "confirmToken", "value": "", "type": "string" },
-    { "key": "uploadUrl", "value": "", "type": "string" }
+    { "key": "uploadUrl", "value": "", "type": "string" },
+    { "key": "downloadUrl", "value": "", "type": "string" }
   ],
   "item": [
+    {
+      "name": "0. Generate API Key (POST /api/keys)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.apiKey) {",
+              "    pm.collectionVariables.set('apiKey', json.apiKey);",
+              "    console.log('Saved apiKey to collection variable:', json.apiKey);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"orgId\": \"{{orgId}}\",\n  \"name\": \"Postman Integration Key\",\n  \"can_read\": true,\n  \"can_upload\": true,\n  \"can_delete\": false\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/keys",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "keys"]
+        },
+        "description": "Generates a new secure API Key with format sk_live_... for the organization (max 3 active keys allowed). Automatically saves the plain key to {{apiKey}}."
+      }
+    },
+    {
+      "name": "0. List Organization API Keys (GET /api/keys)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/keys?orgId={{orgId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "keys"],
+          "query": [
+            { "key": "orgId", "value": "{{orgId}}" }
+          ]
+        },
+        "description": "Lists all registered API Keys for an organization (without exposing secrets or hashes)."
+      }
+    },
     {
       "name": "1. Request Upload Ticket (Presigned URL)",
       "event": [
@@ -29,6 +83,7 @@
             "exec": [
               "const json = pm.response.json();",
               "if (json.ticketId) pm.collectionVariables.set('ticketId', json.ticketId);",
+              "if (json.fileId) pm.collectionVariables.set('fileId', json.fileId);",
               "if (json.confirmToken) pm.collectionVariables.set('confirmToken', json.confirmToken);",
               "if (json.uploadUrl) pm.collectionVariables.set('uploadUrl', json.uploadUrl);"
             ]
@@ -37,7 +92,10 @@
       ],
       "request": {
         "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "x-api-key", "value": "{{apiKey}}", "description": "Edge-validated API Key required by middleware.ts" }
+        ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"orgId\": \"{{orgId}}\",\n  \"fileName\": \"{{fileName}}\",\n  \"extension\": \"{{extension}}\",\n  \"fileType\": \"{{fileType}}\",\n  \"fileSize\": \"{{fileSize}}\",\n  \"visibility\": \"{{visibility}}\",\n  \"sha256Hash\": \"{{sha256Hash}}\"\n}",
@@ -61,14 +119,16 @@
           "raw": "{{uploadUrl}}",
           "host": ["{{uploadUrl}}"]
         },
-        "description": "Select the binary file in Body -> binary. The Content-Type header must match the fileType sent in Step 1."
+        "description": "Select the binary file in Body -> binary. The Content-Type header must match the fileType sent in Step 1. In Postman, CORS does not apply so the binary uploads directly."
       }
     },
     {
       "name": "3. Confirm Upload (Persist in Database)",
       "request": {
         "method": "PUT",
-        "header": [],
+        "header": [
+          { "key": "x-api-key", "value": "{{apiKey}}", "description": "Edge-validated API Key required by middleware.ts" }
+        ],
         "url": {
           "raw": "{{baseUrl}}/api/upload?ticketId={{ticketId}}&token={{confirmToken}}",
           "host": ["{{baseUrl}}"],
@@ -79,6 +139,48 @@
           ]
         },
         "description": "Notifies backend that upload completed, verifies HMAC signature & TTL expiration, marks file as 'completed', and records audit log."
+      }
+    },
+    {
+      "name": "3.1. Get Direct Download URL (GET /api/files/:id)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.url) {",
+              "    pm.collectionVariables.set('downloadUrl', json.url);",
+              "    console.log('Saved downloadUrl:', json.url);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "x-api-key", "value": "{{apiKey}}", "description": "Edge-validated API Key (requires can_read=true)" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/files/{{fileId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "files", "{{fileId}}"]
+        },
+        "description": "Generates a temporary S3 Presigned GET URL (TTL 5 min) for direct binary download/view without server proxying."
+      }
+    },
+    {
+      "name": "3.2. Direct Download File from S3 (GET /pending/...)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{downloadUrl}}",
+          "host": ["{{downloadUrl}}"]
+        },
+        "description": "Directly downloads the binary file from AWS S3 without touching the application server."
       }
     },
     {
