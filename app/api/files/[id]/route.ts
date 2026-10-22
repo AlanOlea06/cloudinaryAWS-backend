@@ -11,6 +11,9 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
 };
 
+// Validador de formato UUID v4
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // 1. Manejador Preflight OPTIONS
 export async function OPTIONS() {
   return new NextResponse(null, {
@@ -29,12 +32,12 @@ export async function GET(
     const resolvedParams = await Promise.resolve(context.params);
     const fileId = resolvedParams?.id?.trim();
 
-    if (!fileId) {
+    if (!fileId || !UUID_REGEX.test(fileId)) {
       return NextResponse.json(
         {
           error: 'Bad Request',
-          code: 'MISSING_FILE_ID',
-          message: 'El identificador del archivo (id) es requerido en la ruta.',
+          code: 'INVALID_FILE_ID',
+          message: `El identificador '${fileId || ''}' no tiene un formato UUID v4 válido (ejemplo: 120b2a88-aa8d-4fde-92e5-de4bb87ea550).`,
         },
         { status: 400, headers: corsHeaders }
       );
@@ -183,12 +186,12 @@ export async function DELETE(
     const resolvedParams = await Promise.resolve(context.params);
     const fileId = resolvedParams?.id?.trim();
 
-    if (!fileId) {
+    if (!fileId || !UUID_REGEX.test(fileId)) {
       return NextResponse.json(
         {
           error: 'Bad Request',
-          code: 'MISSING_FILE_ID',
-          message: 'El identificador del archivo (id) es requerido en la ruta.',
+          code: 'INVALID_FILE_ID',
+          message: `El identificador '${fileId || ''}' no tiene un formato UUID v4 válido (ejemplo: 120b2a88-aa8d-4fde-92e5-de4bb87ea550).`,
         },
         { status: 400, headers: corsHeaders }
       );
