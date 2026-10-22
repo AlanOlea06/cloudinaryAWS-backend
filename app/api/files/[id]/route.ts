@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { S3Client, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { S3Client, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { supabase } from '@/lib/supabase';
 import { addServiceLog } from '@/lib/service-logs';
+import {
+  generateCloudFrontUrl,
+  getBaseCloudFrontUrl,
+  isCloudFrontConfigured,
+} from '@/lib/cloudfront';
 
 // Cabeceras CORS para permitir consumo desde Postman o clientes web
 const corsHeaders = {
@@ -22,7 +26,7 @@ export async function OPTIONS() {
   });
 }
 
-// 2. GET /api/files/[id]: Genera URL prefirmada de lectura directa hacia AWS S3
+// 2. GET /api/files/[id]: Genera URL de consumo a través de la CDN Amazon CloudFront
 export async function GET(
   req: NextRequest,
   context: { params: { id: string } | Promise<{ id: string }> }
@@ -46,7 +50,7 @@ export async function GET(
     // 2. Consultar la tabla files en Supabase para obtener la clave de S3 y org_id
     const { data: fileRow, error: dbError } = await supabase
       .from('files')
-      .select('id, org_id, original_name, s3_pending_key, s3_processed_key, status, mime_type')
+      .select('id, org_id, original_name, s3_pending_key, s3_processed_key, cloudfront_url, status, mime_type, visibility')
       .eq('id', fileId)
       .maybeSingle();
 
@@ -72,7 +76,7 @@ export async function GET(
       );
     }
 
-    // Determinar la ruta física en S3:
+    // Determinar la ruta física en S3 que servirá como origen para CloudFront:
     // Mientras el archivo no haya sido procesado/movido por Lambda (status !== 'processed'),
     // el archivo físico reside en s3_pending_key (zona de aterrizaje).
     let s3Key = fileRow.s3_pending_key;
@@ -106,59 +110,61 @@ export async function GET(
       );
     }
 
-    // 3. Configurar cliente AWS S3
-    const region = process.env.AWS_REGION || 'us-east-1';
-    const bucketName = process.env.AWS_S3_BUCKET_NAME || '';
-
-    if (!bucketName || !process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY) {
+    // 3. Verificar configuración de Amazon CloudFront
+    if (!isCloudFrontConfigured()) {
       return NextResponse.json(
         {
           error: 'Configuration Error',
-          code: 'AWS_S3_NOT_CONFIGURED',
-          message: 'El servicio de almacenamiento AWS S3 no se encuentra configurado en las variables de entorno.',
+          code: 'CLOUDFRONT_NOT_CONFIGURED',
+          message:
+            'El dominio de Amazon CloudFront (AWS_CLOUDFRONT_DOMAIN) no se encuentra configurado en las variables de entorno.',
         },
         { status: 500, headers: corsHeaders }
       );
     }
 
-    const s3Client = new S3Client({
-      region,
-      credentials: {
-        accessKeyId: process.env.AWS_ACCESS_KEY_ID.trim(),
-        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY.trim(),
-      },
+    // 4. Generar URL de entrega por CloudFront (firmada si hay Key Pair configurado, o directa vía OAC)
+    const EXPIRES_IN_SECONDS = 3600; // 1 hora
+    const cfResult = generateCloudFrontUrl(s3Key, {
+      expiresInSeconds: EXPIRES_IN_SECONDS,
     });
 
-    // 4. Preparar GetObjectCommand
-    // Por defecto se establece 'inline' para que el navegador renderice imágenes, PDFs y texto
-    // directamente en la pestaña en vez de forzar una descarga. Si se envía ?download=true se fuerza attachment.
-    const isDownload = req.nextUrl.searchParams.get('download') === 'true';
-    const disposition = isDownload
-      ? `attachment; filename="${encodeURIComponent(fileRow.original_name)}"`
-      : 'inline';
+    if (!cfResult) {
+      return NextResponse.json(
+        {
+          error: 'Configuration Error',
+          code: 'CLOUDFRONT_URL_GENERATION_FAILED',
+          message: 'No fue posible generar la URL de entrega de CloudFront.',
+        },
+        { status: 500, headers: corsHeaders }
+      );
+    }
 
-    const getCommand = new GetObjectCommand({
-      Bucket: bucketName.trim(),
-      Key: s3Key,
-      ResponseContentType: fileRow.mime_type || undefined,
-      ResponseContentDisposition: disposition,
-    });
+    // 5. Persistir cloudfront_url base en Supabase si aún estaba vacío
+    const baseCfUrl = getBaseCloudFrontUrl(s3Key);
+    if (baseCfUrl && fileRow.cloudfront_url !== baseCfUrl) {
+      await supabase
+        .from('files')
+        .update({
+          cloudfront_url: baseCfUrl,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', fileRow.id);
+    }
 
-    // 5. Generar URL prefirmada temporal con expiración de 1 hora (3600 segundos)
-    const EXPIRES_IN_SECONDS = 3600;
-    const presignedDownloadUrl = await getSignedUrl(s3Client, getCommand, {
-      expiresIn: EXPIRES_IN_SECONDS,
-    });
-
-    // 6. Devolver al cliente el JSON con la propiedad { url: "la_url_generada" }
+    // 6. Devolver al cliente el JSON con la URL de CloudFront
     return NextResponse.json(
       {
-        url: presignedDownloadUrl,
+        url: cfResult.url,
+        delivery: 'cloudfront',
+        isSigned: cfResult.isSigned,
+        cloudfrontDomain: cfResult.domain,
         fileId: fileRow.id,
         fileName: fileRow.original_name,
         orgId: fileRow.org_id,
         s3Key,
-        expiresInSeconds: EXPIRES_IN_SECONDS,
+        expiresInSeconds: cfResult.expiresInSeconds,
+        expiresAt: cfResult.expiresAt,
       },
       {
         status: 200,
@@ -166,11 +172,11 @@ export async function GET(
       }
     );
   } catch (error: any) {
-    console.error('Error al generar URL prefirmada de lectura:', error);
+    console.error('Error al generar URL de CloudFront:', error);
     return NextResponse.json(
       {
         error: 'Internal Server Error',
-        message: error.message || 'Error inesperado al generar la URL de descarga.',
+        message: error.message || 'Error inesperado al generar la URL de entrega en CloudFront.',
       },
       { status: 500, headers: corsHeaders }
     );

@@ -20,6 +20,11 @@ const envSchema = z.object({
   // Opciones de subida endurecidas
   UPLOAD_URL_EXPIRATION_SECONDS: z.coerce.number().default(300), // 5 min (Hardened TTL)
   MAX_FILE_SIZE_BYTES: z.coerce.number().default(100 * 1024 * 1024), // 100 MB
+
+  // Amazon CloudFront CDN
+  AWS_CLOUDFRONT_DOMAIN: z.string().optional().default(''),
+  AWS_CLOUDFRONT_KEY_PAIR_ID: z.string().optional().default(''),
+  AWS_CLOUDFRONT_PRIVATE_KEY: z.string().optional().default(''),
 });
 
 export const env = envSchema.parse(process.env);

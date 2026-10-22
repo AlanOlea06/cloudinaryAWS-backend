@@ -3,6 +3,7 @@ import { addServiceLog } from '@/lib/service-logs';
 import { supabase } from '@/lib/supabase';
 import { isAwsConfigured, generatePresignedUploadUrl } from '@/lib/s3';
 import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/ticket-token';
+import { getBaseCloudFrontUrl } from '@/lib/cloudfront';
 
 // CORS Headers
 const corsHeaders = {
@@ -517,16 +518,25 @@ export async function PUT(req: NextRequest) {
     }
   }
 
-  // 2. Mark ticket completed in Supabase
+  // 2. Mark ticket completed in Supabase (and save CloudFront base URL if configured)
   const nowIso = new Date().toISOString();
+  const baseCfUrl = fileRow?.s3_pending_key
+    ? getBaseCloudFrontUrl(fileRow.s3_pending_key)
+    : null;
+
   try {
+    const updatePayload: Record<string, any> = {
+      status: 'completed',
+      completed_at: nowIso,
+      updated_at: nowIso,
+    };
+    if (baseCfUrl) {
+      updatePayload.cloudfront_url = baseCfUrl;
+    }
+
     const { data: updated } = await supabase
       .from('files')
-      .update({
-        status: 'completed',
-        completed_at: nowIso,
-        updated_at: nowIso,
-      })
+      .update(updatePayload)
       .eq('ticket_id', ticketId)
       .select('*');
     if (updated && updated.length > 0) {
@@ -559,6 +569,7 @@ export async function PUT(req: NextRequest) {
       fileId: fileRow?.id || null,
       s3Status: 'uploaded_to_landing',
       s3Landing: fileRow?.s3_pending_key || null,
+      cloudfrontUrl: fileRow?.cloudfront_url || baseCfUrl || null,
       tokenVerified: Boolean(confirmToken),
     },
     { status: 200, headers: corsHeaders }
