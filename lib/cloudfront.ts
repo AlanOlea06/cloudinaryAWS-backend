@@ -1,5 +1,3 @@
-import { getSignedUrl as getCloudFrontSignedUrl } from '@aws-sdk/cloudfront-signer';
-
 const DEFAULT_CLOUDFRONT_DOMAIN = 'd1nuawu3owad6c.cloudfront.net';
 
 /**
@@ -20,29 +18,10 @@ export function getCloudFrontDomain(): string {
 }
 
 /**
- * Verifica si el dominio de CloudFront está disponible
+ * Verifica si el dominio de CloudFront está configurado
  */
 export function isCloudFrontConfigured(): boolean {
   return Boolean(getCloudFrontDomain());
-}
-
-/**
- * Verifica si las credenciales de firma criptográfica (Key Group / Key Pair) de CloudFront están configuradas
- */
-export function isCloudFrontSigningConfigured(): boolean {
-  const keyPairId = (
-    process.env.AWS_CLOUDFRONT_KEY_PAIR_ID ||
-    process.env.CLOUDFRONT_KEY_PAIR_ID ||
-    ''
-  ).trim();
-
-  const privateKey = (
-    process.env.AWS_CLOUDFRONT_PRIVATE_KEY ||
-    process.env.CLOUDFRONT_PRIVATE_KEY ||
-    ''
-  ).trim();
-
-  return Boolean(getCloudFrontDomain() && keyPairId && privateKey);
 }
 
 /**
@@ -63,7 +42,7 @@ function encodeS3KeyForUrl(s3Key: string): string {
 }
 
 /**
- * Construye la URL base de CloudFront para almacenar en Supabase (cloudfront_url) y servir archivos
+ * Construye la URL de CloudFront bajo el prefijo /static/* para almacenar en Supabase (cloudfront_url) y entregar archivos
  */
 export function getBaseCloudFrontUrl(s3Key: string): string | null {
   const domain = getCloudFrontDomain();
@@ -77,23 +56,13 @@ export function getBaseCloudFrontUrl(s3Key: string): string | null {
 
 export interface CloudFrontUrlResult {
   url: string;
-  isSigned: boolean;
-  expiresInSeconds: number | null;
-  expiresAt: string | null;
   domain: string;
 }
 
 /**
- * Genera la URL de consumo a través de Amazon CloudFront (CDN) bajo el prefijo /static/.
- * - Si hay Key Pair ID y Private Key configurados, genera una URL Firmada (CloudFront Signed URL).
- * - Si está en modo OAC directo (/static/*), devuelve la URL de borde de CloudFront con caché.
+ * Genera la URL de consumo a través de Amazon CloudFront (CDN) bajo el Behavior /static/*.
  */
-export function generateCloudFrontUrl(
-  s3Key: string,
-  options?: {
-    expiresInSeconds?: number;
-  }
-): CloudFrontUrlResult | null {
+export function generateCloudFrontUrl(s3Key: string): CloudFrontUrlResult | null {
   const domain = getCloudFrontDomain();
   const baseUrl = getBaseCloudFrontUrl(s3Key);
 
@@ -101,46 +70,8 @@ export function generateCloudFrontUrl(
     return null;
   }
 
-  const expiresInSeconds = options?.expiresInSeconds ?? 3600; // 1 hora por defecto
-
-  if (isCloudFrontSigningConfigured()) {
-    const keyPairId = (
-      process.env.AWS_CLOUDFRONT_KEY_PAIR_ID ||
-      process.env.CLOUDFRONT_KEY_PAIR_ID ||
-      ''
-    ).trim();
-
-    const rawPrivateKey = (
-      process.env.AWS_CLOUDFRONT_PRIVATE_KEY ||
-      process.env.CLOUDFRONT_PRIVATE_KEY ||
-      ''
-    ).trim();
-    const privateKey = rawPrivateKey.replace(/\\n/g, '\n');
-
-    const expirationDate = new Date(Date.now() + expiresInSeconds * 1000);
-
-    const signedUrl = getCloudFrontSignedUrl({
-      url: baseUrl,
-      keyPairId,
-      privateKey,
-      dateLessThan: expirationDate.toISOString(),
-    });
-
-    return {
-      url: signedUrl,
-      isSigned: true,
-      expiresInSeconds,
-      expiresAt: expirationDate.toISOString(),
-      domain,
-    };
-  }
-
-  // Modo CloudFront OAC directo en /static/*
   return {
     url: baseUrl,
-    isSigned: false,
-    expiresInSeconds: null,
-    expiresAt: null,
     domain,
   };
 }

@@ -23,8 +23,6 @@ const envSchema = z.object({
 
   // Amazon CloudFront CDN
   AWS_CLOUDFRONT_DOMAIN: z.string().optional().default(''),
-  AWS_CLOUDFRONT_KEY_PAIR_ID: z.string().optional().default(''),
-  AWS_CLOUDFRONT_PRIVATE_KEY: z.string().optional().default(''),
 });
 
 export const env = envSchema.parse(process.env);

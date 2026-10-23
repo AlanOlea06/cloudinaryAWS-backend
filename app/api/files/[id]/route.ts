@@ -123,11 +123,8 @@ export async function GET(
       );
     }
 
-    // 4. Generar URL de entrega por CloudFront (firmada si hay Key Pair configurado, o directa vía OAC)
-    const EXPIRES_IN_SECONDS = 3600; // 1 hora
-    const cfResult = generateCloudFrontUrl(s3Key, {
-      expiresInSeconds: EXPIRES_IN_SECONDS,
-    });
+    // 4. Generar URL de entrega por CloudFront bajo el Behavior /static/*
+    const cfResult = generateCloudFrontUrl(s3Key);
 
     if (!cfResult) {
       return NextResponse.json(
@@ -140,7 +137,7 @@ export async function GET(
       );
     }
 
-    // 5. Persistir cloudfront_url base en Supabase si aún estaba vacío
+    // 5. Persistir cloudfront_url en Supabase si aún estaba vacío
     const baseCfUrl = getBaseCloudFrontUrl(s3Key);
     if (baseCfUrl && fileRow.cloudfront_url !== baseCfUrl) {
       await supabase
@@ -157,14 +154,11 @@ export async function GET(
       {
         url: cfResult.url,
         delivery: 'cloudfront',
-        isSigned: cfResult.isSigned,
         cloudfrontDomain: cfResult.domain,
         fileId: fileRow.id,
         fileName: fileRow.original_name,
         orgId: fileRow.org_id,
         s3Key,
-        expiresInSeconds: cfResult.expiresInSeconds,
-        expiresAt: cfResult.expiresAt,
       },
       {
         status: 200,
