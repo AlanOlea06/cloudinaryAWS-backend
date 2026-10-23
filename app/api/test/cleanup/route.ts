@@ -40,9 +40,10 @@ async function handleCleanup(req: NextRequest) {
     if (isAwsConfigured()) {
       try {
         if (cleanAll) {
+          const resStaticPending = await deleteS3ObjectsByPrefix('static/pending/');
           const resPending = await deleteS3ObjectsByPrefix('pending/');
-          s3DeletedCount = resPending.count;
-          s3DeletedKeys = resPending.keys;
+          s3DeletedCount = resStaticPending.count + resPending.count;
+          s3DeletedKeys = [...resStaticPending.keys, ...resPending.keys];
         } else {
           // Look up user's pending keys from Supabase files table before deleting database records
           const { data: userFiles } = await supabase

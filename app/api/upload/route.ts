@@ -226,9 +226,9 @@ export async function POST(req: NextRequest) {
       extension = fileName.slice(fileName.lastIndexOf('.')).toLowerCase();
     }
 
-    // Standardized S3 Key hierarchy: pending/{fileId}{extension} (opaque, avoids overwrites and hides sensitive user IDs)
-    const landingZoneKey = `pending/${fileId}${extension}`;
-    const permanentTargetKey = `organizations/${orgSlug}/${resourceType}/${visibility}/${ticketId}-${fileName}`;
+    // Standardized S3 Key hierarchy under static/ so CloudFront (/static/*) serves files directly with cache:
+    const landingZoneKey = `static/pending/${fileId}${extension}`;
+    const permanentTargetKey = `static/organizations/${orgSlug}/${resourceType}/${visibility}/${ticketId}-${fileName}`;
 
     // Cryptographically signed confirmation token (HMAC-SHA256)
     const confirmToken = generateTicketConfirmToken(ticketId, user.id, expiresAt);

@@ -1,20 +1,18 @@
 import { getSignedUrl as getCloudFrontSignedUrl } from '@aws-sdk/cloudfront-signer';
 
+const DEFAULT_CLOUDFRONT_DOMAIN = 'd1nuawu3owad6c.cloudfront.net';
+
 /**
  * Obtiene y normaliza el dominio de la distribución de Amazon CloudFront
  * Soporta tanto AWS_CLOUDFRONT_DOMAIN como CLOUDFRONT_DOMAIN.
- * Ejemplo de entrada: "https://d111111abcdef8.cloudfront.net/" -> "d111111abcdef8.cloudfront.net"
+ * Ejemplo: "https://d1nuawu3owad6c.cloudfront.net/" -> "d1nuawu3owad6c.cloudfront.net"
  */
-export function getCloudFrontDomain(): string | null {
+export function getCloudFrontDomain(): string {
   const rawDomain = (
     process.env.AWS_CLOUDFRONT_DOMAIN ||
     process.env.CLOUDFRONT_DOMAIN ||
-    ''
+    DEFAULT_CLOUDFRONT_DOMAIN
   ).trim();
-
-  if (!rawDomain) {
-    return null;
-  }
 
   return rawDomain
     .replace(/^https?:\/\//i, '')
@@ -22,7 +20,7 @@ export function getCloudFrontDomain(): string | null {
 }
 
 /**
- * Verifica si el dominio de CloudFront está configurado en las variables de entorno
+ * Verifica si el dominio de CloudFront está disponible
  */
 export function isCloudFrontConfigured(): boolean {
   return Boolean(getCloudFrontDomain());
@@ -48,18 +46,24 @@ export function isCloudFrontSigningConfigured(): boolean {
 }
 
 /**
- * Codifica cada segmento de la ruta S3 preservando las barras diagonales '/'
+ * Normaliza la ruta de S3 para el Behavior `/static/*` de CloudFront
+ * y codifica cada segmento preservando las barras diagonales '/'.
  */
+export function ensureStaticPrefix(s3Key: string): string {
+  const cleanKey = s3Key.replace(/^\/+/, '');
+  return cleanKey.startsWith('static/') ? cleanKey : `static/${cleanKey}`;
+}
+
 function encodeS3KeyForUrl(s3Key: string): string {
-  return s3Key
-    .replace(/^\/+/, '')
+  const normalizedKey = ensureStaticPrefix(s3Key);
+  return normalizedKey
     .split('/')
     .map((segment) => encodeURIComponent(segment))
     .join('/');
 }
 
 /**
- * Construye la URL base de CloudFront sin firma para almacenar como referencia o servir archivos públicos
+ * Construye la URL base de CloudFront para almacenar en Supabase (cloudfront_url) y servir archivos
  */
 export function getBaseCloudFrontUrl(s3Key: string): string | null {
   const domain = getCloudFrontDomain();
@@ -80,16 +84,14 @@ export interface CloudFrontUrlResult {
 }
 
 /**
- * Genera la URL de consumo a través de Amazon CloudFront (CDN).
- * - Si hay Key Pair ID y Private Key configurados (y el archivo es privado o se requiere firma),
- *   genera una URL Firmada (CloudFront Signed URL) con expiración temporal.
- * - Si solo está configurado el dominio de CloudFront (OAC directo), devuelve la URL de borde de CloudFront.
+ * Genera la URL de consumo a través de Amazon CloudFront (CDN) bajo el prefijo /static/.
+ * - Si hay Key Pair ID y Private Key configurados, genera una URL Firmada (CloudFront Signed URL).
+ * - Si está en modo OAC directo (/static/*), devuelve la URL de borde de CloudFront con caché.
  */
 export function generateCloudFrontUrl(
   s3Key: string,
   options?: {
     expiresInSeconds?: number;
-    forceSigned?: boolean;
   }
 ): CloudFrontUrlResult | null {
   const domain = getCloudFrontDomain();
@@ -101,7 +103,6 @@ export function generateCloudFrontUrl(
 
   const expiresInSeconds = options?.expiresInSeconds ?? 3600; // 1 hora por defecto
 
-  // Verificar si se cuenta con par de claves para firmar la URL en CloudFront
   if (isCloudFrontSigningConfigured()) {
     const keyPairId = (
       process.env.AWS_CLOUDFRONT_KEY_PAIR_ID ||
@@ -109,7 +110,6 @@ export function generateCloudFrontUrl(
       ''
     ).trim();
 
-    // Soportar saltos de línea escapados (\n) en variables de entorno (.env / Vercel)
     const rawPrivateKey = (
       process.env.AWS_CLOUDFRONT_PRIVATE_KEY ||
       process.env.CLOUDFRONT_PRIVATE_KEY ||
@@ -135,7 +135,7 @@ export function generateCloudFrontUrl(
     };
   }
 
-  // Modo CloudFront OAC estándar (sin Key Group / sin firma adicional en URL)
+  // Modo CloudFront OAC directo en /static/*
   return {
     url: baseUrl,
     isSigned: false,
