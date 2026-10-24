@@ -17,9 +17,14 @@ ALTER TABLE public.api_keys
 CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON public.api_keys(user_id);
 
 -- 2. Decisión 3-A y Bloque B (Tareas B.6, B.8, B.9): Columnas operativas en public.files
+-- - Eliminar constraint legado en español (archivos_scan_status_check) que bloqueaba 'not_scanned'
 -- - s3_upload_id: rastrea el UploadId de S3 para Multipart Upload (ya que IAM no tiene s3:ListBucketMultipartUploads)
 -- - retry_count y error_message: control de reintentos para el Cron de mantenimiento
 -- - scan_status: valor por defecto 'not_scanned' hasta que se habilite AWS GuardDuty
+ALTER TABLE public.files
+  DROP CONSTRAINT IF EXISTS archivos_scan_status_check,
+  DROP CONSTRAINT IF EXISTS files_scan_status_check;
+
 ALTER TABLE public.files
   ADD COLUMN IF NOT EXISTS s3_upload_id TEXT NULL,
   ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0,
@@ -30,7 +35,11 @@ ALTER TABLE public.files
 
 UPDATE public.files
 SET scan_status = 'not_scanned'
-WHERE scan_status IS NULL OR scan_status = 'PENDIENTE';
+WHERE scan_status IS NULL OR scan_status IN ('PENDIENTE', 'PENDING', 'NO_APLICA', 'NOT_APPLICABLE');
+
+ALTER TABLE public.files
+  ADD CONSTRAINT files_scan_status_check
+  CHECK (scan_status IN ('not_scanned', 'clean', 'threat_detected', 'CLEAN', 'THREAT_DETECTED', 'PENDIENTE'));
 
 CREATE INDEX IF NOT EXISTS idx_files_scan_status ON public.files(scan_status);
 CREATE INDEX IF NOT EXISTS idx_files_status_created_at ON public.files(status, created_at);

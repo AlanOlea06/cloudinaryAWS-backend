@@ -311,33 +311,46 @@ export async function POST(req: NextRequest) {
     }
 
     // 1. Insert file record into Supabase (files table - original_name only in DB, scan_status='not_scanned')
-    try {
-      const filePayload = {
-        id: fileId,
-        ticket_id: ticketId,
-        user_id: user.id,
-        org_id: targetOrg.id,
-        original_name: fileName,
-        extension,
-        mime_type: fileType,
-        size_bytes: fileSize,
-        sha256_hash: sha256Hash,
-        resource_type: resourceType,
-        visibility,
-        s3_pending_key: landingZoneKey,
-        s3_processed_key: null,
-        cloudfront_url: null,
-        scan_status: 'not_scanned',
-        status: 'pending_upload',
-        created_at: new Date(timestamp).toISOString(),
-      };
+    const filePayload: Record<string, any> = {
+      id: fileId,
+      ticket_id: ticketId,
+      user_id: user.id,
+      org_id: targetOrg.id,
+      original_name: fileName,
+      extension,
+      mime_type: fileType,
+      size_bytes: fileSize,
+      sha256_hash: sha256Hash,
+      resource_type: resourceType,
+      visibility,
+      s3_pending_key: landingZoneKey,
+      s3_processed_key: null,
+      cloudfront_url: null,
+      scan_status: 'not_scanned',
+      status: 'pending_upload',
+      created_at: new Date(timestamp).toISOString(),
+    };
 
-      const { error: insertErr } = await supabase.from('files').insert(filePayload);
-      if (insertErr) {
-        console.error('Error inserting file in Supabase files table:', insertErr.message);
-      }
-    } catch (dbErr: any) {
-      console.error('Error inserting file in Supabase:', dbErr.message);
+    let { error: insertErr } = await supabase.from('files').insert(filePayload);
+    // Fallback resiliente si el constraint legado archivos_scan_status_check aún no fue eliminado en el SQL Editor
+    if (insertErr && insertErr.message?.includes('scan_status')) {
+      const fallbackRes = await supabase.from('files').insert({
+        ...filePayload,
+        scan_status: 'NO_APLICA',
+      });
+      insertErr = fallbackRes.error;
+    }
+
+    if (insertErr) {
+      console.error('Error inserting file in Supabase files table:', insertErr.message);
+      return NextResponse.json(
+        {
+          error: 'Database Error',
+          code: 'FILE_RECORD_INSERT_FAILED',
+          message: `No se pudo registrar el ticket en la base de datos: ${insertErr.message}`,
+        },
+        { status: 500, headers: corsHeaders }
+      );
     }
 
     // 2. Record audit log event in Supabase
