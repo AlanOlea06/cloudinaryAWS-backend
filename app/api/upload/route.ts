@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { addServiceLog } from '@/lib/service-logs';
 import { supabase } from '@/lib/supabase';
-import { isAwsConfigured, generatePresignedUploadUrl } from '@/lib/s3';
+import { isAwsConfigured, generatePresignedUploadUrl, applyS3CacheControlMetadata } from '@/lib/s3';
 import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/ticket-token';
 import { getBaseCloudFrontUrl } from '@/lib/cloudfront';
 
@@ -518,7 +518,21 @@ export async function PUT(req: NextRequest) {
     }
   }
 
-  // 2. Mark ticket completed in Supabase (and save CloudFront base URL if configured)
+  // 2. Apply Cache-Control metadata in S3 based on visibility ('private' -> no-store, 'public' -> max-age)
+  let s3CacheControl: string | null = null;
+  if (fileRow?.s3_pending_key) {
+    try {
+      s3CacheControl = await applyS3CacheControlMetadata(
+        fileRow.s3_pending_key,
+        fileRow.mime_type || 'application/octet-stream',
+        fileRow.visibility || 'private'
+      );
+    } catch (metaErr: any) {
+      console.warn('Could not apply Cache-Control metadata on S3 object:', metaErr.message);
+    }
+  }
+
+  // 3. Mark ticket completed in Supabase (and save CloudFront base URL if configured)
   const nowIso = new Date().toISOString();
   const baseCfUrl = fileRow?.s3_pending_key
     ? getBaseCloudFrontUrl(fileRow.s3_pending_key)
@@ -546,7 +560,7 @@ export async function PUT(req: NextRequest) {
     console.error('Error updating file status in Supabase:', dbErr.message);
   }
 
-  // 3. Record confirmation audit event in Supabase
+  // 4. Record confirmation audit event in Supabase
   await addServiceLog({
     method: req.method,
     action: 'S3_UPLOAD_CONFIRMED',
@@ -557,7 +571,7 @@ export async function PUT(req: NextRequest) {
     fileId: fileRow?.id || undefined,
     fileName: fileRow?.original_name || undefined,
     ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-    message: `File confirmed in S3 landing zone for ticket ${ticketId}`,
+    message: `File confirmed in S3 landing zone for ticket ${ticketId} (visibility=${fileRow?.visibility || 'private'})`,
   });
 
   return NextResponse.json(
@@ -567,6 +581,13 @@ export async function PUT(req: NextRequest) {
       message: `File upload confirmed for ticket ${ticketId}`,
       ticketId,
       fileId: fileRow?.id || null,
+      visibility: fileRow?.visibility || 'private',
+      ownerUserId: fileRow?.user_id || null,
+      cacheControl:
+        s3CacheControl ||
+        (fileRow?.visibility === 'private'
+          ? 'private, no-store, no-cache, max-age=0, must-revalidate'
+          : 'public, max-age=31536000, immutable'),
       s3Status: 'uploaded_to_landing',
       s3Landing: fileRow?.s3_pending_key || null,
       cloudfrontUrl: fileRow?.cloudfront_url || baseCfUrl || null,

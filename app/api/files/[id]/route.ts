@@ -12,7 +12,7 @@ import {
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, x-user-id',
 };
 
 // Validador de formato UUID v4
@@ -47,10 +47,10 @@ export async function GET(
       );
     }
 
-    // 2. Consultar la tabla files en Supabase para obtener la clave de S3 y org_id
+    // 2. Consultar la tabla files en Supabase para obtener la clave de S3, user_id, org_id y visibility
     const { data: fileRow, error: dbError } = await supabase
       .from('files')
-      .select('id, org_id, original_name, s3_pending_key, s3_processed_key, cloudfront_url, status, mime_type, visibility')
+      .select('id, user_id, org_id, ticket_id, original_name, s3_pending_key, s3_processed_key, cloudfront_url, status, mime_type, visibility')
       .eq('id', fileId)
       .maybeSingle();
 
@@ -97,9 +97,22 @@ export async function GET(
       );
     }
 
-    // Validación defensiva Multi-Tenant: si el middleware inyectó x-validated-org-id, contrastar con org_id
+    // 3. Validación defensiva Multi-Tenant: si el middleware inyectó x-validated-org-id, contrastar con org_id
     const validatedOrgId = req.headers.get('x-validated-org-id');
     if (validatedOrgId && validatedOrgId !== fileRow.org_id) {
+      await addServiceLog({
+        method: 'GET',
+        action: 'FILE_READ_CROSS_ORG_DENIED',
+        status: 'DENIED_CROSS_ORG',
+        orgId: validatedOrgId,
+        targetOrgId: fileRow.org_id,
+        fileId: fileRow.id,
+        ticketId: fileRow.ticket_id,
+        fileName: fileRow.original_name,
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        message: `Intento bloqueado de leer archivo de otra organización (${fileRow.org_id}).`,
+      });
+
       return NextResponse.json(
         {
           error: 'Forbidden',
@@ -110,7 +123,103 @@ export async function GET(
       );
     }
 
-    // 3. Verificar configuración de Amazon CloudFront
+    // 4. Control de Acceso por Visibilidad ('private' vs 'public')
+    // Si el archivo es 'private', únicamente la cuenta (user_id) que lo subió tiene permiso de lectura.
+    const fileVisibility = (fileRow.visibility || 'private').toLowerCase();
+    const requestingUserId = (
+      req.nextUrl.searchParams.get('userId') ||
+      req.headers.get('x-user-id') ||
+      ''
+    ).trim();
+
+    if (fileVisibility === 'private') {
+      if (!requestingUserId) {
+        await addServiceLog({
+          method: 'GET',
+          action: 'PRIVATE_FILE_ACCESS_DENIED',
+          status: 'DENIED_PRIVATE_NO_USER',
+          orgId: fileRow.org_id,
+          fileId: fileRow.id,
+          ticketId: fileRow.ticket_id,
+          fileName: fileRow.original_name,
+          ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+          message: `Acceso bloqueado a archivo privado '${fileRow.original_name}': no se especificó userId del propietario.`,
+        });
+
+        return NextResponse.json(
+          {
+            error: 'Forbidden',
+            code: 'FORBIDDEN_PRIVATE_USER_REQUIRED',
+            visibility: 'private',
+            fileId: fileRow.id,
+            message:
+              'Acceso Denegado: Este archivo tiene estado "private". Se requiere identificar la cuenta solicitante mediante el parámetro "?userId=..." o la cabecera "x-user-id".',
+          },
+          {
+            status: 403,
+            headers: {
+              ...corsHeaders,
+              'Cache-Control': 'private, no-store, no-cache, must-revalidate, max-age=0',
+              Pragma: 'no-cache',
+            },
+          }
+        );
+      }
+
+      if (requestingUserId !== fileRow.user_id) {
+        // Consultar nombres de usuario (solicitante y propietario) para enriquecer la auditoría
+        let requesterName = 'Usuario No Autorizado';
+        let ownerName = 'Propietario';
+
+        const { data: involvedUsers } = await supabase
+          .from('users')
+          .select('id, name')
+          .in('id', [requestingUserId, fileRow.user_id]);
+
+        if (involvedUsers) {
+          const reqUser = involvedUsers.find((u: any) => u.id === requestingUserId);
+          const ownUser = involvedUsers.find((u: any) => u.id === fileRow.user_id);
+          if (reqUser?.name) requesterName = reqUser.name;
+          if (ownUser?.name) ownerName = ownUser.name;
+        }
+
+        await addServiceLog({
+          method: 'GET',
+          action: 'PRIVATE_FILE_ACCESS_DENIED',
+          status: 'DENIED_NOT_OWNER',
+          userId: requestingUserId,
+          userName: requesterName,
+          orgId: fileRow.org_id,
+          fileId: fileRow.id,
+          ticketId: fileRow.ticket_id,
+          fileName: fileRow.original_name,
+          ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+          message: `Acceso bloqueado a archivo privado '${fileRow.original_name}': '${requesterName}' (${requestingUserId}) intentó leer un recurso privado perteneciente a '${ownerName}' (${fileRow.user_id}).`,
+        });
+
+        return NextResponse.json(
+          {
+            error: 'Forbidden',
+            code: 'FORBIDDEN_PRIVATE_NOT_OWNER',
+            visibility: 'private',
+            fileId: fileRow.id,
+            requestedByUserId: requestingUserId,
+            requestedByUserName: requesterName,
+            message: `Acceso Denegado: El archivo '${fileRow.original_name}' es privado ('private') y solo puede ser leído por la cuenta propietaria que lo subió.`,
+          },
+          {
+            status: 403,
+            headers: {
+              ...corsHeaders,
+              'Cache-Control': 'private, no-store, no-cache, must-revalidate, max-age=0',
+              Pragma: 'no-cache',
+            },
+          }
+        );
+      }
+    }
+
+    // 5. Verificar configuración de Amazon CloudFront
     if (!isCloudFrontConfigured()) {
       return NextResponse.json(
         {
@@ -123,7 +232,7 @@ export async function GET(
       );
     }
 
-    // 4. Generar URL de entrega por CloudFront bajo el Behavior /static/*
+    // 6. Generar URL de entrega por CloudFront bajo el Behavior /static/*
     const cfResult = generateCloudFrontUrl(s3Key);
 
     if (!cfResult) {
@@ -137,7 +246,7 @@ export async function GET(
       );
     }
 
-    // 5. Persistir cloudfront_url en Supabase si aún estaba vacío
+    // 7. Persistir cloudfront_url en Supabase si aún estaba vacío
     const baseCfUrl = getBaseCloudFrontUrl(s3Key);
     if (baseCfUrl && fileRow.cloudfront_url !== baseCfUrl) {
       await supabase
@@ -149,7 +258,37 @@ export async function GET(
         .eq('id', fileRow.id);
     }
 
-    // 6. Devolver al cliente el JSON con la URL de CloudFront
+    // 8. Registrar lectura autorizada en auditoría
+    if (fileVisibility === 'private') {
+      await addServiceLog({
+        method: 'GET',
+        action: 'PRIVATE_FILE_ACCESS_ALLOWED',
+        status: 'ALLOWED',
+        userId: fileRow.user_id,
+        orgId: fileRow.org_id,
+        fileId: fileRow.id,
+        ticketId: fileRow.ticket_id,
+        fileName: fileRow.original_name,
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        message: `Lectura autorizada de archivo privado '${fileRow.original_name}' por su propietario (${fileRow.user_id}).`,
+      });
+    }
+
+    const cacheControlHeader =
+      fileVisibility === 'private'
+        ? 'private, no-store, no-cache, must-revalidate, max-age=0'
+        : 'public, max-age=31536000, immutable';
+
+    const responseHeaders: Record<string, string> = {
+      ...corsHeaders,
+      'Cache-Control': cacheControlHeader,
+    };
+    if (fileVisibility === 'private') {
+      responseHeaders['Pragma'] = 'no-cache';
+      responseHeaders['Expires'] = '0';
+    }
+
+    // 9. Devolver al cliente el JSON con la URL de CloudFront y metadatos de visibilidad/caché
     return NextResponse.json(
       {
         url: cfResult.url,
@@ -158,11 +297,14 @@ export async function GET(
         fileId: fileRow.id,
         fileName: fileRow.original_name,
         orgId: fileRow.org_id,
+        ownerUserId: fileRow.user_id,
+        visibility: fileVisibility,
+        cacheControl: cacheControlHeader,
         s3Key,
       },
       {
         status: 200,
-        headers: corsHeaders,
+        headers: responseHeaders,
       }
     );
   } catch (error: any) {

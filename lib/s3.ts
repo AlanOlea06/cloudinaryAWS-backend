@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, DeleteObjectsCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, CopyObjectCommand, DeleteObjectsCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 const region = process.env.AWS_REGION || 'us-east-1';
@@ -56,6 +56,47 @@ export async function generatePresignedUploadUrl(
   });
 
   return await getSignedUrl(client, command, { expiresIn: expiresInSeconds });
+}
+
+/**
+ * Updates the S3 object's Cache-Control metadata in-place after upload confirmation.
+ * - For 'private' files: sets 'private, no-store, no-cache, max-age=0, must-revalidate' so CloudFront and browsers do NOT cache the image.
+ * - For 'public' files: sets 'public, max-age=31536000, immutable' for Edge caching.
+ */
+export async function applyS3CacheControlMetadata(
+  key: string,
+  contentType: string = 'application/octet-stream',
+  visibility: string = 'private'
+): Promise<string | null> {
+  const client = getS3Client();
+  if (!client || !bucketName || !key) {
+    return null;
+  }
+
+  const normalizedVisibility = visibility.toLowerCase();
+  const cacheControl =
+    normalizedVisibility === 'private'
+      ? 'private, no-store, no-cache, max-age=0, must-revalidate'
+      : 'public, max-age=31536000, immutable';
+
+  const trimmedBucket = bucketName.trim();
+  const cleanKey = key.replace(/^\/+/, '');
+  const encodedCopySource = `${trimmedBucket}/${cleanKey
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/')}`;
+
+  const copyCommand = new CopyObjectCommand({
+    Bucket: trimmedBucket,
+    CopySource: encodedCopySource,
+    Key: cleanKey,
+    ContentType: contentType,
+    CacheControl: cacheControl,
+    MetadataDirective: 'REPLACE',
+  });
+
+  await client.send(copyCommand);
+  return cacheControl;
 }
 
 /**
