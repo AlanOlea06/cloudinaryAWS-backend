@@ -1,8 +1,58 @@
-import { S3Client, PutObjectCommand, CopyObjectCommand, DeleteObjectsCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
+import crypto from 'crypto';
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  CopyObjectCommand,
+  DeleteObjectsCommand,
+  ListObjectsV2Command,
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 const region = process.env.AWS_REGION || 'us-east-1';
 const bucketName = process.env.AWS_S3_BUCKET_NAME || '';
+
+export const PRIVATE_NO_STORE_CACHE_CONTROL =
+  'private, no-store, no-cache, max-age=0, must-revalidate';
+
+// Short TTL (5 minutes = 300s) for public files because IAM lacks cloudfront:CreateInvalidation
+export const PUBLIC_SHORT_TTL_CACHE_CONTROL =
+  'public, max-age=300, must-revalidate';
+
+/**
+ * Returns the appropriate Cache-Control directive based on file visibility and landing stage.
+ * - Pending uploads and private files NEVER cache ('private, no-store, no-cache, max-age=0, must-revalidate').
+ * - Public files use a short 5-minute Edge TTL ('public, max-age=300, must-revalidate').
+ */
+export function getCacheControlForVisibility(
+  visibility: string = 'private',
+  isPending: boolean = false
+): string {
+  if (isPending || visibility.toLowerCase() === 'private') {
+    return PRIVATE_NO_STORE_CACHE_CONTROL;
+  }
+  return PUBLIC_SHORT_TTL_CACHE_CONTROL;
+}
+
+/**
+ * Task A.1: Generates an unpredictable 128-bit (16-byte / 32 hex chars) opaque S3 key.
+ * - Distinct from the database file ID and ticket ID.
+ * - Never includes organization slug, visibility ('private'/'public'), or original filename.
+ * - Always resides under 'static/' so CloudFront (/static/*) can reach public files when needed.
+ */
+export function generateOpaqueS3Key(
+  prefix: 'static/pending' | 'static/files' = 'static/pending',
+  extension: string = ''
+): string {
+  const random128Hex = crypto.randomBytes(16).toString('hex');
+  let cleanExt = (extension || '').trim().toLowerCase();
+  if (cleanExt && !cleanExt.startsWith('.')) {
+    cleanExt = `.${cleanExt}`;
+  }
+  // Keep only safe alphanumeric extension characters
+  cleanExt = cleanExt.replace(/[^a-z0-9.]/g, '');
+  return `${prefix}/${random128Hex}${cleanExt}`;
+}
 
 /**
  * Checks if AWS S3 credentials and bucket name are configured in environment variables
@@ -33,16 +83,19 @@ export function getS3Client(): S3Client | null {
 }
 
 /**
- * Generates an AWS S3 Presigned URL for direct client upload (PUT)
- * 
- * @param key Destination path within the bucket (e.g. pending/{fileId}{extension})
+ * Task A.3: Generates an AWS S3 Presigned URL for direct client upload (PUT)
+ * with Cache-Control cryptographically signed in X-Amz-SignedHeaders.
+ *
+ * @param key Destination path within the bucket (e.g. static/pending/<rand128>.<ext>)
  * @param contentType MIME type of the file (e.g. image/png)
  * @param expiresInSeconds Lifetime in seconds (default 300 = 5 minutes)
+ * @param cacheControl Cache-Control header to sign (defaults to no-store for pending/private)
  */
 export async function generatePresignedUploadUrl(
   key: string,
   contentType: string = 'application/octet-stream',
-  expiresInSeconds: number = 300
+  expiresInSeconds: number = 300,
+  cacheControl: string = PRIVATE_NO_STORE_CACHE_CONTROL
 ): Promise<string | null> {
   const client = getS3Client();
   if (!client || !bucketName) {
@@ -53,6 +106,32 @@ export async function generatePresignedUploadUrl(
     Bucket: bucketName.trim(),
     Key: key,
     ContentType: contentType,
+    CacheControl: cacheControl,
+  });
+
+  return await getSignedUrl(client, command, {
+    expiresIn: expiresInSeconds,
+    signableHeaders: new Set(['host', 'content-type', 'cache-control']),
+  });
+}
+
+/**
+ * Task A.2: Generates a short-lived (5-minute) S3 Presigned GET URL for private files.
+ * Private files are NEVER served or cached through CloudFront.
+ */
+export async function generatePresignedReadUrl(
+  key: string,
+  expiresInSeconds: number = 300
+): Promise<string | null> {
+  const client = getS3Client();
+  if (!client || !bucketName || !key) {
+    return null;
+  }
+
+  const command = new GetObjectCommand({
+    Bucket: bucketName.trim(),
+    Key: key.replace(/^\/+/, ''),
+    ResponseCacheControl: PRIVATE_NO_STORE_CACHE_CONTROL,
   });
 
   return await getSignedUrl(client, command, { expiresIn: expiresInSeconds });
@@ -60,8 +139,8 @@ export async function generatePresignedUploadUrl(
 
 /**
  * Updates the S3 object's Cache-Control metadata in-place after upload confirmation.
- * - For 'private' files: sets 'private, no-store, no-cache, max-age=0, must-revalidate' so CloudFront and browsers do NOT cache the image.
- * - For 'public' files: sets 'public, max-age=31536000, immutable' for Edge caching.
+ * - For 'private' files: sets 'private, no-store, no-cache, max-age=0, must-revalidate'
+ * - For 'public' files: sets 'public, max-age=300, must-revalidate' (short TTL since CloudFront invalidation is unavailable)
  */
 export async function applyS3CacheControlMetadata(
   key: string,
@@ -73,11 +152,7 @@ export async function applyS3CacheControlMetadata(
     return null;
   }
 
-  const normalizedVisibility = visibility.toLowerCase();
-  const cacheControl =
-    normalizedVisibility === 'private'
-      ? 'private, no-store, no-cache, max-age=0, must-revalidate'
-      : 'public, max-age=31536000, immutable';
+  const cacheControl = getCacheControlForVisibility(visibility, false);
 
   const trimmedBucket = bucketName.trim();
   const cleanKey = key.replace(/^\/+/, '');

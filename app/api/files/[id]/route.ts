@@ -7,6 +7,11 @@ import {
   getBaseCloudFrontUrl,
   isCloudFrontConfigured,
 } from '@/lib/cloudfront';
+import {
+  generatePresignedReadUrl,
+  PRIVATE_NO_STORE_CACHE_CONTROL,
+  PUBLIC_SHORT_TTL_CACHE_CONTROL,
+} from '@/lib/s3';
 
 // Cabeceras CORS para permitir consumo desde Postman o clientes web
 const corsHeaders = {
@@ -26,7 +31,9 @@ export async function OPTIONS() {
   });
 }
 
-// 2. GET /api/files/[id]: Genera URL de consumo a través de la CDN Amazon CloudFront
+// 2. GET /api/files/[id]:
+// - Archivos 'private': NUNCA usan ni guardan cloudfront_url; entregan URL prefirmada de S3 (GetObject, 5 min) tras validar permisos.
+// - Archivos 'public': Entregan URL de CloudFront (/static/*) con TTL corto (5 min).
 export async function GET(
   req: NextRequest,
   context: { params: { id: string } | Promise<{ id: string }> }
@@ -35,6 +42,7 @@ export async function GET(
     // 1. Extraer ID del archivo por parámetro de ruta (compatible Next.js 14/15)
     const resolvedParams = await Promise.resolve(context.params);
     const fileId = resolvedParams?.id?.trim();
+    const ipAddress = req.headers.get('x-forwarded-for') || '127.0.0.1';
 
     if (!fileId || !UUID_REGEX.test(fileId)) {
       return NextResponse.json(
@@ -76,9 +84,29 @@ export async function GET(
       );
     }
 
-    // Determinar la ruta física en S3 que servirá como origen para CloudFront:
-    // Mientras el archivo no haya sido procesado/movido por Lambda (status !== 'processed'),
-    // el archivo físico reside en s3_pending_key (zona de aterrizaje).
+    const validatedOrgId = req.headers.get('x-validated-org-id');
+    const validatedUserId = req.headers.get('x-validated-user-id');
+    const clientProvidedUserId = (
+      req.nextUrl.searchParams.get('userId') ||
+      req.headers.get('x-user-id') ||
+      ''
+    ).trim();
+
+    // Registrar solicitud inicial de lectura (FILE_REQUESTED)
+    await addServiceLog({
+      method: 'GET',
+      action: 'FILE_REQUESTED',
+      status: 'ALLOWED',
+      userId: validatedUserId || clientProvidedUserId || fileRow.user_id,
+      orgId: validatedOrgId || fileRow.org_id,
+      fileId: fileRow.id,
+      ticketId: fileRow.ticket_id,
+      fileName: fileRow.original_name,
+      ipAddress,
+      message: `Solicitud de lectura para archivo '${fileRow.original_name}' (visibility=${fileRow.visibility || 'private'}).`,
+    });
+
+    // Determinar la ruta física en S3:
     let s3Key = fileRow.s3_pending_key;
     if (fileRow.status === 'processed' && fileRow.s3_processed_key) {
       s3Key = fileRow.s3_processed_key;
@@ -98,18 +126,18 @@ export async function GET(
     }
 
     // 3. Validación defensiva Multi-Tenant: si el middleware inyectó x-validated-org-id, contrastar con org_id
-    const validatedOrgId = req.headers.get('x-validated-org-id');
     if (validatedOrgId && validatedOrgId !== fileRow.org_id) {
       await addServiceLog({
         method: 'GET',
-        action: 'FILE_READ_CROSS_ORG_DENIED',
+        action: 'ACCESS_DENIED',
         status: 'DENIED_CROSS_ORG',
+        userId: validatedUserId || undefined,
         orgId: validatedOrgId,
         targetOrgId: fileRow.org_id,
         fileId: fileRow.id,
         ticketId: fileRow.ticket_id,
         fileName: fileRow.original_name,
-        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        ipAddress,
         message: `Intento bloqueado de leer archivo de otra organización (${fileRow.org_id}).`,
       });
 
@@ -123,27 +151,57 @@ export async function GET(
       );
     }
 
-    // 4. Control de Acceso por Visibilidad ('private' vs 'public')
-    // Si el archivo es 'private', únicamente la cuenta (user_id) que lo subió tiene permiso de lectura.
-    const fileVisibility = (fileRow.visibility || 'private').toLowerCase();
-    const requestingUserId = (
-      req.nextUrl.searchParams.get('userId') ||
-      req.headers.get('x-user-id') ||
-      ''
-    ).trim();
+    // 4. Decisión 1-A: Bloquear suplantación de identidad si la API Key pertenece a un usuario específico
+    if (validatedUserId && clientProvidedUserId && clientProvidedUserId !== validatedUserId) {
+      await addServiceLog({
+        method: 'GET',
+        action: 'ACCESS_DENIED',
+        status: 'DENIED_USER_IMPERSONATION',
+        userId: validatedUserId,
+        orgId: fileRow.org_id,
+        fileId: fileRow.id,
+        ticketId: fileRow.ticket_id,
+        fileName: fileRow.original_name,
+        ipAddress,
+        message: `Intento de suplantación bloqueado en lectura: la API Key pertenece a '${validatedUserId}', pero se solicitó como '${clientProvidedUserId}'.`,
+      });
+
+      return NextResponse.json(
+        {
+          error: 'Forbidden',
+          code: 'FORBIDDEN_USER_IMPERSONATION',
+          message:
+            'Acceso Denegado: El userId enviado no coincide con el usuario propietario de la API Key autenticada.',
+          authenticatedUserId: validatedUserId,
+          attemptedUserId: clientProvidedUserId,
+        },
+        {
+          status: 403,
+          headers: {
+            ...corsHeaders,
+            'Cache-Control': PRIVATE_NO_STORE_CACHE_CONTROL,
+            Pragma: 'no-cache',
+          },
+        }
+      );
+    }
+
+    // 5. Control de Acceso y Entrega por Visibilidad ('private' vs 'public')
+    const fileVisibility = (fileRow.visibility || 'private').toLowerCase() === 'public' ? 'public' : 'private';
+    const requestingUserId = clientProvidedUserId || validatedUserId || '';
 
     if (fileVisibility === 'private') {
       if (!requestingUserId) {
         await addServiceLog({
           method: 'GET',
-          action: 'PRIVATE_FILE_ACCESS_DENIED',
+          action: 'ACCESS_DENIED',
           status: 'DENIED_PRIVATE_NO_USER',
           orgId: fileRow.org_id,
           fileId: fileRow.id,
           ticketId: fileRow.ticket_id,
           fileName: fileRow.original_name,
-          ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-          message: `Acceso bloqueado a archivo privado '${fileRow.original_name}': no se especificó userId del propietario.`,
+          ipAddress,
+          message: `Acceso bloqueado a archivo privado '${fileRow.original_name}': no se identificó al usuario propietario.`,
         });
 
         return NextResponse.json(
@@ -153,13 +211,13 @@ export async function GET(
             visibility: 'private',
             fileId: fileRow.id,
             message:
-              'Acceso Denegado: Este archivo tiene estado "private". Se requiere identificar la cuenta solicitante mediante el parámetro "?userId=..." o la cabecera "x-user-id".',
+              'Acceso Denegado: Este archivo tiene estado "private". Se requiere una API Key vinculada al propietario o identificar la cuenta mediante "?userId=..." / "x-user-id".',
           },
           {
             status: 403,
             headers: {
               ...corsHeaders,
-              'Cache-Control': 'private, no-store, no-cache, must-revalidate, max-age=0',
+              'Cache-Control': PRIVATE_NO_STORE_CACHE_CONTROL,
               Pragma: 'no-cache',
             },
           }
@@ -167,7 +225,6 @@ export async function GET(
       }
 
       if (requestingUserId !== fileRow.user_id) {
-        // Consultar nombres de usuario (solicitante y propietario) para enriquecer la auditoría
         let requesterName = 'Usuario No Autorizado';
         let ownerName = 'Propietario';
 
@@ -185,7 +242,7 @@ export async function GET(
 
         await addServiceLog({
           method: 'GET',
-          action: 'PRIVATE_FILE_ACCESS_DENIED',
+          action: 'ACCESS_DENIED',
           status: 'DENIED_NOT_OWNER',
           userId: requestingUserId,
           userName: requesterName,
@@ -193,7 +250,7 @@ export async function GET(
           fileId: fileRow.id,
           ticketId: fileRow.ticket_id,
           fileName: fileRow.original_name,
-          ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+          ipAddress,
           message: `Acceso bloqueado a archivo privado '${fileRow.original_name}': '${requesterName}' (${requestingUserId}) intentó leer un recurso privado perteneciente a '${ownerName}' (${fileRow.user_id}).`,
         });
 
@@ -211,15 +268,79 @@ export async function GET(
             status: 403,
             headers: {
               ...corsHeaders,
-              'Cache-Control': 'private, no-store, no-cache, must-revalidate, max-age=0',
+              'Cache-Control': PRIVATE_NO_STORE_CACHE_CONTROL,
               Pragma: 'no-cache',
             },
           }
         );
       }
+
+      // Tarea A.2: Archivo PRIVADO con permisos validados ->
+      // 1) Asegurar que cloudfront_url sea NULL en la base de datos
+      if (fileRow.cloudfront_url !== null) {
+        await supabase
+          .from('files')
+          .update({
+            cloudfront_url: null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', fileRow.id);
+      }
+
+      // 2) Generar URL prefirmada de S3 para lectura con TTL de 5 minutos (300 segundos)
+      const PRIVATE_READ_TTL_SECONDS = 300;
+      const s3PresignedReadUrl = await generatePresignedReadUrl(s3Key, PRIVATE_READ_TTL_SECONDS);
+
+      if (!s3PresignedReadUrl) {
+        return NextResponse.json(
+          {
+            error: 'Storage Error',
+            code: 'S3_PRESIGNED_READ_FAILED',
+            message: 'No fue posible generar la URL prefirmada de lectura en S3 para el archivo privado.',
+          },
+          { status: 500, headers: corsHeaders }
+        );
+      }
+
+      await addServiceLog({
+        method: 'GET',
+        action: 'URL_ISSUED',
+        status: 'ALLOWED',
+        userId: fileRow.user_id,
+        orgId: fileRow.org_id,
+        fileId: fileRow.id,
+        ticketId: fileRow.ticket_id,
+        fileName: fileRow.original_name,
+        ipAddress,
+        message: `URL prefirmada de S3 (TTL 300s) emitida para archivo privado '${fileRow.original_name}' al propietario (${fileRow.user_id}).`,
+      });
+
+      return NextResponse.json(
+        {
+          url: s3PresignedReadUrl,
+          delivery: 's3_presigned',
+          expiresInSeconds: PRIVATE_READ_TTL_SECONDS,
+          cloudfrontUrl: null,
+          fileId: fileRow.id,
+          fileName: fileRow.original_name,
+          orgId: fileRow.org_id,
+          ownerUserId: fileRow.user_id,
+          visibility: 'private',
+          cacheControl: PRIVATE_NO_STORE_CACHE_CONTROL,
+        },
+        {
+          status: 200,
+          headers: {
+            ...corsHeaders,
+            'Cache-Control': PRIVATE_NO_STORE_CACHE_CONTROL,
+            Pragma: 'no-cache',
+            Expires: '0',
+          },
+        }
+      );
     }
 
-    // 5. Verificar configuración de Amazon CloudFront
+    // 6. Archivo PÚBLICO -> Entregar exclusivamente por Amazon CloudFront CDN con TTL corto (5 min)
     if (!isCloudFrontConfigured()) {
       return NextResponse.json(
         {
@@ -232,7 +353,6 @@ export async function GET(
       );
     }
 
-    // 6. Generar URL de entrega por CloudFront bajo el Behavior /static/*
     const cfResult = generateCloudFrontUrl(s3Key);
 
     if (!cfResult) {
@@ -246,7 +366,7 @@ export async function GET(
       );
     }
 
-    // 7. Persistir cloudfront_url en Supabase si aún estaba vacío
+    // Persistir cloudfront_url en Supabase únicamente para archivos públicos
     const baseCfUrl = getBaseCloudFrontUrl(s3Key);
     if (baseCfUrl && fileRow.cloudfront_url !== baseCfUrl) {
       await supabase
@@ -258,61 +378,46 @@ export async function GET(
         .eq('id', fileRow.id);
     }
 
-    // 8. Registrar lectura autorizada en auditoría
-    if (fileVisibility === 'private') {
-      await addServiceLog({
-        method: 'GET',
-        action: 'PRIVATE_FILE_ACCESS_ALLOWED',
-        status: 'ALLOWED',
-        userId: fileRow.user_id,
-        orgId: fileRow.org_id,
-        fileId: fileRow.id,
-        ticketId: fileRow.ticket_id,
-        fileName: fileRow.original_name,
-        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-        message: `Lectura autorizada de archivo privado '${fileRow.original_name}' por su propietario (${fileRow.user_id}).`,
-      });
-    }
+    await addServiceLog({
+      method: 'GET',
+      action: 'URL_ISSUED',
+      status: 'ALLOWED',
+      userId: requestingUserId || fileRow.user_id,
+      orgId: fileRow.org_id,
+      fileId: fileRow.id,
+      ticketId: fileRow.ticket_id,
+      fileName: fileRow.original_name,
+      ipAddress,
+      message: `URL pública de CloudFront emitida para archivo '${fileRow.original_name}'.`,
+    });
 
-    const cacheControlHeader =
-      fileVisibility === 'private'
-        ? 'private, no-store, no-cache, must-revalidate, max-age=0'
-        : 'public, max-age=31536000, immutable';
-
-    const responseHeaders: Record<string, string> = {
-      ...corsHeaders,
-      'Cache-Control': cacheControlHeader,
-    };
-    if (fileVisibility === 'private') {
-      responseHeaders['Pragma'] = 'no-cache';
-      responseHeaders['Expires'] = '0';
-    }
-
-    // 9. Devolver al cliente el JSON con la URL de CloudFront y metadatos de visibilidad/caché
     return NextResponse.json(
       {
         url: cfResult.url,
         delivery: 'cloudfront',
         cloudfrontDomain: cfResult.domain,
+        cloudfrontUrl: cfResult.url,
         fileId: fileRow.id,
         fileName: fileRow.original_name,
         orgId: fileRow.org_id,
         ownerUserId: fileRow.user_id,
-        visibility: fileVisibility,
-        cacheControl: cacheControlHeader,
-        s3Key,
+        visibility: 'public',
+        cacheControl: PUBLIC_SHORT_TTL_CACHE_CONTROL,
       },
       {
         status: 200,
-        headers: responseHeaders,
+        headers: {
+          ...corsHeaders,
+          'Cache-Control': PUBLIC_SHORT_TTL_CACHE_CONTROL,
+        },
       }
     );
   } catch (error: any) {
-    console.error('Error al generar URL de CloudFront:', error);
+    console.error('Error al generar URL de entrega:', error);
     return NextResponse.json(
       {
         error: 'Internal Server Error',
-        message: error.message || 'Error inesperado al generar la URL de entrega en CloudFront.',
+        message: error.message || 'Error inesperado al generar la URL de entrega.',
       },
       { status: 500, headers: corsHeaders }
     );

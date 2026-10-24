@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { addServiceLog } from '@/lib/service-logs';
 import { supabase } from '@/lib/supabase';
-import { isAwsConfigured, generatePresignedUploadUrl, applyS3CacheControlMetadata } from '@/lib/s3';
+import {
+  isAwsConfigured,
+  generateOpaqueS3Key,
+  generatePresignedUploadUrl,
+  applyS3CacheControlMetadata,
+  getCacheControlForVisibility,
+  PRIVATE_NO_STORE_CACHE_CONTROL,
+} from '@/lib/s3';
 import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/ticket-token';
 import { getBaseCloudFrontUrl } from '@/lib/cloudfront';
 
@@ -9,7 +16,7 @@ import { getBaseCloudFrontUrl } from '@/lib/cloudfront';
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, x-user-id',
 };
 
 // 1. Preflight OPTIONS handler
@@ -25,15 +32,50 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const {
-      userId,
-      orgId,
+      userId: bodyUserId,
+      orgId: bodyOrgId,
       fileName = 'file.png',
       fileType = 'image/png',
       fileSize = 1024,
-      visibility = body.visibilidad || 'private',
+      visibility: rawVisibility = body.visibilidad || 'private',
       sha256Hash = body.sha256Hash || body.hashSha256 || null,
       extension: incomingExtension,
     } = body;
+
+    const visibility = String(rawVisibility).toLowerCase() === 'public' ? 'public' : 'private';
+    const validatedOrgId = req.headers.get('x-validated-org-id');
+    const validatedUserId = req.headers.get('x-validated-user-id');
+    const orgId = bodyOrgId || validatedOrgId;
+
+    // Decisión 1-A: Si la API Key está vinculada a un user_id (x-validated-user-id),
+    // impedir que el cliente suplante a otro usuario enviando un userId distinto en el body.
+    if (validatedUserId && bodyUserId && bodyUserId.trim() !== validatedUserId) {
+      await addServiceLog({
+        method: req.method,
+        action: 'USER_IMPERSONATION_BLOCKED',
+        status: 'ACCESS_DENIED',
+        userId: validatedUserId,
+        orgId: validatedOrgId || orgId,
+        fileName,
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        message: `Intento de suplantación bloqueado: la API Key pertenece al usuario '${validatedUserId}', pero el body solicitó subir como '${bodyUserId}'.`,
+      });
+
+      return NextResponse.json(
+        {
+          error: 'Forbidden',
+          code: 'FORBIDDEN_USER_IMPERSONATION',
+          method: req.method,
+          message:
+            'Violación de Seguridad: El userId enviado en el body no coincide con el usuario propietario de la API Key autenticada.',
+          authenticatedUserId: validatedUserId,
+          attemptedUserId: bodyUserId,
+        },
+        { status: 403, headers: corsHeaders }
+      );
+    }
+
+    const userId = validatedUserId || bodyUserId;
 
     // 1. Query User from Supabase (Real Database Lookup - No Hardcoding)
     let user: any = null;
@@ -122,7 +164,6 @@ export async function POST(req: NextRequest) {
     }
 
     // CHECK 1.5: API Key Tenant Matching (Injected by Edge Middleware)
-    const validatedOrgId = req.headers.get('x-validated-org-id');
     if (validatedOrgId && validatedOrgId !== orgId) {
       await addServiceLog({
         method: req.method,
@@ -204,7 +245,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ALL CHECKS PASSED -> Generate Ticket & S3 Keys
+    // ALL CHECKS PASSED -> Generate Ticket & Opaque 128-bit S3 Key (Task A.1)
     const fileId = crypto.randomUUID();
     const ticketId = crypto.randomUUID();
     const timestamp = Date.now();
@@ -212,7 +253,7 @@ export async function POST(req: NextRequest) {
     const expiresAt = new Date(timestamp + TTL_SECONDS * 1000).toISOString();
     const orgSlug = targetOrg.slug;
 
-    // Resource categorization (images, documents, videos)
+    // Resource categorization (images, documents)
     let resourceType: 'images' | 'documents' | 'videos' = 'documents';
     if (fileType.startsWith('image/')) resourceType = 'images';
     else if (fileType.startsWith('video/')) resourceType = 'videos';
@@ -226,9 +267,10 @@ export async function POST(req: NextRequest) {
       extension = fileName.slice(fileName.lastIndexOf('.')).toLowerCase();
     }
 
-    // Standardized S3 Key hierarchy under static/ so CloudFront (/static/*) serves files directly with cache:
-    const landingZoneKey = `static/pending/${fileId}${extension}`;
-    const permanentTargetKey = `static/organizations/${orgSlug}/${resourceType}/${visibility}/${ticketId}-${fileName}`;
+    // Task A.1: Opaque 128-bit random S3 key (distinct from DB fileId & ticketId; no orgSlug, visibility, or fileName)
+    const landingZoneKey = generateOpaqueS3Key('static/pending', extension);
+    // Task A.3: Signed Cache-Control for landing zone is strictly no-store
+    const signedUploadCacheControl = PRIVATE_NO_STORE_CACHE_CONTROL;
 
     // Cryptographically signed confirmation token (HMAC-SHA256)
     const confirmToken = generateTicketConfirmToken(ticketId, user.id, expiresAt);
@@ -247,7 +289,12 @@ export async function POST(req: NextRequest) {
 
     let uploadUrl: string | null = null;
     try {
-      uploadUrl = await generatePresignedUploadUrl(landingZoneKey, fileType, TTL_SECONDS);
+      uploadUrl = await generatePresignedUploadUrl(
+        landingZoneKey,
+        fileType,
+        TTL_SECONDS,
+        signedUploadCacheControl
+      );
     } catch (s3Err: any) {
       console.error('Error generating AWS S3 Presigned URL:', s3Err.message);
     }
@@ -263,7 +310,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Insert file record into Supabase (files table - No Spanish fallbacks)
+    // 1. Insert file record into Supabase (files table - original_name only in DB, scan_status='not_scanned')
     try {
       const filePayload = {
         id: fileId,
@@ -278,7 +325,9 @@ export async function POST(req: NextRequest) {
         resource_type: resourceType,
         visibility,
         s3_pending_key: landingZoneKey,
-        s3_processed_key: permanentTargetKey,
+        s3_processed_key: null,
+        cloudfront_url: null,
+        scan_status: 'not_scanned',
         status: 'pending_upload',
         created_at: new Date(timestamp).toISOString(),
       };
@@ -305,7 +354,7 @@ export async function POST(req: NextRequest) {
       fileId,
       fileName,
       ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-      message: `Presigned S3 upload URL issued for file '${fileName}' (${fileType}, ${fileSize} bytes)`,
+      message: `Presigned S3 upload URL issued for file '${fileName}' (${fileType}, ${fileSize} bytes, visibility=${visibility})`,
     });
 
     return NextResponse.json(
@@ -315,6 +364,10 @@ export async function POST(req: NextRequest) {
         uploadUrl,
         method: req.method,
         uploadMethod: 'PUT',
+        requiredHeaders: {
+          'Content-Type': fileType,
+          'Cache-Control': signedUploadCacheControl,
+        },
         isRealS3: true,
         isMultipart: fileSize > 20 * 1024 * 1024,
         expiresAt,
@@ -332,7 +385,7 @@ export async function POST(req: NextRequest) {
         },
         s3Hierarchy: {
           landingZone: landingZoneKey,
-          permanentTarget: permanentTargetKey,
+          permanentTarget: null,
         },
         metadata: {
           userId: user.id,
@@ -344,6 +397,8 @@ export async function POST(req: NextRequest) {
           mimeType: fileType,
           fileSize,
           sha256Hash,
+          scanStatus: 'not_scanned',
+          signedCacheControl: signedUploadCacheControl,
           method: req.method,
           uploadMethod: 'PUT',
           isRealS3: true,
@@ -518,35 +573,37 @@ export async function PUT(req: NextRequest) {
     }
   }
 
-  // 2. Apply Cache-Control metadata in S3 based on visibility ('private' -> no-store, 'public' -> max-age)
+  // 2. Apply Cache-Control metadata in S3 based on visibility ('private' -> no-store, 'public' -> short 5m TTL)
+  const fileVisibility = String(fileRow?.visibility || 'private').toLowerCase() === 'public' ? 'public' : 'private';
   let s3CacheControl: string | null = null;
   if (fileRow?.s3_pending_key) {
     try {
       s3CacheControl = await applyS3CacheControlMetadata(
         fileRow.s3_pending_key,
         fileRow.mime_type || 'application/octet-stream',
-        fileRow.visibility || 'private'
+        fileVisibility
       );
     } catch (metaErr: any) {
       console.warn('Could not apply Cache-Control metadata on S3 object:', metaErr.message);
     }
   }
 
-  // 3. Mark ticket completed in Supabase (and save CloudFront base URL if configured)
+  // 3. Task A.2: Mark ticket completed in Supabase.
+  // Private files NEVER store or return cloudfront_url (only public files exit through CloudFront).
   const nowIso = new Date().toISOString();
-  const baseCfUrl = fileRow?.s3_pending_key
-    ? getBaseCloudFrontUrl(fileRow.s3_pending_key)
-    : null;
+  const activeKey = fileRow?.s3_processed_key || fileRow?.s3_pending_key;
+  const publicCfUrl =
+    fileVisibility === 'public' && activeKey
+      ? getBaseCloudFrontUrl(activeKey)
+      : null;
 
   try {
     const updatePayload: Record<string, any> = {
       status: 'completed',
       completed_at: nowIso,
       updated_at: nowIso,
+      cloudfront_url: publicCfUrl, // Explicitly null for private files
     };
-    if (baseCfUrl) {
-      updatePayload.cloudfront_url = baseCfUrl;
-    }
 
     const { data: updated } = await supabase
       .from('files')
@@ -571,7 +628,7 @@ export async function PUT(req: NextRequest) {
     fileId: fileRow?.id || undefined,
     fileName: fileRow?.original_name || undefined,
     ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-    message: `File confirmed in S3 landing zone for ticket ${ticketId} (visibility=${fileRow?.visibility || 'private'})`,
+    message: `File confirmed in S3 landing zone for ticket ${ticketId} (visibility=${fileVisibility})`,
   });
 
   return NextResponse.json(
@@ -581,16 +638,12 @@ export async function PUT(req: NextRequest) {
       message: `File upload confirmed for ticket ${ticketId}`,
       ticketId,
       fileId: fileRow?.id || null,
-      visibility: fileRow?.visibility || 'private',
+      visibility: fileVisibility,
       ownerUserId: fileRow?.user_id || null,
-      cacheControl:
-        s3CacheControl ||
-        (fileRow?.visibility === 'private'
-          ? 'private, no-store, no-cache, max-age=0, must-revalidate'
-          : 'public, max-age=31536000, immutable'),
+      cacheControl: s3CacheControl || getCacheControlForVisibility(fileVisibility, false),
       s3Status: 'uploaded_to_landing',
       s3Landing: fileRow?.s3_pending_key || null,
-      cloudfrontUrl: fileRow?.cloudfront_url || baseCfUrl || null,
+      cloudfrontUrl: fileVisibility === 'public' ? publicCfUrl : null,
       tokenVerified: Boolean(confirmToken),
     },
     { status: 200, headers: corsHeaders }

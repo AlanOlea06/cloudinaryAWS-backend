@@ -45,7 +45,7 @@ export async function middleware(req: NextRequest) {
     const hashedKey = await hashSha256(apiKey);
 
     // 4. Consultar PostgREST en Supabase buscando coincidencia exacta del hash y is_active=true
-    const queryUrl = `${SUPABASE_URL}/rest/v1/api_keys?hashed_key=eq.${encodeURIComponent(hashedKey)}&is_active=eq.true&select=id,org_id,name,can_read,can_upload,can_delete,is_active`;
+    const queryUrl = `${SUPABASE_URL}/rest/v1/api_keys?hashed_key=eq.${encodeURIComponent(hashedKey)}&is_active=eq.true&select=*`;
 
     const supabaseRes = await fetch(queryUrl, {
       method: 'GET',
@@ -87,6 +87,18 @@ export async function middleware(req: NextRequest) {
     const keyRecord = matchingKeys[0];
     const pathname = req.nextUrl.pathname;
     const method = req.method;
+    const cleanKeyName = typeof keyRecord.name === 'string'
+      ? keyRecord.name.replace(/\s*\[uid:[0-9a-f-]{36}\]/gi, '').trim()
+      : 'API Key';
+
+    // Extraer user_id vinculado a la llave (columna nativa user_id o tag [uid:...] de respaldo)
+    let boundUserId: string | null = keyRecord.user_id || null;
+    if (!boundUserId && typeof keyRecord.name === 'string') {
+      const uidMatch = keyRecord.name.match(/\[uid:([0-9a-f-]{36})\]/i);
+      if (uidMatch) {
+        boundUserId = uidMatch[1];
+      }
+    }
 
     // 5. Verificar permisos basados en el Principio de Menor Privilegio
     // Regla de Subida: Si el método es POST o PUT hacia /api/upload o /api/files -> Exigir can_upload
@@ -96,7 +108,7 @@ export async function middleware(req: NextRequest) {
           {
             error: 'Forbidden',
             code: 'FORBIDDEN_INSUFFICIENT_PERMISSIONS',
-            message: `Permisos Insuficientes: La llave API "${keyRecord.name}" no cuenta con la facultad "can_upload" requerida para operaciones ${method}.`,
+            message: `Permisos Insuficientes: La llave API "${cleanKeyName}" no cuenta con la facultad "can_upload" requerida para operaciones ${method}.`,
           },
           { status: 403 }
         );
@@ -109,7 +121,7 @@ export async function middleware(req: NextRequest) {
         {
           error: 'Forbidden',
           code: 'FORBIDDEN_INSUFFICIENT_PERMISSIONS',
-          message: `Permisos Insuficientes: La llave API "${keyRecord.name}" no cuenta con la facultad "can_read" requerida para consultas.`,
+          message: `Permisos Insuficientes: La llave API "${cleanKeyName}" no cuenta con la facultad "can_read" requerida para consultas.`,
         },
         { status: 403 }
       );
@@ -121,18 +133,25 @@ export async function middleware(req: NextRequest) {
         {
           error: 'Forbidden',
           code: 'FORBIDDEN_INSUFFICIENT_PERMISSIONS',
-          message: `Permisos Insuficientes: La llave API "${keyRecord.name}" no cuenta con la facultad "can_delete" requerida para eliminación.`,
+          message: `Permisos Insuficientes: La llave API "${cleanKeyName}" no cuenta con la facultad "can_delete" requerida para eliminación.`,
         },
         { status: 403 }
       );
     }
 
-    // 6. Inyección de Headers de Contexto Seguro
-    // Clonamos las cabeceras de la petición original e inyectamos los datos verificados de la llave
+    // 6. Inyección de Headers de Contexto Seguro (limpiando cualquier intento de spoofing entrante)
     const requestHeaders = new Headers(req.headers);
+    requestHeaders.delete('x-validated-org-id');
+    requestHeaders.delete('x-validated-user-id');
+    requestHeaders.delete('x-api-key-id');
+    requestHeaders.delete('x-api-key-name');
+
     requestHeaders.set('x-validated-org-id', keyRecord.org_id);
     requestHeaders.set('x-api-key-id', keyRecord.id);
-    requestHeaders.set('x-api-key-name', keyRecord.name);
+    requestHeaders.set('x-api-key-name', cleanKeyName);
+    if (boundUserId) {
+      requestHeaders.set('x-validated-user-id', boundUserId);
+    }
 
     return NextResponse.next({
       request: {

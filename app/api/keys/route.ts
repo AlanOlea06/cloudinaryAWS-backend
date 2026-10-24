@@ -17,6 +17,16 @@ export async function OPTIONS() {
   });
 }
 
+function extractBoundUserId(row: any): string | null {
+  if (row?.user_id) return row.user_id;
+  const match = typeof row?.name === 'string' ? row.name.match(/\[uid:([0-9a-f-]{36})\]/i) : null;
+  return match ? match[1] : null;
+}
+
+function stripUidTag(name: string): string {
+  return (name || '').replace(/\s*\[uid:[0-9a-f-]{36}\]/gi, '').trim();
+}
+
 // 2. GET: Listar llaves de una organización (sin exponer secretos)
 export async function GET(req: NextRequest) {
   try {
@@ -34,9 +44,9 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const { data: keys, error } = await supabase
+    const { data: rawKeys, error } = await supabase
       .from('api_keys')
-      .select('id, org_id, name, can_read, can_upload, can_delete, is_active, created_at')
+      .select('*')
       .eq('org_id', orgId)
       .order('created_at', { ascending: false });
 
@@ -47,12 +57,24 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    const keys = (rawKeys || []).map((k: any) => ({
+      id: k.id,
+      org_id: k.org_id,
+      user_id: extractBoundUserId(k),
+      name: stripUidTag(k.name),
+      can_read: k.can_read,
+      can_upload: k.can_upload,
+      can_delete: k.can_delete,
+      is_active: k.is_active,
+      created_at: k.created_at,
+    }));
+
     return NextResponse.json(
       {
         status: 'success',
         orgId,
-        total: keys?.length || 0,
-        keys: keys || [],
+        total: keys.length,
+        keys,
       },
       { status: 200, headers: corsHeaders }
     );
@@ -64,12 +86,14 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// 3. POST: Fabricar nueva API Key (Regla de negocio: máx 3 activas por org)
+// 3. POST: Fabricar nueva API Key (Regla de negocio: máx 3 activas por org + vinculación a user_id Decisión 1-A)
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
     const {
       orgId,
+      userId: incomingUserId,
+      user_id: incomingUserIdSnake,
       name,
       can_read = false,
       can_upload = false,
@@ -78,6 +102,8 @@ export async function POST(req: NextRequest) {
       canUpload,
       canDelete,
     } = body;
+
+    const requestedUserId = (incomingUserId || incomingUserIdSnake || '').trim();
 
     // Validaciones básicas de entrada
     if (!orgId) {
@@ -118,6 +144,49 @@ export async function POST(req: NextRequest) {
         },
         { status: 404, headers: corsHeaders }
       );
+    }
+
+    // Decisión 1-A: Resolver y validar el usuario propietario (user_id) de la llave API
+    let boundUser: any = null;
+    if (requestedUserId) {
+      const { data: dbUser } = await supabase
+        .from('users')
+        .select('id, org_id, name, email, role, can_upload')
+        .eq('id', requestedUserId)
+        .maybeSingle();
+
+      if (!dbUser) {
+        return NextResponse.json(
+          {
+            error: 'Not Found',
+            code: 'USER_NOT_FOUND',
+            message: `El usuario con ID "${requestedUserId}" no existe en la base de datos.`,
+          },
+          { status: 404, headers: corsHeaders }
+        );
+      }
+
+      if (dbUser.org_id !== orgId) {
+        return NextResponse.json(
+          {
+            error: 'Forbidden',
+            code: 'USER_ORG_MISMATCH',
+            message: `El usuario "${dbUser.name}" no pertenece a la organización "${orgData.name}".`,
+          },
+          { status: 403, headers: corsHeaders }
+        );
+      }
+      boundUser = dbUser;
+    } else {
+      // Si no se especificó userId, asociar al administrador principal de esa organización
+      const { data: defaultUser } = await supabase
+        .from('users')
+        .select('id, org_id, name, email, role, can_upload')
+        .eq('org_id', orgId)
+        .order('role', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      boundUser = defaultUser || null;
     }
 
     // REGLA 1: LÍMITE DE CANTIDAD (Máximo 3 llaves activas por organización)
@@ -161,20 +230,51 @@ export async function POST(req: NextRequest) {
     const effectiveCanRead = Boolean(can_read ?? canRead);
     const effectiveCanUpload = Boolean(can_upload ?? canUpload);
     const effectiveCanDelete = Boolean(can_delete ?? canDelete);
+    const cleanKeyName = stripUidTag(name);
 
-    const { data: insertedKey, error: insertErr } = await supabase
+    let insertedKey: any = null;
+    let insertErr: any = null;
+
+    // Intentar insertar con la columna nativa user_id (Migración Fase 0)
+    const primaryPayload: Record<string, any> = {
+      org_id: orgId,
+      user_id: boundUser?.id || null,
+      name: cleanKeyName,
+      hashed_key: hashedKey,
+      can_read: effectiveCanRead,
+      can_upload: effectiveCanUpload,
+      can_delete: effectiveCanDelete,
+      is_active: true,
+    };
+
+    const primaryRes = await supabase
       .from('api_keys')
-      .insert({
-        org_id: orgId,
-        name: name.trim(),
-        hashed_key: hashedKey,
-        can_read: effectiveCanRead,
-        can_upload: effectiveCanUpload,
-        can_delete: effectiveCanDelete,
-        is_active: true,
-      })
-      .select('id, org_id, name, can_read, can_upload, can_delete, is_active, created_at')
+      .insert(primaryPayload)
+      .select('*')
       .single();
+
+    insertedKey = primaryRes.data;
+    insertErr = primaryRes.error;
+
+    // Fallback resiliente si la migración ALTER TABLE api_keys ADD COLUMN user_id aún no se ha corrido en el SQL Editor
+    if (insertErr && insertErr.message?.includes('user_id')) {
+      const taggedName = boundUser?.id ? `${cleanKeyName} [uid:${boundUser.id}]` : cleanKeyName;
+      const fallbackRes = await supabase
+        .from('api_keys')
+        .insert({
+          org_id: orgId,
+          name: taggedName,
+          hashed_key: hashedKey,
+          can_read: effectiveCanRead,
+          can_upload: effectiveCanUpload,
+          can_delete: effectiveCanDelete,
+          is_active: true,
+        })
+        .select('*')
+        .single();
+      insertedKey = fallbackRes.data;
+      insertErr = fallbackRes.error;
+    }
 
     if (insertErr || !insertedKey) {
       return NextResponse.json(
@@ -187,6 +287,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const finalBoundUserId = extractBoundUserId(insertedKey) || boundUser?.id || null;
+
     // REGLA 4: RESPUESTA (Devolver la llave plana UNA SOLA VEZ)
     return NextResponse.json(
       {
@@ -196,9 +298,11 @@ export async function POST(req: NextRequest) {
         key: {
           id: insertedKey.id,
           orgId: insertedKey.org_id,
+          userId: finalBoundUserId,
+          userName: boundUser?.name || null,
           organizationName: orgData.name,
           organizationSlug: orgData.slug,
-          name: insertedKey.name,
+          name: cleanKeyName,
           permissions: {
             can_read: insertedKey.can_read,
             can_upload: insertedKey.can_upload,
@@ -206,6 +310,13 @@ export async function POST(req: NextRequest) {
           },
           isActive: insertedKey.is_active,
           createdAt: insertedKey.created_at,
+        },
+        // Alias retrocompatible
+        keyRecord: {
+          id: insertedKey.id,
+          orgId: insertedKey.org_id,
+          userId: finalBoundUserId,
+          name: cleanKeyName,
         },
       },
       { status: 201, headers: corsHeaders }
