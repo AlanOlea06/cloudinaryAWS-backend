@@ -7,6 +7,11 @@ import {
   generatePresignedUploadUrl,
   applyS3CacheControlMetadata,
   getCacheControlForVisibility,
+  validateAllowedFileType,
+  headS3Object,
+  deleteS3Object,
+  ALLOWED_FILE_TYPES,
+  MAX_SINGLE_UPLOAD_BYTES,
   PRIVATE_NO_STORE_CACHE_CONTROL,
 } from '@/lib/s3';
 import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/ticket-token';
@@ -35,8 +40,8 @@ export async function POST(req: NextRequest) {
       userId: bodyUserId,
       orgId: bodyOrgId,
       fileName = 'file.png',
-      fileType = 'image/png',
-      fileSize = 1024,
+      fileType = body.mimeType || 'image/png',
+      fileSize: rawFileSize = body.sizeBytes ?? 1024,
       visibility: rawVisibility = body.visibilidad || 'private',
       sha256Hash = body.sha256Hash || body.hashSha256 || null,
       extension: incomingExtension,
@@ -245,6 +250,75 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // CHECK 4 (Task A.4): Strict File Type Whitelist, Extension/MIME Coherence, XSS & Video Blocking
+    const typeValidation = validateAllowedFileType(fileName, fileType, incomingExtension);
+    if (!typeValidation.valid) {
+      await addServiceLog({
+        method: req.method,
+        action: 'FILE_TYPE_REJECTED',
+        status: 'DENIED_INVALID_TYPE',
+        userId: user.id,
+        userName: user.name,
+        orgId: user.orgId,
+        orgName: userOrg?.name,
+        fileName,
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        message: `${typeValidation.code}: ${typeValidation.message}`,
+      });
+
+      return NextResponse.json(
+        {
+          error: 'Bad Request',
+          code: typeValidation.code,
+          method: req.method,
+          message: typeValidation.message,
+          allowedExtensions: Object.keys(ALLOWED_FILE_TYPES),
+        },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    // CHECK 5 (Task A.5): File Size Validation & Maximum Single Upload Limit
+    const fileSize = Number(rawFileSize);
+    if (!Number.isFinite(fileSize) || !Number.isInteger(fileSize) || fileSize <= 0) {
+      return NextResponse.json(
+        {
+          error: 'Bad Request',
+          code: 'INVALID_FILE_SIZE',
+          method: req.method,
+          message: 'El tamaño del archivo (fileSize) debe ser un número entero positivo de bytes mayor a 0.',
+        },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    if (fileSize > MAX_SINGLE_UPLOAD_BYTES) {
+      await addServiceLog({
+        method: req.method,
+        action: 'FILE_SIZE_REJECTED',
+        status: 'DENIED_SIZE_LIMIT',
+        userId: user.id,
+        userName: user.name,
+        orgId: user.orgId,
+        orgName: userOrg?.name,
+        fileName,
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        message: `Tamaño declarado (${fileSize} bytes) excede el máximo permitido para subida simple (${MAX_SINGLE_UPLOAD_BYTES} bytes).`,
+      });
+
+      return NextResponse.json(
+        {
+          error: 'Payload Too Large',
+          code: 'FILE_SIZE_EXCEEDS_LIMIT',
+          method: req.method,
+          message: `El tamaño declarado (${fileSize} bytes) excede el límite máximo de subida simple (${MAX_SINGLE_UPLOAD_BYTES} bytes / 25 MB).`,
+          declaredSizeBytes: fileSize,
+          maxAllowedBytes: MAX_SINGLE_UPLOAD_BYTES,
+        },
+        { status: 413, headers: corsHeaders }
+      );
+    }
+
     // ALL CHECKS PASSED -> Generate Ticket & Opaque 128-bit S3 Key (Task A.1)
     const fileId = crypto.randomUUID();
     const ticketId = crypto.randomUUID();
@@ -253,19 +327,10 @@ export async function POST(req: NextRequest) {
     const expiresAt = new Date(timestamp + TTL_SECONDS * 1000).toISOString();
     const orgSlug = targetOrg.slug;
 
-    // Resource categorization (images, documents)
-    let resourceType: 'images' | 'documents' | 'videos' = 'documents';
-    if (fileType.startsWith('image/')) resourceType = 'images';
-    else if (fileType.startsWith('video/')) resourceType = 'videos';
-
-    // File extension: prioritize explicit field sent in HTTP request, or extract from fileName
-    let extension = incomingExtension ? String(incomingExtension).trim().toLowerCase() : '';
-    if (extension && !extension.startsWith('.')) {
-      extension = `.${extension}`;
-    }
-    if (!extension && fileName.lastIndexOf('.') !== -1) {
-      extension = fileName.slice(fileName.lastIndexOf('.')).toLowerCase();
-    }
+    const extension = typeValidation.extension!;
+    const validatedMimeType = typeValidation.mimeType!;
+    const resourceType = typeValidation.resourceType!;
+    const contentDisposition = typeValidation.contentDisposition!;
 
     // Task A.1: Opaque 128-bit random S3 key (distinct from DB fileId & ticketId; no orgSlug, visibility, or fileName)
     const landingZoneKey = generateOpaqueS3Key('static/pending', extension);
@@ -291,9 +356,11 @@ export async function POST(req: NextRequest) {
     try {
       uploadUrl = await generatePresignedUploadUrl(
         landingZoneKey,
-        fileType,
+        validatedMimeType,
         TTL_SECONDS,
-        signedUploadCacheControl
+        signedUploadCacheControl,
+        fileSize,
+        contentDisposition
       );
     } catch (s3Err: any) {
       console.error('Error generating AWS S3 Presigned URL:', s3Err.message);
@@ -318,7 +385,7 @@ export async function POST(req: NextRequest) {
       org_id: targetOrg.id,
       original_name: fileName,
       extension,
-      mime_type: fileType,
+      mime_type: validatedMimeType,
       size_bytes: fileSize,
       sha256_hash: sha256Hash,
       resource_type: resourceType,
@@ -331,15 +398,7 @@ export async function POST(req: NextRequest) {
       created_at: new Date(timestamp).toISOString(),
     };
 
-    let { error: insertErr } = await supabase.from('files').insert(filePayload);
-    // Fallback resiliente si el constraint legado archivos_scan_status_check aún no fue eliminado en el SQL Editor
-    if (insertErr && insertErr.message?.includes('scan_status')) {
-      const fallbackRes = await supabase.from('files').insert({
-        ...filePayload,
-        scan_status: 'NO_APLICA',
-      });
-      insertErr = fallbackRes.error;
-    }
+    const { error: insertErr } = await supabase.from('files').insert(filePayload);
 
     if (insertErr) {
       console.error('Error inserting file in Supabase files table:', insertErr.message);
@@ -367,8 +426,17 @@ export async function POST(req: NextRequest) {
       fileId,
       fileName,
       ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-      message: `Presigned S3 upload URL issued for file '${fileName}' (${fileType}, ${fileSize} bytes, visibility=${visibility})`,
+      message: `Presigned S3 upload URL issued for file '${fileName}' (${validatedMimeType}, ${fileSize} bytes, visibility=${visibility}, disposition=${contentDisposition})`,
     });
+
+    const requiredHeaders: Record<string, string> = {
+      'Content-Type': validatedMimeType,
+      'Cache-Control': signedUploadCacheControl,
+      'Content-Length': String(fileSize),
+    };
+    if (contentDisposition === 'attachment') {
+      requiredHeaders['Content-Disposition'] = 'attachment';
+    }
 
     return NextResponse.json(
       {
@@ -377,12 +445,9 @@ export async function POST(req: NextRequest) {
         uploadUrl,
         method: req.method,
         uploadMethod: 'PUT',
-        requiredHeaders: {
-          'Content-Type': fileType,
-          'Cache-Control': signedUploadCacheControl,
-        },
+        requiredHeaders,
         isRealS3: true,
-        isMultipart: fileSize > 20 * 1024 * 1024,
+        isMultipart: false,
         expiresAt,
         expiresInSeconds: TTL_SECONDS,
         confirmToken,
@@ -407,8 +472,9 @@ export async function POST(req: NextRequest) {
           visibility,
           fileName,
           extension,
-          mimeType: fileType,
+          mimeType: validatedMimeType,
           fileSize,
+          contentDisposition,
           sha256Hash,
           scanStatus: 'not_scanned',
           signedCacheControl: signedUploadCacheControl,
@@ -447,13 +513,13 @@ export async function PUT(req: NextRequest) {
   const ticketId = searchParams.get('ticketId') || '';
   let confirmToken = searchParams.get('token') || searchParams.get('confirmToken') || '';
 
-  // Optional: Read confirmToken from request body if sent as JSON
+  // Read confirmToken from request body if sent as JSON
   try {
     const body = await req.json().catch(() => ({}));
     if (body?.token) confirmToken = body.token;
     if (body?.confirmToken) confirmToken = body.confirmToken;
   } catch {
-    // Body is optional
+    // Body is optional if confirmToken was sent via query parameter
   }
 
   if (!ticketId) {
@@ -468,7 +534,7 @@ export async function PUT(req: NextRequest) {
     );
   }
 
-  // 1. Retrieve file record from Supabase (files table - No Spanish fallbacks)
+  // 1. Retrieve file record from Supabase (files table)
   let fileRow: any = null;
 
   try {
@@ -507,6 +573,59 @@ export async function PUT(req: NextRequest) {
     );
   }
 
+  // CHECK 1.5: Tenant & User Anti-Impersonation on Confirmation
+  const validatedOrgId = req.headers.get('x-validated-org-id');
+  const validatedUserId = req.headers.get('x-validated-user-id');
+
+  if (validatedOrgId && fileRow.org_id && validatedOrgId !== fileRow.org_id) {
+    await addServiceLog({
+      method: req.method,
+      action: 'CONFIRM_CROSS_ORG_DENIED',
+      status: 'ACCESS_DENIED',
+      userId: validatedUserId || undefined,
+      orgId: validatedOrgId,
+      targetOrgId: fileRow.org_id,
+      ticketId,
+      fileId: fileRow.id,
+      ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+      message: `Intento de confirmar ticket de otra organización bloqueado.`,
+    });
+
+    return NextResponse.json(
+      {
+        error: 'Forbidden',
+        code: 'FORBIDDEN_CROSS_ORGANIZATION',
+        method: req.method,
+        message: 'No tienes permiso para confirmar tickets de otra organización.',
+      },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  if (validatedUserId && fileRow.user_id && validatedUserId !== fileRow.user_id) {
+    await addServiceLog({
+      method: req.method,
+      action: 'CONFIRM_IMPERSONATION_DENIED',
+      status: 'ACCESS_DENIED',
+      userId: validatedUserId,
+      orgId: validatedOrgId || fileRow.org_id,
+      ticketId,
+      fileId: fileRow.id,
+      ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+      message: `El usuario autenticado '${validatedUserId}' intentó confirmar el ticket del usuario '${fileRow.user_id}'.`,
+    });
+
+    return NextResponse.json(
+      {
+        error: 'Forbidden',
+        code: 'FORBIDDEN_USER_IMPERSONATION',
+        method: req.method,
+        message: 'Violación de Seguridad: Solo el usuario propietario que emitió el ticket puede confirmarlo.',
+      },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
   // CHECK 2: Ticket Already Completed (Idempotency / Replay protection)
   const currentStatus = fileRow.status;
   if (currentStatus === 'completed') {
@@ -528,7 +647,6 @@ export async function PUT(req: NextRequest) {
   const createdAtMs = new Date(fileRow.created_at).getTime();
   const TTL_MS = 300 * 1000;
   if (!isNaN(createdAtMs) && Date.now() > createdAtMs + TTL_MS + GRACE_PERIOD_MS) {
-    // Mark as expired in database
     try {
       await supabase.from('files').update({ status: 'expired' }).eq('ticket_id', ticketId);
     } catch (expErr: any) {
@@ -558,43 +676,159 @@ export async function PUT(req: NextRequest) {
     );
   }
 
-  // CHECK 4: HMAC Cryptographic Signature (if token provided)
-  if (confirmToken) {
-    const tokenResult = verifyTicketConfirmToken(confirmToken, ticketId, fileRow.user_id);
-    if (!tokenResult.valid) {
-      await addServiceLog({
-        method: req.method,
-        action: 'TICKET_SIGNATURE_INVALID',
-        status: 'DENIED_FORGED_TOKEN',
-        userId: fileRow.user_id,
-        orgId: fileRow.org_id,
-        ticketId,
-        fileId: fileRow.id,
-        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-        message: `Invalid or forged ticket confirmation token: ${tokenResult.reason}`,
-      });
+  // CHECK 4 (Task A.5): Mandatory HMAC Cryptographic Signature Verification (confirmToken required)
+  if (!confirmToken || !confirmToken.trim()) {
+    await addServiceLog({
+      method: req.method,
+      action: 'TICKET_CONFIRM_MISSING_TOKEN',
+      status: 'DENIED_MISSING_TOKEN',
+      userId: fileRow.user_id,
+      orgId: fileRow.org_id,
+      ticketId,
+      fileId: fileRow.id,
+      ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+      message: 'Confirmation rejected: confirmToken is mandatory.',
+    });
 
-      return NextResponse.json(
-        {
-          error: 'Forbidden',
-          code: 'INVALID_CONFIRM_TOKEN',
-          method: req.method,
-          message: `Invalid or forged ticket confirmation token: ${tokenResult.reason}`,
-        },
-        { status: 403, headers: corsHeaders }
-      );
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'MISSING_CONFIRM_TOKEN',
+        method: req.method,
+        message: 'Seguridad: El token criptográfico de confirmación (confirmToken) es obligatorio para confirmar la subida.',
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  const tokenResult = verifyTicketConfirmToken(confirmToken, ticketId, fileRow.user_id);
+  if (!tokenResult.valid) {
+    await addServiceLog({
+      method: req.method,
+      action: 'TICKET_SIGNATURE_INVALID',
+      status: 'DENIED_FORGED_TOKEN',
+      userId: fileRow.user_id,
+      orgId: fileRow.org_id,
+      ticketId,
+      fileId: fileRow.id,
+      ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+      message: `Invalid or forged ticket confirmation token: ${tokenResult.reason}`,
+    });
+
+    return NextResponse.json(
+      {
+        error: 'Forbidden',
+        code: 'INVALID_CONFIRM_TOKEN',
+        method: req.method,
+        message: `Invalid or forged ticket confirmation token: ${tokenResult.reason}`,
+      },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  // CHECK 5 (Task A.5): Real S3 HeadObject Verification (Size & MIME Type vs Ticket Declaration)
+  const pendingKey = fileRow.s3_pending_key;
+  const headMeta = await headS3Object(pendingKey);
+
+  if (!headMeta.exists) {
+    await addServiceLog({
+      method: req.method,
+      action: 'UPLOAD_CONFIRM_MISSING_S3_OBJECT',
+      status: 'DENIED_NOT_UPLOADED',
+      userId: fileRow.user_id,
+      orgId: fileRow.org_id,
+      ticketId,
+      fileId: fileRow.id,
+      fileName: fileRow.original_name,
+      ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+      message: `HeadObject failed: object '${pendingKey}' does not exist in S3.`,
+    });
+
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'FILE_NOT_UPLOADED_TO_S3',
+        method: req.method,
+        message: 'El archivo aún no existe en la zona de aterrizaje de S3. Realiza el PUT a uploadUrl antes de confirmar.',
+        s3Key: pendingKey,
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  const declaredSize = Number(fileRow.size_bytes);
+  const actualSize = Number(headMeta.contentLength ?? -1);
+  const declaredMime = String(fileRow.mime_type || '').toLowerCase().trim();
+  const actualMime = String(headMeta.contentType || '').toLowerCase().trim();
+
+  const sizeMismatch = actualSize !== declaredSize || actualSize <= 0 || actualSize > MAX_SINGLE_UPLOAD_BYTES;
+  const mimeMismatch = actualMime !== declaredMime;
+
+  if (sizeMismatch || mimeMismatch) {
+    const mismatchReason = `Discrepancia detectada por HeadObject en S3: declarado=(${declaredSize} bytes, '${declaredMime}') vs real=(${actualSize} bytes, '${actualMime}').`;
+
+    // Delete fraudulent/mismatched object from S3 immediately
+    try {
+      await deleteS3Object(pendingKey);
+    } catch (delErr: any) {
+      console.error('Failed to delete mismatched S3 object:', delErr.message);
     }
+
+    const failNowIso = new Date().toISOString();
+    await supabase
+      .from('files')
+      .update({
+        status: 'failed',
+        error_message: mismatchReason,
+        updated_at: failNowIso,
+      })
+      .eq('ticket_id', ticketId);
+
+    await addServiceLog({
+      method: req.method,
+      action: 'UPLOAD_HEAD_VERIFICATION_FAILED',
+      status: 'REJECTED_MISMATCH',
+      userId: fileRow.user_id,
+      orgId: fileRow.org_id,
+      ticketId,
+      fileId: fileRow.id,
+      fileName: fileRow.original_name,
+      ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+      message: `${mismatchReason} Objeto eliminado de S3 y ticket marcado como 'failed'.`,
+    });
+
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'UPLOAD_VERIFICATION_MISMATCH',
+        method: req.method,
+        message: mismatchReason,
+        declared: {
+          sizeBytes: declaredSize,
+          mimeType: declaredMime,
+        },
+        actual: {
+          sizeBytes: actualSize,
+          mimeType: actualMime,
+        },
+        remediation: 'deleted_from_s3_and_marked_failed',
+      },
+      { status: 400, headers: corsHeaders }
+    );
   }
 
   // 2. Apply Cache-Control metadata in S3 based on visibility ('private' -> no-store, 'public' -> short 5m TTL)
   const fileVisibility = String(fileRow?.visibility || 'private').toLowerCase() === 'public' ? 'public' : 'private';
+  const expectedDisposition =
+    String(fileRow?.extension || '').toLowerCase() === '.pdf' ? 'attachment' : 'inline';
   let s3CacheControl: string | null = null;
   if (fileRow?.s3_pending_key) {
     try {
       s3CacheControl = await applyS3CacheControlMetadata(
         fileRow.s3_pending_key,
         fileRow.mime_type || 'application/octet-stream',
-        fileVisibility
+        fileVisibility,
+        expectedDisposition
       );
     } catch (metaErr: any) {
       console.warn('Could not apply Cache-Control metadata on S3 object:', metaErr.message);
@@ -641,7 +875,7 @@ export async function PUT(req: NextRequest) {
     fileId: fileRow?.id || undefined,
     fileName: fileRow?.original_name || undefined,
     ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-    message: `File confirmed in S3 landing zone for ticket ${ticketId} (visibility=${fileVisibility})`,
+    message: `File confirmed in S3 landing zone for ticket ${ticketId} (visibility=${fileVisibility}, verifiedSize=${actualSize}, verifiedMime=${actualMime})`,
   });
 
   return NextResponse.json(
@@ -657,7 +891,16 @@ export async function PUT(req: NextRequest) {
       s3Status: 'uploaded_to_landing',
       s3Landing: fileRow?.s3_pending_key || null,
       cloudfrontUrl: fileVisibility === 'public' ? publicCfUrl : null,
-      tokenVerified: Boolean(confirmToken),
+      tokenVerified: true,
+      headVerification: {
+        verified: true,
+        actualSizeBytes: actualSize,
+        actualContentType: actualMime,
+        actualCacheControl: s3CacheControl || headMeta.cacheControl,
+        actualContentDisposition:
+          expectedDisposition === 'attachment' ? 'attachment' : headMeta.contentDisposition,
+        eTag: headMeta.eTag,
+      },
     },
     { status: 200, headers: corsHeaders }
   );
