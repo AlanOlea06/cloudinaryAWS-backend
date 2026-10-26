@@ -180,7 +180,7 @@ export async function POST(
     }
 
     // If already processed and caller provided a webhookUrl, dispatch the HMAC-SHA256 webhook directly
-    if (fileRow.status === 'processed' && webhookUrl) {
+    if (fileRow.s3_processed_key && webhookUrl) {
       const visibility =
         String(fileRow.visibility || 'private').toLowerCase() === 'public' ? 'public' : 'private';
       const webhookRes = await dispatchFileWebhook({
@@ -210,7 +210,8 @@ export async function POST(
         {
           status: webhookRes.delivered ? 'success' : 'webhook_failed',
           fileId: fileRow.id,
-          processingStatus: fileRow.status,
+          processingStatus: 'processed',
+          dbStatus: fileRow.status,
           scanStatus: fileRow.scan_status || 'not_scanned',
           webhook: webhookRes,
         },
