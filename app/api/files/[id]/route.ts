@@ -108,13 +108,8 @@ export async function GET(
       message: `Solicitud de lectura para archivo '${fileRow.original_name}' (visibility=${fileRow.visibility || 'private'}).`,
     });
 
-    // Determinar la ruta física en S3:
-    let s3Key = fileRow.s3_pending_key;
-    if (fileRow.status === 'processed' && fileRow.s3_processed_key) {
-      s3Key = fileRow.s3_processed_key;
-    } else if (!s3Key && fileRow.s3_processed_key) {
-      s3Key = fileRow.s3_processed_key;
-    }
+    // Determinar la ruta física en S3 (priorizar siempre s3_processed_key en static/files/ cuando existe):
+    const s3Key = fileRow.s3_processed_key || fileRow.s3_pending_key;
 
     if (!s3Key) {
       return NextResponse.json(

@@ -324,10 +324,7 @@ export async function GET(
       );
     }
 
-    const s3Key =
-      fileRow.status === 'processed' && fileRow.s3_processed_key
-        ? fileRow.s3_processed_key
-        : fileRow.s3_processed_key || fileRow.s3_pending_key;
+    const s3Key = fileRow.s3_processed_key || fileRow.s3_pending_key;
 
     if (!s3Key) {
       return NextResponse.json(

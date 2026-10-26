@@ -166,12 +166,13 @@ async function runMaintenanceCron(req: NextRequest) {
   }
 
   // ==========================================================================
-  // 3. REINTENTAR PROCESAMIENTOS PENDIENTES O FALLIDOS (retry_count < 3)
+  // 3. REINTENTAR PROCESAMIENTOS PENDIENTES O FALLIDOS (s3_processed_key IS NULL y retry_count < 3)
   // ==========================================================================
-  let retryQuery = supabase
+  let retryQuery: any = supabase
     .from('files')
     .select('*')
     .in('status', ['completed', 'failed'])
+    .is('s3_processed_key', null)
     .not('s3_pending_key', 'is', null)
     .lt('retry_count', 3);
 
@@ -186,12 +187,11 @@ async function runMaintenanceCron(req: NextRequest) {
 
     const head = await headS3Object(row.s3_pending_key);
     if (!head.exists) {
-      // Object no longer in pending -> mark failed and clear pending key
+      // Object no longer in pending -> mark failed
       await supabase
         .from('files')
         .update({
           status: 'failed',
-          s3_pending_key: null,
           retry_count: Number(row.retry_count || 0) + 1,
           error_message: 'Objeto pendiente ya no existe en S3 durante reintento de Cron.',
           updated_at: new Date().toISOString(),

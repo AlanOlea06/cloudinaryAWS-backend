@@ -175,7 +175,7 @@ export async function processUpload(
   }
 
   // Idempotency: if already processed and has s3_processed_key
-  if (fileRow.status === 'processed' && fileRow.s3_processed_key) {
+  if (fileRow.s3_processed_key && (fileRow.status === 'completed' || fileRow.status === 'processed')) {
     return {
       success: true,
       fileId,
@@ -293,7 +293,7 @@ export async function processUpload(
     // 6. Delete original object from static/pending/
     await deleteS3Object(pendingKey);
 
-    // 7. Update database record: status = 'processed', scan_status = 'not_scanned'
+    // 7. Update database record: status = 'completed' (files_status_check enum), s3_processed_key = finalKey, scan_status = 'not_scanned'
     // Private files NEVER store or return cloudfront_url.
     const publicCfUrl = visibility === 'public' ? getBaseCloudFrontUrl(finalKey) : null;
     const nowIso = new Date().toISOString();
@@ -305,7 +305,7 @@ export async function processUpload(
         size_bytes: processedSizeBytes,
         sha256_hash: sha256Hash,
         cloudfront_url: publicCfUrl,
-        status: 'processed',
+        status: 'completed',
         scan_status: 'not_scanned',
         error_message: null,
         completed_at: fileRow.completed_at || nowIso,
