@@ -489,35 +489,6 @@
       }
     },
     {
-      "name": "3.3. Descargar Archivo Privado por Proxy Seguro (GET /api/files/:id/content)",
-      "request": {
-        "method": "GET",
-        "header": [
-          {
-            "key": "x-api-key",
-            "value": "{{apiKey}}"
-          },
-          {
-            "key": "x-user-id",
-            "value": "{{userId}}"
-          }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/files/{{fileId}}/content",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "api",
-            "files",
-            "{{fileId}}",
-            "content"
-          ]
-        },
-        "description": "Descarga archivos privados directamente vía proxy seguro (hasta 4 MB) sin exponer claves internas de S3 al cliente."
-      }
-    },
-    {
       "name": "4. Consultar Logs de Auditoría (GET /api/logs)",
       "request": {
         "method": "GET",
