@@ -469,10 +469,6 @@ export async function POST(req: NextRequest) {
           name: targetOrg.name,
           slug: targetOrg.slug,
         },
-        s3Hierarchy: {
-          landingZone: landingZoneKey,
-          permanentTarget: null,
-        },
         metadata: {
           userId: user.id,
           orgId: targetOrg.id,
@@ -891,8 +887,7 @@ export async function PUT(req: NextRequest) {
         visibility: fileVisibility,
         ownerUserId: fileRow?.user_id || null,
         cacheControl: s3CacheControl || getCacheControlForVisibility(fileVisibility, false),
-        s3Status: 'uploaded_to_landing',
-        s3Landing: fileRow?.s3_pending_key || null,
+        storageStatus: 'uploaded_to_landing',
         cloudfrontUrl: fileVisibility === 'public' ? publicCfUrl : null,
         tokenVerified: true,
         headVerification: {
@@ -951,9 +946,7 @@ export async function PUT(req: NextRequest) {
       visibility: fileVisibility,
       ownerUserId: fileRow?.user_id || null,
       cacheControl: getCacheControlForVisibility(fileVisibility, false),
-      s3Status: 'processed_to_final',
-      s3PendingDeleted: procResult.s3PendingKeyDeleted,
-      s3ProcessedKey: procResult.s3ProcessedKey,
+      storageStatus: 'processed',
       cloudfrontUrl: fileVisibility === 'public' ? procResult.cloudfrontUrl : null,
       tokenVerified: true,
       headVerification: {

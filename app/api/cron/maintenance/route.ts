@@ -59,19 +59,17 @@ async function runMaintenanceCron(req: NextRequest) {
 
   const summary = {
     executedAt: new Date(nowMs).toISOString(),
-    expiredTicketsDeleted: [] as Array<{ fileId: string; ticketId: string; s3KeyDeleted: string | null }>,
+    expiredTicketsDeleted: [] as Array<{ fileId: string; ticketId: string; storageCleaned: boolean }>,
     abandonedMultipartAborted: [] as Array<{
       fileId: string;
       ticketId: string;
-      s3UploadId: string;
-      s3Key: string | null;
+      aborted: boolean;
     }>,
     retriedProcessings: [] as Array<{
       fileId: string;
       ticketId: string;
       success: boolean;
       newStatus: string;
-      s3ProcessedKey: string | null;
     }>,
   };
 
@@ -114,13 +112,13 @@ async function runMaintenanceCron(req: NextRequest) {
       ticketId: row.ticket_id || undefined,
       fileName: row.original_name || undefined,
       ipAddress: clientIp,
-      message: `Cron de mantenimiento eliminó ticket vencido '${row.ticket_id}' (fileId=${row.id}, s3Key='${deletedKey}').`,
+      message: `Cron de mantenimiento eliminó ticket vencido '${row.ticket_id}' (fileId=${row.id}).`,
     });
 
     summary.expiredTicketsDeleted.push({
       fileId: row.id,
       ticketId: row.ticket_id,
-      s3KeyDeleted: deletedKey,
+      storageCleaned: Boolean(deletedKey),
     });
   }
 
@@ -168,14 +166,13 @@ async function runMaintenanceCron(req: NextRequest) {
       ticketId: row.ticket_id || undefined,
       fileName: row.original_name || undefined,
       ipAddress: clientIp,
-      message: `Cron de mantenimiento abortó subida Multipart abandonada (uploadId='${uploadId}', s3Key='${s3Key}').`,
+      message: `Cron de mantenimiento abortó subida Multipart abandonada para ticket '${row.ticket_id}'.`,
     });
 
     summary.abandonedMultipartAborted.push({
       fileId: row.id,
       ticketId: row.ticket_id,
-      s3UploadId: uploadId,
-      s3Key,
+      aborted: true,
     });
   }
 
@@ -224,7 +221,6 @@ async function runMaintenanceCron(req: NextRequest) {
       ticketId: row.ticket_id,
       success: procRes.success,
       newStatus: procRes.status,
-      s3ProcessedKey: procRes.s3ProcessedKey,
     });
   }
 

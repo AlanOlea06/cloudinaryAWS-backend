@@ -48,11 +48,16 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  const sanitizedFiles = (files || []).map((f: any) => {
+    const { s3_pending_key, s3_processed_key, s3_upload_id, ...safeFile } = f;
+    return safeFile;
+  });
+
   return NextResponse.json(
     {
       status: 'success',
-      count: (files || []).length,
-      files: files || [],
+      count: sanitizedFiles.length,
+      files: sanitizedFiles,
     },
     { status: 200, headers: corsHeaders }
   );
@@ -182,8 +187,7 @@ export async function DELETE(req: NextRequest) {
         userId: targetUserId || null,
         deletedFilesCount: deletedFileIds.length,
         deletedFileIds,
-        deletedS3KeysCount: deletedS3Keys.length,
-        deletedS3Keys,
+        deletedS3ObjectsCount: deletedS3Keys.length,
         abortedMultiparts,
       },
       { status: 200, headers: corsHeaders }

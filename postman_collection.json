@@ -5,24 +5,96 @@
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "baseUrl", "value": "https://cloudinary-aws-backend.vercel.app", "type": "string" },
-    { "key": "adminSecret", "value": "", "type": "secret" },
-    { "key": "cronSecret", "value": "", "type": "secret" },
-    { "key": "apiKey", "value": "", "type": "secret" },
-    { "key": "keyId", "value": "", "type": "string" },
-    { "key": "orgId", "value": "11111111-1111-1111-1111-111111111111", "type": "string" },
-    { "key": "userId", "value": "a1111111-0000-0000-0000-000000000001", "type": "string" },
-    { "key": "otherOrgUserId", "value": "b2222222-0000-0000-0000-000000000001", "type": "string" },
-    { "key": "fileName", "value": "imagen de prueba 1.jpg", "type": "string" },
-    { "key": "extension", "value": ".jpg", "type": "string" },
-    { "key": "fileType", "value": "image/jpeg", "type": "string" },
-    { "key": "fileSize", "value": "1024", "type": "string" },
-    { "key": "visibility", "value": "private", "type": "string" },
-    { "key": "ticketId", "value": "", "type": "string" },
-    { "key": "fileId", "value": "", "type": "string" },
-    { "key": "confirmToken", "value": "", "type": "string" },
-    { "key": "uploadUrl", "value": "", "type": "string" },
-    { "key": "downloadUrl", "value": "", "type": "string" }
+    {
+      "key": "baseUrl",
+      "value": "https://cloudinary-aws-backend.vercel.app",
+      "type": "string"
+    },
+    {
+      "key": "adminSecret",
+      "value": "",
+      "type": "secret"
+    },
+    {
+      "key": "cronSecret",
+      "value": "",
+      "type": "secret"
+    },
+    {
+      "key": "apiKey",
+      "value": "",
+      "type": "secret"
+    },
+    {
+      "key": "keyId",
+      "value": "f987452a-8a73-4c0e-b955-24c203e3070f",
+      "type": "string"
+    },
+    {
+      "key": "orgId",
+      "value": "11111111-1111-1111-1111-111111111111",
+      "type": "string"
+    },
+    {
+      "key": "userId",
+      "value": "a1111111-0000-0000-0000-000000000001",
+      "type": "string"
+    },
+    {
+      "key": "otherOrgUserId",
+      "value": "b2222222-0000-0000-0000-000000000001",
+      "type": "string"
+    },
+    {
+      "key": "fileName",
+      "value": "imagen de prueba 1.jpg",
+      "type": "string"
+    },
+    {
+      "key": "extension",
+      "value": ".jpg",
+      "type": "string"
+    },
+    {
+      "key": "fileType",
+      "value": "image/jpeg",
+      "type": "string"
+    },
+    {
+      "key": "fileSize",
+      "value": "1024",
+      "type": "string"
+    },
+    {
+      "key": "visibility",
+      "value": "private",
+      "type": "string"
+    },
+    {
+      "key": "ticketId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "fileId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "confirmToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "uploadUrl",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "downloadUrl",
+      "value": "",
+      "type": "string"
+    }
   ],
   "item": [
     {
@@ -32,8 +104,13 @@
         "header": [],
         "url": {
           "raw": "{{baseUrl}}/api/health",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "health"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "health"
+          ]
         },
         "description": "Única ruta pública bajo /api/*. Devuelve 200 OK sin exponer nombre del bucket ni datos sensibles."
       }
@@ -60,18 +137,34 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "x-admin-secret", "value": "{{adminSecret}}", "description": "Obligatorio (ADMIN_API_SECRET)" }
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-admin-secret",
+            "value": "{{adminSecret}}",
+            "description": "Obligatorio (ADMIN_API_SECRET)"
+          }
         ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"org_id\": \"{{orgId}}\",\n  \"user_id\": null,\n  \"name\": \"Backend Organization Key\",\n  \"can_read\": true,\n  \"can_upload\": true,\n  \"can_delete\": true\n}",
-          "options": { "raw": { "language": "json" } }
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
           "raw": "{{baseUrl}}/api/keys",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "keys"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "keys"
+          ]
         },
         "description": "Crea una API Key de organización (user_id: null) para uso en el backend del cliente. Exige x-admin-secret."
       }
@@ -81,14 +174,26 @@
       "request": {
         "method": "GET",
         "header": [
-          { "key": "x-admin-secret", "value": "{{adminSecret}}", "description": "Obligatorio (ADMIN_API_SECRET)" }
+          {
+            "key": "x-admin-secret",
+            "value": "{{adminSecret}}",
+            "description": "Obligatorio (ADMIN_API_SECRET)"
+          }
         ],
         "url": {
           "raw": "{{baseUrl}}/api/keys?org_id={{orgId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "keys"],
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "keys"
+          ],
           "query": [
-            { "key": "org_id", "value": "{{orgId}}" }
+            {
+              "key": "org_id",
+              "value": "{{orgId}}"
+            }
           ]
         },
         "description": "Lista las API Keys de la organización sin exponer hashes ni secretos. Exige x-admin-secret."
@@ -99,15 +204,30 @@
       "request": {
         "method": "DELETE",
         "header": [
-          { "key": "x-admin-secret", "value": "{{adminSecret}}", "description": "Obligatorio (ADMIN_API_SECRET)" }
+          {
+            "key": "x-admin-secret",
+            "value": "{{adminSecret}}",
+            "description": "Obligatorio (ADMIN_API_SECRET)"
+          }
         ],
         "url": {
           "raw": "{{baseUrl}}/api/keys?id={{keyId}}&mode=delete",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "keys"],
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "keys"
+          ],
           "query": [
-            { "key": "id", "value": "{{keyId}}" },
-            { "key": "mode", "value": "delete" }
+            {
+              "key": "id",
+              "value": "{{keyId}}"
+            },
+            {
+              "key": "mode",
+              "value": "delete"
+            }
           ]
         },
         "description": "Elimina o revoca una API Key por ID. Exige x-admin-secret."
@@ -134,19 +254,39 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "x-api-key", "value": "{{apiKey}}", "description": "API Key de la organización (backend)" },
-          { "key": "x-user-id", "value": "{{userId}}", "description": "UUID del usuario final validado contra la organización de la llave" }
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "description": "API Key de la organización (backend)"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}",
+            "description": "UUID del usuario final validado contra la organización de la llave"
+          }
         ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"fileName\": \"{{fileName}}\",\n  \"extension\": \"{{extension}}\",\n  \"fileType\": \"{{fileType}}\",\n  \"fileSize\": {{fileSize}},\n  \"visibility\": \"{{visibility}}\"\n}",
-          "options": { "raw": { "language": "json" } }
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
           "raw": "{{baseUrl}}/api/upload",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "upload"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "upload"
+          ]
         },
         "description": "Sección 3: Toma orgId y userId exclusivamente del contexto validado (x-api-key + x-user-id) e ignora userId/orgId del body."
       }
@@ -156,19 +296,38 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "x-api-key", "value": "{{apiKey}}" },
-          { "key": "x-user-id", "value": "{{otherOrgUserId}}", "description": "Usuario de Organización 2 usando llave de Organización 1" }
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{otherOrgUserId}}",
+            "description": "Usuario de Organización 2 usando llave de Organización 1"
+          }
         ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"fileName\": \"{{fileName}}\",\n  \"extension\": \"{{extension}}\",\n  \"fileType\": \"{{fileType}}\",\n  \"fileSize\": {{fileSize}},\n  \"visibility\": \"private\"\n}",
-          "options": { "raw": { "language": "json" } }
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
           "raw": "{{baseUrl}}/api/upload",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "upload"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "upload"
+          ]
         },
         "description": "Verifica que el middleware bloquee con 403 FORBIDDEN_USER_ORG_MISMATCH cuando x-user-id pertenece a otra organización."
       }
@@ -178,18 +337,33 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "x-api-key", "value": "{{apiKey}}" }
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          }
         ],
         "body": {
           "mode": "raw",
           "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"orgId\": \"{{orgId}}\",\n  \"fileName\": \"{{fileName}}\",\n  \"extension\": \"{{extension}}\",\n  \"fileType\": \"{{fileType}}\",\n  \"fileSize\": {{fileSize}},\n  \"visibility\": \"private\"\n}",
-          "options": { "raw": { "language": "json" } }
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
         },
         "url": {
           "raw": "{{baseUrl}}/api/upload",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "upload"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "upload"
+          ]
         },
         "description": "Demuestra que enviar userId/orgId en el body es ignorado y que una llave sin user_id fijo exige la cabecera x-user-id (400 MISSING_END_USER_ID)."
       }
@@ -199,13 +373,24 @@
       "request": {
         "method": "PUT",
         "header": [
-          { "key": "Content-Type", "value": "{{fileType}}" },
-          { "key": "Cache-Control", "value": "private, no-store, no-cache, max-age=0, must-revalidate" }
+          {
+            "key": "Content-Type",
+            "value": "{{fileType}}"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "private, no-store, no-cache, max-age=0, must-revalidate"
+          }
         ],
-        "body": { "mode": "file", "file": {} },
+        "body": {
+          "mode": "file",
+          "file": {}
+        },
         "url": {
           "raw": "{{uploadUrl}}",
-          "host": ["{{uploadUrl}}"]
+          "host": [
+            "{{uploadUrl}}"
+          ]
         },
         "description": "Sube el binario directamente a S3 con las cabeceras firmadas en X-Amz-SignedHeaders."
       }
@@ -215,16 +400,33 @@
       "request": {
         "method": "PUT",
         "header": [
-          { "key": "x-api-key", "value": "{{apiKey}}" },
-          { "key": "x-user-id", "value": "{{userId}}" }
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
         ],
         "url": {
           "raw": "{{baseUrl}}/api/upload?ticketId={{ticketId}}&token={{confirmToken}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "upload"],
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "upload"
+          ],
           "query": [
-            { "key": "ticketId", "value": "{{ticketId}}" },
-            { "key": "token", "value": "{{confirmToken}}" }
+            {
+              "key": "ticketId",
+              "value": "{{ticketId}}"
+            },
+            {
+              "key": "token",
+              "value": "{{confirmToken}}"
+            }
           ]
         },
         "description": "Verifica firma HMAC del ticket, comprueba objeto en S3 (HeadObject) y procesa el archivo hacia static/files/."
@@ -249,13 +451,25 @@
       "request": {
         "method": "GET",
         "header": [
-          { "key": "x-api-key", "value": "{{apiKey}}" },
-          { "key": "x-user-id", "value": "{{userId}}" }
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
         ],
         "url": {
           "raw": "{{baseUrl}}/api/files/{{fileId}}",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "files", "{{fileId}}"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "files",
+            "{{fileId}}"
+          ]
         },
         "description": "Para archivos privados valida que x-user-id sea el propietario y devuelve URL prefirmada de S3 (5 min). Para públicos devuelve URL de CloudFront."
       }
@@ -267,9 +481,40 @@
         "header": [],
         "url": {
           "raw": "{{downloadUrl}}",
-          "host": ["{{downloadUrl}}"]
+          "host": [
+            "{{downloadUrl}}"
+          ]
         },
         "description": "Descarga el archivo directamente desde S3 (privado) o CloudFront (público)."
+      }
+    },
+    {
+      "name": "3.3. Descargar Archivo Privado por Proxy Seguro (GET /api/files/:id/content)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/files/{{fileId}}/content",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "files",
+            "{{fileId}}",
+            "content"
+          ]
+        },
+        "description": "Descarga archivos privados directamente vía proxy seguro (hasta 4 MB) sin exponer claves internas de S3 al cliente."
       }
     },
     {
@@ -277,12 +522,21 @@
       "request": {
         "method": "GET",
         "header": [
-          { "key": "x-admin-secret", "value": "{{adminSecret}}", "description": "Obligatorio (ADMIN_API_SECRET)" }
+          {
+            "key": "x-admin-secret",
+            "value": "{{adminSecret}}",
+            "description": "Obligatorio (ADMIN_API_SECRET)"
+          }
         ],
         "url": {
           "raw": "{{baseUrl}}/api/logs",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "logs"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "logs"
+          ]
         },
         "description": "Consulta la bitácora service_logs. Exige x-admin-secret."
       }
@@ -292,12 +546,21 @@
       "request": {
         "method": "GET",
         "header": [
-          { "key": "x-admin-secret", "value": "{{adminSecret}}", "description": "Obligatorio (ADMIN_API_SECRET)" }
+          {
+            "key": "x-admin-secret",
+            "value": "{{adminSecret}}",
+            "description": "Obligatorio (ADMIN_API_SECRET)"
+          }
         ],
         "url": {
           "raw": "{{baseUrl}}/api/records",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "records"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "records"
+          ]
         },
         "description": "Consulta registros administrativos en public.files. Exige x-admin-secret."
       }
@@ -307,12 +570,21 @@
       "request": {
         "method": "GET",
         "header": [
-          { "key": "x-admin-secret", "value": "{{adminSecret}}", "description": "Obligatorio (ADMIN_API_SECRET)" }
+          {
+            "key": "x-admin-secret",
+            "value": "{{adminSecret}}",
+            "description": "Obligatorio (ADMIN_API_SECRET)"
+          }
         ],
         "url": {
           "raw": "{{baseUrl}}/api/users",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "users"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "users"
+          ]
         },
         "description": "Lista organizaciones y usuarios registrados. Exige x-admin-secret."
       }
@@ -322,12 +594,22 @@
       "request": {
         "method": "GET",
         "header": [
-          { "key": "Authorization", "value": "Bearer {{cronSecret}}", "description": "Obligatorio (Bearer CRON_SECRET)" }
+          {
+            "key": "Authorization",
+            "value": "Bearer {{cronSecret}}",
+            "description": "Obligatorio (Bearer CRON_SECRET)"
+          }
         ],
         "url": {
           "raw": "{{baseUrl}}/api/cron/maintenance",
-          "host": ["{{baseUrl}}"],
-          "path": ["api", "cron", "maintenance"]
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "cron",
+            "maintenance"
+          ]
         },
         "description": "Ejecuta limpieza de tickets vencidos, aborto de multiparts abandonados y reintentos. Exige Authorization: Bearer <CRON_SECRET>."
       }

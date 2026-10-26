@@ -70,10 +70,15 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    const sanitizedRecords = (data || []).map((row: any) => {
+      const { s3_pending_key, s3_processed_key, s3_upload_id, ...safeRow } = row;
+      return safeRow;
+    });
+
     return NextResponse.json(
       {
-        count: data?.length || 0,
-        records: data || [],
+        count: sanitizedRecords.length,
+        records: sanitizedRecords,
       },
       { status: 200, headers: corsHeaders }
     );

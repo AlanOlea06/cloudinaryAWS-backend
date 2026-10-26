@@ -24,7 +24,6 @@ export interface WebhookPayload {
   mimeType: string;
   sizeBytes: number;
   sha256Hash: string | null;
-  s3ProcessedKey: string | null;
   cloudfrontUrl: string | null;
   errorMessage: string | null;
 }

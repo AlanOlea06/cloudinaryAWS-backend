@@ -47,8 +47,6 @@ export interface ProcessUploadResult {
   scanStatus: string;
   code?: string;
   message: string;
-  s3PendingKeyDeleted: string | null;
-  s3ProcessedKey: string | null;
   cloudfrontUrl: string | null;
   originalSizeBytes: number | null;
   processedSizeBytes: number | null;
@@ -162,8 +160,6 @@ export async function processUpload(
       scanStatus: 'not_scanned',
       code: 'FILE_NOT_FOUND',
       message: `El archivo '${fileId}' no existe en la base de datos.`,
-      s3PendingKeyDeleted: null,
-      s3ProcessedKey: null,
       cloudfrontUrl: null,
       originalSizeBytes: null,
       processedSizeBytes: null,
@@ -182,8 +178,6 @@ export async function processUpload(
       status: 'processed',
       scanStatus: fileRow.scan_status || 'not_scanned',
       message: `El archivo '${fileId}' ya había sido procesado previamente.`,
-      s3PendingKeyDeleted: null,
-      s3ProcessedKey: fileRow.s3_processed_key,
       cloudfrontUrl: fileRow.visibility === 'public' ? fileRow.cloudfront_url : null,
       originalSizeBytes: Number(fileRow.size_bytes),
       processedSizeBytes: Number(fileRow.size_bytes),
@@ -201,7 +195,7 @@ export async function processUpload(
   const extension = String(fileRow.extension || '').toLowerCase().trim();
 
   if (!pendingKey) {
-    const errMsg = 'El registro no cuenta con s3_pending_key para procesar.';
+    const errMsg = 'El registro no cuenta con archivo pendiente para procesar.';
     await supabase
       .from('files')
       .update({
@@ -219,8 +213,6 @@ export async function processUpload(
       scanStatus: 'not_scanned',
       code: 'MISSING_PENDING_KEY',
       message: errMsg,
-      s3PendingKeyDeleted: null,
-      s3ProcessedKey: null,
       cloudfrontUrl: null,
       originalSizeBytes: null,
       processedSizeBytes: null,
@@ -348,7 +340,6 @@ export async function processUpload(
         mimeType: detectedMime,
         sizeBytes: processedSizeBytes,
         sha256Hash,
-        s3ProcessedKey: finalKey,
         cloudfrontUrl: publicCfUrl,
         errorMessage: null,
       },
@@ -362,9 +353,7 @@ export async function processUpload(
       fileId,
       status: 'processed',
       scanStatus: 'not_scanned',
-      message: `Archivo procesado exitosamente y promovido a '${finalKey}'.`,
-      s3PendingKeyDeleted: pendingKey,
-      s3ProcessedKey: finalKey,
+      message: 'Archivo procesado exitosamente.',
       cloudfrontUrl: publicCfUrl,
       originalSizeBytes,
       processedSizeBytes,
@@ -429,7 +418,6 @@ export async function processUpload(
         mimeType: declaredMime,
         sizeBytes: Number(fileRow.size_bytes || 0),
         sha256Hash: null,
-        s3ProcessedKey: null,
         cloudfrontUrl: null,
         errorMessage,
       },
@@ -445,8 +433,6 @@ export async function processUpload(
       scanStatus: 'not_scanned',
       code: 'PROCESS_UPLOAD_FAILED',
       message: errorMessage,
-      s3PendingKeyDeleted: deletedPending,
-      s3ProcessedKey: null,
       cloudfrontUrl: null,
       originalSizeBytes: Number(fileRow.size_bytes || 0),
       processedSizeBytes: null,

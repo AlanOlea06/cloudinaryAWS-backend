@@ -124,7 +124,6 @@ async function handleCleanup(req: NextRequest) {
         status: 'cleaned',
         dbDeletedCount: records?.length || 0,
         s3DeletedCount: s3Result.count,
-        s3DeletedKeys: s3Result.keys,
         message: 'Entorno de pruebas limpiado exitosamente (Base de datos + AWS S3).',
       },
       { status: 200, headers: corsHeaders }

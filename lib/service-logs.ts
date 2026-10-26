@@ -20,8 +20,6 @@ export interface ServiceLog {
   resourceType?: string | null;
   visibility?: string | null;
   uploadUrl?: string | null;
-  s3Landing?: string | null;
-  s3Permanent?: string | null;
   ipAddress?: string | null;
   message?: string | null;
   details?: any; // Kept optional for backward compatibility in UI, never stored as JSON in DB
@@ -112,8 +110,6 @@ export async function addServiceLog(logInput: {
     resourceType: legacyDetails.resourceType || null,
     visibility: legacyDetails.visibility || null,
     uploadUrl: legacyDetails.uploadUrl || null,
-    s3Landing: legacyDetails.s3Landing || null,
-    s3Permanent: legacyDetails.s3Permanent || null,
     ipAddress,
     message,
     details: legacyDetails,
@@ -239,8 +235,6 @@ export async function getServiceLogs(): Promise<ServiceLog[]> {
         const fileSize = matchedFile?.size_bytes ?? row.details?.fileSize ?? null;
         const resourceType = matchedFile?.resource_type || row.details?.resourceType || null;
         const visibility = matchedFile?.visibility || row.details?.visibility || null;
-        const s3Landing = matchedFile?.s3_pending_key || row.details?.s3Landing || null;
-        const s3Permanent = matchedFile?.s3_processed_key || row.details?.s3Permanent || null;
         const method = row.http_method || row.details?.method || (action === 'S3_UPLOAD_CONFIRMED' ? 'PUT' : 'POST');
         const ipAddress = row.ip_address || row.details?.ip || null;
         const message = row.message || row.details?.message || row.details?.reason || row.details?.alert || null;
@@ -265,8 +259,6 @@ export async function getServiceLogs(): Promise<ServiceLog[]> {
           resourceType,
           visibility,
           uploadUrl: null,
-          s3Landing,
-          s3Permanent,
           ipAddress,
           message,
           details: {},

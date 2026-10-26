@@ -22,8 +22,6 @@ interface LogEntry {
   resourceType?: string | null;
   visibility?: string | null;
   uploadUrl?: string | null;
-  s3Landing?: string | null;
-  s3Permanent?: string | null;
   ipAddress?: string | null;
   message?: string | null;
   details?: any;
@@ -131,9 +129,6 @@ export default function ServiceLogsPage() {
               <th style={headerCellStyle}>mime_type</th>
               <th style={headerCellStyle}>size_bytes</th>
               <th style={headerCellStyle}>visibility</th>
-              <th style={headerCellStyle}>upload_url (link)</th>
-              <th style={headerCellStyle}>s3_pending_key</th>
-              <th style={headerCellStyle}>s3_processed_key</th>
               <th style={headerCellStyle}>ip_address</th>
               <th style={headerCellStyle}>message / detail</th>
             </tr>
@@ -141,7 +136,7 @@ export default function ServiceLogsPage() {
           <tbody>
             {logs.length === 0 ? (
               <tr style={{ backgroundColor: '#ffffff' }}>
-                <td colSpan={20} style={cellStyle}>
+                <td colSpan={18} style={cellStyle}>
                   Sin registros en service_logs.
                 </td>
               </tr>
@@ -159,9 +154,6 @@ export default function ServiceLogsPage() {
                 const mimeType = log.mimeType || details.mimeType || '-';
                 const fileSize = log.fileSize ?? details.fileSize ?? '-';
                 const visibility = log.visibility || details.visibility || '-';
-                const uploadUrl = log.uploadUrl || details.uploadUrl || '-';
-                const s3Landing = log.s3Landing || details.s3Landing || '-';
-                const s3Permanent = log.s3Permanent || details.s3Permanent || '-';
                 const ipAddress = log.ipAddress || details.ip || '-';
                 const message =
                   log.message ||
@@ -192,9 +184,6 @@ export default function ServiceLogsPage() {
                     <td style={cellStyle}>{mimeType}</td>
                     <td style={cellStyle}>{fileSize}</td>
                     <td style={cellStyle}>{visibility}</td>
-                    <td style={{ ...cellStyle, maxWidth: '320px' }}>{uploadUrl}</td>
-                    <td style={cellStyle}>{s3Landing}</td>
-                    <td style={cellStyle}>{s3Permanent}</td>
                     <td style={cellStyle}>{ipAddress}</td>
                     <td style={cellStyle}>{message}</td>
                   </tr>

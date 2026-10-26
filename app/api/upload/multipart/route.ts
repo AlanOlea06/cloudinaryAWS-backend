@@ -105,7 +105,6 @@ export async function GET(req: NextRequest) {
         ticketId: fileRow.ticket_id,
         fileId: fileRow.id,
         uploadId: fileRow.s3_upload_id,
-        s3PendingKey: fileRow.s3_pending_key,
         declaredSizeBytes: Number(fileRow.size_bytes || 0),
         totalUploadedBytes,
         partsCount: parts.length,
@@ -453,7 +452,7 @@ async function handleCreateMultipart(req: NextRequest, body: any) {
     fileId: insertedFile.id,
     fileName,
     ipAddress,
-    message: `Subida multipart iniciada (uploadId='${uploadId}', key='${pendingKey}', size=${numericSize} bytes, visibility=${normalizedVisibility}).`,
+    message: `Subida multipart iniciada (uploadId='${uploadId}', size=${numericSize} bytes, visibility=${normalizedVisibility}).`,
   });
 
   return NextResponse.json(
@@ -463,7 +462,6 @@ async function handleCreateMultipart(req: NextRequest, body: any) {
       ticketId,
       fileId: insertedFile.id,
       uploadId,
-      s3PendingKey: pendingKey,
       visibility: normalizedVisibility,
       cacheControl,
       contentDisposition,
@@ -757,9 +755,8 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
       scanStatus: processResult.scanStatus,
       visibility: fileRow.visibility,
       partsCompleted: partsToComplete.length,
-      s3PendingDeleted: processResult.s3PendingKeyDeleted,
-      s3ProcessedKey: processResult.s3ProcessedKey,
-      cloudfrontUrl: processResult.cloudfrontUrl,
+      storageStatus: 'processed',
+      cloudfrontUrl: fileRow.visibility === 'public' ? processResult.cloudfrontUrl : null,
       processing: {
         executed: true,
         exifStripped: processResult.exifStripped,

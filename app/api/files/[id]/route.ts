@@ -525,7 +525,7 @@ export async function DELETE(
       ticketId: fileRow.ticket_id,
       fileName: fileRow.original_name,
       ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-      message: `File '${fileRow.original_name}' permanently deleted from S3 (keys: ${deletedS3Keys.join(', ')}) and Supabase.`,
+      message: `File '${fileRow.original_name}' permanently deleted from S3 (${deletedS3Keys.length} objects removed) and Supabase.`,
     });
 
     return NextResponse.json(
@@ -534,9 +534,8 @@ export async function DELETE(
         message: `El archivo '${fileRow.original_name}' fue eliminado exitosamente de S3 y de Supabase.`,
         deletedFileId: fileId,
         ticketId: fileRow.ticket_id,
-        deletedS3Keys,
-        pendingKeyDeleted: Boolean(fileRow.s3_pending_key),
-        processedKeyDeleted: Boolean(fileRow.s3_processed_key),
+        storageCleaned: true,
+        deletedObjectsCount: deletedS3Keys.length,
         multipartAborted,
       },
       { status: 200, headers: corsHeaders }
