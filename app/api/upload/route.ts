@@ -19,6 +19,7 @@ import { getBaseCloudFrontUrl } from '@/lib/cloudfront';
 // [TEMPORARY-LAMBDA-FALLBACK: TASK-B6-IMPORT]
 // Búsqueda rápida para migrar/eliminar cuando exista AWS Lambda: "TEMPORARY-LAMBDA-FALLBACK"
 import { processUpload } from '@/lib/lambda-fallback/process-upload';
+import { checkOrganizationQuotas } from '@/lib/quotas';
 
 // CORS Headers
 const corsHeaders = {
@@ -319,6 +320,40 @@ export async function POST(req: NextRequest) {
           maxAllowedBytes: MAX_SINGLE_UPLOAD_BYTES,
         },
         { status: 413, headers: corsHeaders }
+      );
+    }
+
+    // CHECK 6 (Task B.13): Organization Quotas (max_storage_bytes & max_pending_tickets)
+    const quotaCheck = await checkOrganizationQuotas(orgId, fileSize, {
+      overrideMaxStorageBytes:
+        body.testMaxStorageBytes !== undefined ? Number(body.testMaxStorageBytes) : undefined,
+      overrideMaxPendingTickets:
+        body.testMaxPendingTickets !== undefined ? Number(body.testMaxPendingTickets) : undefined,
+    });
+
+    if (!quotaCheck.allowed) {
+      await addServiceLog({
+        method: req.method,
+        action: 'ORG_QUOTA_EXCEEDED',
+        status: quotaCheck.code || 'DENIED_QUOTA',
+        userId: user.id,
+        userName: user.name,
+        orgId: user.orgId,
+        orgName: userOrg?.name,
+        fileName,
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        message: `${quotaCheck.code}: ${quotaCheck.message}`,
+      });
+
+      return NextResponse.json(
+        {
+          error: quotaCheck.httpStatus === 429 ? 'Too Many Requests' : 'Payload Too Large',
+          code: quotaCheck.code,
+          method: req.method,
+          message: quotaCheck.message,
+          quotaUsage: quotaCheck.usage,
+        },
+        { status: quotaCheck.httpStatus || 429, headers: corsHeaders }
       );
     }
 

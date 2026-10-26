@@ -9,6 +9,8 @@ import {
 } from '@/lib/cloudfront';
 import {
   generatePresignedReadUrl,
+  abortS3MultipartUpload,
+  deleteS3Object,
   PRIVATE_NO_STORE_CACHE_CONTROL,
   PUBLIC_SHORT_TTL_CACHE_CONTROL,
 } from '@/lib/s3';
@@ -482,33 +484,33 @@ export async function DELETE(
       );
     }
 
-    // 3. Eliminar de AWS S3 si tiene s3_pending_key o s3_processed_key
-    const region = process.env.AWS_REGION || 'us-east-1';
-    const bucketName = process.env.AWS_S3_BUCKET_NAME || '';
-
-    if (bucketName && process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
-      const s3Client = new S3Client({
-        region,
-        credentials: {
-          accessKeyId: process.env.AWS_ACCESS_KEY_ID.trim(),
-          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY.trim(),
-        },
-      });
-
-      const keysToDelete = [fileRow.s3_pending_key, fileRow.s3_processed_key].filter(Boolean);
-      for (const k of keysToDelete) {
-        try {
-          await s3Client.send(new DeleteObjectCommand({
-            Bucket: bucketName.trim(),
-            Key: k,
-          }));
-        } catch (s3Err: any) {
-          console.warn(`Error eliminando ${k} de S3:`, s3Err.message);
-        }
+    // 3. Task B.10: Si tiene un multipart upload activo (s3_upload_id), abortarlo primero
+    let multipartAborted = false;
+    if (fileRow.s3_upload_id && fileRow.s3_pending_key) {
+      try {
+        await abortS3MultipartUpload(fileRow.s3_pending_key, fileRow.s3_upload_id);
+        multipartAborted = true;
+      } catch (abortErr: any) {
+        console.warn(`Error abortando multipart ${fileRow.s3_upload_id}:`, abortErr.message);
       }
     }
 
-    // 4. Eliminar el registro de public.files en Supabase
+    // 4. Task B.10: Eliminar de AWS S3 TANTO la clave pendiente (s3_pending_key) COMO la clave final (s3_processed_key)
+    const keysToDelete = Array.from(
+      new Set([fileRow.s3_pending_key, fileRow.s3_processed_key].filter(Boolean))
+    ) as string[];
+    const deletedS3Keys: string[] = [];
+
+    for (const k of keysToDelete) {
+      try {
+        await deleteS3Object(k);
+        deletedS3Keys.push(k);
+      } catch (s3Err: any) {
+        console.warn(`Error eliminando ${k} de S3:`, s3Err.message);
+      }
+    }
+
+    // 5. Eliminar el registro de public.files en Supabase
     const { error: delError } = await supabase
       .from('files')
       .delete()
@@ -521,18 +523,17 @@ export async function DELETE(
       );
     }
 
-    // 5. Registrar log de auditoría en service_logs (3NF puro relacional)
+    // 6. Registrar log de auditoría en service_logs (3NF puro relacional)
     await addServiceLog({
       method: 'DELETE',
       action: 'FILE_DELETED',
       status: 'ALLOWED',
       userId: fileRow.user_id,
       orgId: fileRow.org_id,
-      fileId: fileRow.id,
       ticketId: fileRow.ticket_id,
       fileName: fileRow.original_name,
       ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-      message: `File '${fileRow.original_name}' permanently deleted from S3 and Supabase.`,
+      message: `File '${fileRow.original_name}' permanently deleted from S3 (keys: ${deletedS3Keys.join(', ')}) and Supabase.`,
     });
 
     return NextResponse.json(
@@ -541,6 +542,10 @@ export async function DELETE(
         message: `El archivo '${fileRow.original_name}' fue eliminado exitosamente de S3 y de Supabase.`,
         deletedFileId: fileId,
         ticketId: fileRow.ticket_id,
+        deletedS3Keys,
+        pendingKeyDeleted: Boolean(fileRow.s3_pending_key),
+        processedKeyDeleted: Boolean(fileRow.s3_processed_key),
+        multipartAborted,
       },
       { status: 200, headers: corsHeaders }
     );

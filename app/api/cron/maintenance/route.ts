@@ -9,7 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { addServiceLog } from '@/lib/service-logs';
+import { addServiceLog, enforceIpAddressRetention } from '@/lib/service-logs';
 import {
   headS3Object,
   deleteS3Object,
@@ -214,9 +214,22 @@ async function runMaintenanceCron(req: NextRequest) {
     });
   }
 
+  // --------------------------------------------------------------------------
+  // 4. Task B.11: Enforce IP address retention policy in service_logs (default 30 days)
+  // --------------------------------------------------------------------------
+  const ipRetentionDays = Number(searchParams.get('ipRetentionDays') ?? 30);
+  const ipRetentionMinutesParam = searchParams.get('ipRetentionMinutes');
+  const ipRetentionResult = await enforceIpAddressRetention({
+    retentionDays: ipRetentionDays,
+    retentionMinutes:
+      ipRetentionMinutesParam !== null ? Number(ipRetentionMinutesParam) : undefined,
+  });
+
   return NextResponse.json(
     {
       status: 'success',
+      tasks: summary,
+      ipRetention: ipRetentionResult,
       ...summary,
     },
     { status: 200, headers: corsHeaders }

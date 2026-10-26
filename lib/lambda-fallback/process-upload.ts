@@ -302,7 +302,6 @@ export async function processUpload(
       .from('files')
       .update({
         s3_processed_key: finalKey,
-        s3_pending_key: null,
         size_bytes: processedSizeBytes,
         sha256_hash: sha256Hash,
         cloudfront_url: publicCfUrl,
@@ -315,6 +314,9 @@ export async function processUpload(
       .eq('id', fileId);
 
     if (updateErr) {
+      try {
+        await deleteS3Object(finalKey);
+      } catch {}
       throw new Error(`Error actualizando registro procesado en Supabase: ${updateErr.message}`);
     }
 
@@ -393,7 +395,6 @@ export async function processUpload(
       .update({
         status: 'failed',
         scan_status: 'not_scanned',
-        s3_pending_key: null,
         cloudfront_url: null,
         retry_count: newRetryCount,
         error_message: errorMessage,

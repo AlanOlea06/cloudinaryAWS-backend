@@ -1,0 +1,796 @@
+import { NextRequest, NextResponse } from 'next/server';
+import crypto from 'crypto';
+import { supabase } from '@/lib/supabase';
+import { addServiceLog } from '@/lib/service-logs';
+import {
+  validateAllowedFileType,
+  generateOpaqueS3Key,
+  createS3MultipartUpload,
+  generatePresignedUploadPartUrl,
+  listS3UploadedParts,
+  completeS3MultipartUpload,
+  abortS3MultipartUpload,
+  headS3Object,
+  deleteS3Object,
+} from '@/lib/s3';
+import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/ticket-token';
+// [TEMPORARY-LAMBDA-FALLBACK: TASK-B6-IMPORT-MULTIPART]
+import { processUpload } from '@/lib/lambda-fallback/process-upload';
+import { checkOrganizationQuotas } from '@/lib/quotas';
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, x-user-id',
+};
+
+// Maximum multipart upload size: 500 MB
+const MAX_MULTIPART_UPLOAD_BYTES = 500 * 1024 * 1024;
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: corsHeaders });
+}
+
+/**
+ * GET /api/upload/multipart?ticketId=<uuid> (or ?fileId=<uuid>)
+ * Task B.9: Lists already uploaded parts for an active S3 Multipart Upload so clients can resume.
+ */
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const ticketId = searchParams.get('ticketId');
+  const fileId = searchParams.get('fileId');
+  const validatedOrgId = req.headers.get('x-validated-org-id');
+  const validatedUserId = req.headers.get('x-validated-user-id');
+
+  if (!ticketId && !fileId) {
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'MISSING_IDENTIFIER',
+        message: 'Se requiere ticketId o fileId en los parámetros de consulta para listar partes.',
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  let query = supabase.from('files').select('*');
+  if (ticketId) {
+    query = query.eq('ticket_id', ticketId);
+  } else if (fileId) {
+    query = query.eq('id', fileId);
+  }
+
+  const { data: fileRow, error } = await query.maybeSingle();
+  if (error || !fileRow) {
+    return NextResponse.json(
+      { error: 'Not Found', code: 'MULTIPART_TICKET_NOT_FOUND', message: 'No se encontró el ticket multipart.' },
+      { status: 404, headers: corsHeaders }
+    );
+  }
+
+  if (validatedOrgId && fileRow.org_id !== validatedOrgId) {
+    return NextResponse.json(
+      { error: 'Forbidden', code: 'FORBIDDEN_TENANT_MISMATCH', message: 'El ticket pertenece a otra organización.' },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  if (validatedUserId && fileRow.user_id !== validatedUserId) {
+    return NextResponse.json(
+      { error: 'Forbidden', code: 'FORBIDDEN_NOT_OWNER', message: 'El ticket multipart pertenece a otro usuario.' },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  if (!fileRow.s3_upload_id || !fileRow.s3_pending_key) {
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'NO_ACTIVE_MULTIPART_UPLOAD',
+        message: 'Este registro no tiene un s3_upload_id activo para listar partes.',
+        status: fileRow.status,
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  try {
+    const parts = await listS3UploadedParts(fileRow.s3_pending_key, fileRow.s3_upload_id);
+    const totalUploadedBytes = parts.reduce((acc, p) => acc + (p.Size || 0), 0);
+
+    return NextResponse.json(
+      {
+        status: 'success',
+        action: 'list_parts',
+        ticketId: fileRow.ticket_id,
+        fileId: fileRow.id,
+        uploadId: fileRow.s3_upload_id,
+        s3PendingKey: fileRow.s3_pending_key,
+        declaredSizeBytes: Number(fileRow.size_bytes || 0),
+        totalUploadedBytes,
+        partsCount: parts.length,
+        parts,
+      },
+      { status: 200, headers: corsHeaders }
+    );
+  } catch (err: any) {
+    return NextResponse.json(
+      {
+        error: 'S3 ListParts Error',
+        code: 'S3_LIST_PARTS_FAILED',
+        message: err.message || 'No se pudieron listar las partes en S3.',
+      },
+      { status: 500, headers: corsHeaders }
+    );
+  }
+}
+
+/**
+ * POST /api/upload/multipart
+ * Task B.9: Handles:
+ *  - action: "create" (default) -> Initiates S3 Multipart Upload & creates DB ticket with s3_upload_id
+ *  - action: "presign_part" -> Generates Presigned PUT URL for a specific partNumber (1..10000) on demand
+ *  - action: "complete" -> Completes S3 Multipart Upload, verifies with HeadObject, and runs processUpload(fileId)
+ */
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const action = String(body.action || 'create').toLowerCase().trim();
+
+    if (action === 'presign_part') {
+      return handlePresignPart(req, body);
+    }
+    if (action === 'complete') {
+      return handleCompleteMultipart(req, body);
+    }
+    return handleCreateMultipart(req, body);
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: 'Internal Server Error', code: 'MULTIPART_POST_ERROR', message: err.message },
+      { status: 500, headers: corsHeaders }
+    );
+  }
+}
+
+/**
+ * PUT /api/upload/multipart
+ * Alias for action: "complete" to mirror PUT /api/upload.
+ */
+export async function PUT(req: NextRequest) {
+  try {
+    const body = await req.json();
+    return handleCompleteMultipart(req, body);
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: 'Internal Server Error', code: 'MULTIPART_PUT_ERROR', message: err.message },
+      { status: 500, headers: corsHeaders }
+    );
+  }
+}
+
+/**
+ * DELETE /api/upload/multipart?ticketId=<uuid> (or ?fileId=<uuid>)
+ * Task B.9: Aborts an active S3 Multipart Upload using AbortMultipartUploadCommand.
+ */
+export async function DELETE(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const ticketId = searchParams.get('ticketId');
+  const fileId = searchParams.get('fileId');
+  const deleteRow = searchParams.get('deleteRow') === 'true';
+  const validatedOrgId = req.headers.get('x-validated-org-id');
+  const validatedUserId = req.headers.get('x-validated-user-id');
+  const ipAddress = req.headers.get('x-forwarded-for') || '127.0.0.1';
+
+  if (!ticketId && !fileId) {
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'MISSING_IDENTIFIER',
+        message: 'Se requiere ticketId o fileId para abortar la subida multipart.',
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  let query = supabase.from('files').select('*');
+  if (ticketId) {
+    query = query.eq('ticket_id', ticketId);
+  } else if (fileId) {
+    query = query.eq('id', fileId);
+  }
+
+  const { data: fileRow, error } = await query.maybeSingle();
+  if (error || !fileRow) {
+    return NextResponse.json(
+      { error: 'Not Found', code: 'MULTIPART_TICKET_NOT_FOUND', message: 'No se encontró el ticket multipart.' },
+      { status: 404, headers: corsHeaders }
+    );
+  }
+
+  if (validatedOrgId && fileRow.org_id !== validatedOrgId) {
+    return NextResponse.json(
+      { error: 'Forbidden', code: 'FORBIDDEN_TENANT_MISMATCH', message: 'El ticket pertenece a otra organización.' },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  if (validatedUserId && fileRow.user_id !== validatedUserId) {
+    return NextResponse.json(
+      { error: 'Forbidden', code: 'FORBIDDEN_NOT_OWNER', message: 'El ticket multipart pertenece a otro usuario.' },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  let s3Aborted = false;
+  if (fileRow.s3_upload_id && fileRow.s3_pending_key) {
+    try {
+      await abortS3MultipartUpload(fileRow.s3_pending_key, fileRow.s3_upload_id);
+      s3Aborted = true;
+    } catch (abortErr: any) {
+      console.error('Error en AbortMultipartUploadCommand:', abortErr.message);
+    }
+  }
+
+  if (fileRow.s3_pending_key) {
+    try {
+      await deleteS3Object(fileRow.s3_pending_key);
+    } catch {}
+  }
+
+  if (deleteRow) {
+    await supabase.from('files').delete().eq('id', fileRow.id);
+  } else {
+    await supabase
+      .from('files')
+      .update({
+        status: 'failed',
+        s3_upload_id: null,
+        error_message: 'Multipart upload abortado explícitamente por el cliente.',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', fileRow.id);
+  }
+
+  await addServiceLog({
+    method: 'DELETE',
+    action: 'MULTIPART_UPLOAD_ABORTED',
+    status: 'ABORTED',
+    userId: fileRow.user_id,
+    orgId: fileRow.org_id,
+    ticketId: fileRow.ticket_id,
+    fileId: fileRow.status && !deleteRow ? fileRow.id : undefined,
+    fileName: fileRow.original_name,
+    ipAddress,
+    message: `Subida multipart abortada (uploadId='${fileRow.s3_upload_id}', s3Aborted=${s3Aborted}, deleteRow=${deleteRow}).`,
+  });
+
+  return NextResponse.json(
+    {
+      status: 'success',
+      action: 'abort',
+      ticketId: fileRow.ticket_id,
+      fileId: fileRow.id,
+      uploadIdAborted: fileRow.s3_upload_id,
+      s3Aborted,
+      rowDeleted: deleteRow,
+    },
+    { status: 200, headers: corsHeaders }
+  );
+}
+
+// ============================================================================
+// HANDLER 1: CREATE MULTIPART UPLOAD
+// ============================================================================
+async function handleCreateMultipart(req: NextRequest, body: any) {
+  const {
+    userId: bodyUserId,
+    orgId: bodyOrgId,
+    fileName = 'file.png',
+    fileType = 'image/png',
+    fileSize = 0,
+    visibility = 'private',
+  } = body;
+
+  const validatedOrgId = req.headers.get('x-validated-org-id');
+  const validatedUserId = req.headers.get('x-validated-user-id');
+  const ipAddress = req.headers.get('x-forwarded-for') || '127.0.0.1';
+
+  if (validatedOrgId && bodyOrgId && bodyOrgId !== validatedOrgId) {
+    return NextResponse.json(
+      {
+        error: 'Forbidden',
+        code: 'FORBIDDEN_TENANT_MISMATCH',
+        message: 'La llave API no pertenece a la organización solicitada.',
+      },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  // Decision 1-A: Block user impersonation
+  if (validatedUserId && bodyUserId && bodyUserId !== validatedUserId) {
+    await addServiceLog({
+      method: 'POST',
+      action: 'MULTIPART_IMPERSONATION_BLOCKED',
+      status: 'DENIED_USER_IMPERSONATION',
+      userId: validatedUserId,
+      orgId: validatedOrgId || bodyOrgId,
+      fileName,
+      ipAddress,
+      message: `Intento de suplantación bloqueado en multipart create: API Key pertenece a '${validatedUserId}', pero solicitó '${bodyUserId}'.`,
+    });
+
+    return NextResponse.json(
+      {
+        error: 'Forbidden',
+        code: 'FORBIDDEN_USER_IMPERSONATION',
+        message: 'El userId enviado no coincide con el propietario de la API Key autenticada.',
+      },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  const orgId = validatedOrgId || bodyOrgId;
+  const userId = validatedUserId || bodyUserId;
+
+  if (!userId || !orgId) {
+    return NextResponse.json(
+      { error: 'Bad Request', code: 'MISSING_IDENTITY', message: 'Se requiere userId y orgId.' },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  // Validate whitelist (Task A.4)
+  const typeValidation = validateAllowedFileType(fileName, fileType);
+  if (!typeValidation.valid) {
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: typeValidation.code,
+        message: typeValidation.message,
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  const numericSize = Number(fileSize);
+  if (!Number.isFinite(numericSize) || numericSize <= 0) {
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'INVALID_FILE_SIZE',
+        message: 'Debes declarar un fileSize entero positivo.',
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  if (numericSize > MAX_MULTIPART_UPLOAD_BYTES) {
+    return NextResponse.json(
+      {
+        error: 'Payload Too Large',
+        code: 'MULTIPART_SIZE_EXCEEDS_LIMIT',
+        message: `El tamaño declarado (${numericSize} bytes) supera el límite máximo multipart de ${MAX_MULTIPART_UPLOAD_BYTES} bytes.`,
+      },
+      { status: 413, headers: corsHeaders }
+    );
+  }
+
+  // Verify user belongs to org and has can_upload
+  const { data: userRow, error: userErr } = await supabase
+    .from('users')
+    .select('id, org_id, can_upload, role')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (userErr || !userRow || userRow.org_id !== orgId || !userRow.can_upload) {
+    return NextResponse.json(
+      {
+        error: 'Forbidden',
+        code: 'FORBIDDEN_UPLOAD_PERMISSION',
+        message: 'Usuario no válido o sin permiso de subida en la organización.',
+      },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  const normalizedVisibility: 'private' | 'public' =
+    String(visibility).toLowerCase() === 'public' ? 'public' : 'private';
+  const ext = typeValidation.extension || '.bin';
+  const normalizedMime = typeValidation.mimeType || fileType;
+
+  // Task B.13: Check organization quotas before initiating multipart upload
+  const quotaCheck = await checkOrganizationQuotas(orgId, numericSize, {
+    overrideMaxStorageBytes:
+      body.testMaxStorageBytes !== undefined ? Number(body.testMaxStorageBytes) : undefined,
+    overrideMaxPendingTickets:
+      body.testMaxPendingTickets !== undefined ? Number(body.testMaxPendingTickets) : undefined,
+  });
+
+  if (!quotaCheck.allowed) {
+    return NextResponse.json(
+      {
+        error: quotaCheck.httpStatus === 429 ? 'Too Many Requests' : 'Payload Too Large',
+        code: quotaCheck.code,
+        message: quotaCheck.message,
+        quotaUsage: quotaCheck.usage,
+      },
+      { status: quotaCheck.httpStatus || 429, headers: corsHeaders }
+    );
+  }
+
+  const ticketId = crypto.randomUUID();
+  const pendingKey = generateOpaqueS3Key('static/pending', ext);
+
+  const { uploadId, cacheControl, contentDisposition } = await createS3MultipartUpload({
+    key: pendingKey,
+    contentType: normalizedMime,
+    visibility: normalizedVisibility,
+    extension: ext,
+  });
+
+  const { data: insertedFile, error: insertError } = await supabase
+    .from('files')
+    .insert({
+      ticket_id: ticketId,
+      org_id: orgId,
+      user_id: userId,
+      original_name: fileName,
+      extension: ext,
+      mime_type: normalizedMime,
+      size_bytes: numericSize,
+      resource_type: typeValidation.resourceType,
+      visibility: normalizedVisibility,
+      s3_pending_key: pendingKey,
+      s3_processed_key: null,
+      s3_upload_id: uploadId,
+      cloudfront_url: null,
+      scan_status: 'not_scanned',
+      status: 'pending_upload',
+    })
+    .select('id, ticket_id, status, scan_status, created_at')
+    .single();
+
+  if (insertError || !insertedFile) {
+    try {
+      await abortS3MultipartUpload(pendingKey, uploadId);
+    } catch {}
+    return NextResponse.json(
+      { error: 'Database Error', message: insertError?.message || 'No se pudo registrar el ticket multipart.' },
+      { status: 500, headers: corsHeaders }
+    );
+  }
+
+  // Confirm token valid for 60 minutes (3600 seconds) for multipart uploads
+  const expiresAtIso = new Date(Date.now() + 3600 * 1000).toISOString();
+  const confirmToken = generateTicketConfirmToken(ticketId, userId, expiresAtIso);
+
+  await addServiceLog({
+    method: 'POST',
+    action: 'MULTIPART_UPLOAD_INITIATED',
+    status: 'ALLOWED',
+    userId,
+    orgId,
+    ticketId,
+    fileId: insertedFile.id,
+    fileName,
+    ipAddress,
+    message: `Subida multipart iniciada (uploadId='${uploadId}', key='${pendingKey}', size=${numericSize} bytes, visibility=${normalizedVisibility}).`,
+  });
+
+  return NextResponse.json(
+    {
+      status: 'success',
+      action: 'create',
+      ticketId,
+      fileId: insertedFile.id,
+      uploadId,
+      s3PendingKey: pendingKey,
+      visibility: normalizedVisibility,
+      cacheControl,
+      contentDisposition,
+      confirmToken,
+      expiresInSeconds: 3600,
+      minPartSizeBytes: 5 * 1024 * 1024,
+    },
+    { status: 200, headers: corsHeaders }
+  );
+}
+
+// ============================================================================
+// HANDLER 2: PRESIGN PART URL ON DEMAND
+// ============================================================================
+async function handlePresignPart(req: NextRequest, body: any) {
+  const { ticketId, fileId, partNumber } = body;
+  const validatedOrgId = req.headers.get('x-validated-org-id');
+  const validatedUserId = req.headers.get('x-validated-user-id');
+
+  const numPart = Number(partNumber);
+  if (!Number.isInteger(numPart) || numPart < 1 || numPart > 10000) {
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'INVALID_PART_NUMBER',
+        message: 'partNumber debe ser un entero entre 1 y 10000.',
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  if (!ticketId && !fileId) {
+    return NextResponse.json(
+      { error: 'Bad Request', code: 'MISSING_IDENTIFIER', message: 'Se requiere ticketId o fileId.' },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  let query = supabase.from('files').select('*');
+  if (ticketId) {
+    query = query.eq('ticket_id', ticketId);
+  } else {
+    query = query.eq('id', fileId);
+  }
+
+  const { data: fileRow, error } = await query.maybeSingle();
+  if (error || !fileRow) {
+    return NextResponse.json(
+      { error: 'Not Found', code: 'MULTIPART_TICKET_NOT_FOUND', message: 'Ticket multipart no encontrado.' },
+      { status: 404, headers: corsHeaders }
+    );
+  }
+
+  if (validatedOrgId && fileRow.org_id !== validatedOrgId) {
+    return NextResponse.json(
+      { error: 'Forbidden', code: 'FORBIDDEN_TENANT_MISMATCH', message: 'El ticket pertenece a otra organización.' },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  if (validatedUserId && fileRow.user_id !== validatedUserId) {
+    return NextResponse.json(
+      { error: 'Forbidden', code: 'FORBIDDEN_NOT_OWNER', message: 'El ticket multipart pertenece a otro usuario.' },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  if (!fileRow.s3_upload_id || !fileRow.s3_pending_key) {
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'NO_ACTIVE_MULTIPART_UPLOAD',
+        message: 'El registro no tiene un s3_upload_id activo.',
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  const uploadPartUrl = await generatePresignedUploadPartUrl(
+    fileRow.s3_pending_key,
+    fileRow.s3_upload_id,
+    numPart,
+    900
+  );
+
+  return NextResponse.json(
+    {
+      status: 'success',
+      action: 'presign_part',
+      ticketId: fileRow.ticket_id,
+      fileId: fileRow.id,
+      uploadId: fileRow.s3_upload_id,
+      partNumber: numPart,
+      uploadPartUrl,
+      expiresInSeconds: 900,
+    },
+    { status: 200, headers: corsHeaders }
+  );
+}
+
+// ============================================================================
+// HANDLER 3: COMPLETE MULTIPART UPLOAD + HEADOBJECT + processUpload(fileId)
+// ============================================================================
+async function handleCompleteMultipart(req: NextRequest, body: any) {
+  const { searchParams } = new URL(req.url);
+  const ticketId = body.ticketId || searchParams.get('ticketId');
+  const fileId = body.fileId || searchParams.get('fileId');
+  const confirmToken = body.confirmToken || searchParams.get('token');
+  const webhookUrl = body.webhookUrl || undefined;
+  const webhookSecret = body.webhookSecret || undefined;
+  const validatedOrgId = req.headers.get('x-validated-org-id');
+  const validatedUserId = req.headers.get('x-validated-user-id');
+  const ipAddress = req.headers.get('x-forwarded-for') || '127.0.0.1';
+
+  if (!ticketId && !fileId) {
+    return NextResponse.json(
+      { error: 'Bad Request', code: 'MISSING_IDENTIFIER', message: 'Se requiere ticketId o fileId para completar.' },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  if (!confirmToken) {
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'MISSING_CONFIRM_TOKEN',
+        message: 'El campo confirmToken es obligatorio para completar una subida multipart.',
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  let query = supabase.from('files').select('*');
+  if (ticketId) {
+    query = query.eq('ticket_id', ticketId);
+  } else {
+    query = query.eq('id', fileId);
+  }
+
+  const { data: fileRow, error } = await query.maybeSingle();
+  if (error || !fileRow) {
+    return NextResponse.json(
+      { error: 'Not Found', code: 'MULTIPART_TICKET_NOT_FOUND', message: 'Ticket multipart no encontrado.' },
+      { status: 404, headers: corsHeaders }
+    );
+  }
+
+  if (validatedOrgId && fileRow.org_id !== validatedOrgId) {
+    return NextResponse.json(
+      { error: 'Forbidden', code: 'FORBIDDEN_TENANT_MISMATCH', message: 'El ticket pertenece a otra organización.' },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  if (validatedUserId && fileRow.user_id !== validatedUserId) {
+    return NextResponse.json(
+      { error: 'Forbidden', code: 'FORBIDDEN_NOT_OWNER', message: 'El ticket multipart pertenece a otro usuario.' },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  const tokenResult = verifyTicketConfirmToken(confirmToken, fileRow.ticket_id, fileRow.user_id);
+  if (!tokenResult.valid) {
+    return NextResponse.json(
+      {
+        error: 'Forbidden',
+        code: 'INVALID_CONFIRM_TOKEN',
+        message: `Token de confirmación inválido: ${tokenResult.reason}`,
+      },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  if (!fileRow.s3_upload_id || !fileRow.s3_pending_key) {
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'NO_ACTIVE_MULTIPART_UPLOAD',
+        message: 'Este ticket no tiene un s3_upload_id activo para completar.',
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  // Obtain parts from client body or automatically via ListPartsCommand
+  let partsToComplete: Array<{ PartNumber: number; ETag: string }> = Array.isArray(body.parts)
+    ? body.parts
+    : [];
+
+  if (partsToComplete.length === 0) {
+    const listedParts = await listS3UploadedParts(fileRow.s3_pending_key, fileRow.s3_upload_id);
+    partsToComplete = listedParts.map((p) => ({
+      PartNumber: p.PartNumber,
+      ETag: p.ETag,
+    }));
+  }
+
+  if (partsToComplete.length === 0) {
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'NO_PARTS_UPLOADED',
+        message: 'No se encontraron partes subidas en S3 para completar el Multipart Upload.',
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  // 1. Complete Multipart Upload in S3
+  await completeS3MultipartUpload(fileRow.s3_pending_key, fileRow.s3_upload_id, partsToComplete);
+
+  // 2. Verify with HeadObjectCommand (Task A.5)
+  const headMeta = await headS3Object(fileRow.s3_pending_key);
+  if (!headMeta.exists) {
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'FILE_NOT_FOUND_AFTER_COMPLETE',
+        message: 'El objeto ensamblado no fue encontrado en S3 tras CompleteMultipartUpload.',
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  const declaredSize = Number(fileRow.size_bytes);
+  const actualSize = Number(headMeta.contentLength ?? -1);
+  if (declaredSize > 0 && actualSize !== declaredSize) {
+    await deleteS3Object(fileRow.s3_pending_key);
+    await supabase
+      .from('files')
+      .update({
+        status: 'failed',
+        s3_upload_id: null,
+        error_message: `Tamaño ensamblado (${actualSize} bytes) no coincide con el declarado (${declaredSize} bytes).`,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', fileRow.id);
+
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'MULTIPART_SIZE_MISMATCH',
+        message: `El tamaño ensamblado (${actualSize} bytes) difiere del declarado (${declaredSize} bytes). Objeto eliminado.`,
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  // Clear s3_upload_id and mark completed before processUpload
+  await supabase
+    .from('files')
+    .update({
+      s3_upload_id: null,
+      size_bytes: actualSize,
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', fileRow.id);
+
+  // 3. [TEMPORARY-LAMBDA-FALLBACK: TASK-B6-MULTIPART-TRIGGER]
+  // Run processUpload(fileId) to validate magic bytes, strip EXIF, move to static/files/<rand128_B>.<ext>, and delete pending
+  const processResult = await processUpload(fileRow.id, {
+    triggerSource: 'multipart_complete',
+    webhookUrl,
+    webhookSecret,
+    ipAddress,
+  });
+
+  if (!processResult.success) {
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: processResult.code || 'PROCESS_UPLOAD_FAILED',
+        message: processResult.message,
+        ticketId: fileRow.ticket_id,
+        fileId: fileRow.id,
+        processing: processResult,
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  return NextResponse.json(
+    {
+      status: 'success',
+      action: 'complete',
+      ticketId: fileRow.ticket_id,
+      fileId: fileRow.id,
+      fileStatus: processResult.status,
+      scanStatus: processResult.scanStatus,
+      visibility: fileRow.visibility,
+      partsCompleted: partsToComplete.length,
+      s3PendingDeleted: processResult.s3PendingKeyDeleted,
+      s3ProcessedKey: processResult.s3ProcessedKey,
+      cloudfrontUrl: processResult.cloudfrontUrl,
+      processing: {
+        executed: true,
+        exifStripped: processResult.exifStripped,
+        detectedMime: processResult.detectedMimeType,
+        originalSizeBytes: processResult.originalSizeBytes,
+        processedSizeBytes: processResult.processedSizeBytes,
+        sha256Hash: processResult.sha256Hash,
+      },
+      webhook: processResult.webhook,
+    },
+    { status: 200, headers: corsHeaders }
+  );
+}

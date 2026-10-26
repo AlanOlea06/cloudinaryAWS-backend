@@ -291,3 +291,75 @@ export async function clearServiceLogs(): Promise<void> {
     console.error('Error clearing logs in Supabase:', err);
   }
 }
+
+/**
+ * Task B.11: Enforces the privacy/retention policy for `ip_address` in `public.service_logs`.
+ * Sets `ip_address = null` for audit log rows older than `retentionDays` (default: 30 days)
+ * or `retentionMinutes` (if explicitly specified for testing).
+ */
+export async function enforceIpAddressRetention(options?: {
+  retentionDays?: number;
+  retentionMinutes?: number;
+  logId?: string | number;
+}): Promise<{
+  cutoffIso: string;
+  retentionDays: number;
+  anonymizedCount: number;
+  anonymizedLogIds: Array<string | number>;
+}> {
+  const retentionDays = options?.retentionDays ?? 30;
+  const retentionMs =
+    options?.retentionMinutes !== undefined
+      ? options.retentionMinutes * 60 * 1000
+      : retentionDays * 24 * 60 * 60 * 1000;
+
+  const cutoffIso = new Date(Date.now() - retentionMs).toISOString();
+
+  let query: any = supabase
+    .from('service_logs')
+    .select('id, ip_address, created_at')
+    .not('ip_address', 'is', null)
+    .lte('created_at', cutoffIso)
+    .limit(500);
+
+  if (options?.logId !== undefined) {
+    query = supabase
+      .from('service_logs')
+      .select('id, ip_address, created_at')
+      .eq('id', options.logId);
+  }
+
+  const { data: rowsToAnonymize, error: fetchErr } = await query;
+  if (fetchErr || !rowsToAnonymize || rowsToAnonymize.length === 0) {
+    return {
+      cutoffIso,
+      retentionDays,
+      anonymizedCount: 0,
+      anonymizedLogIds: [],
+    };
+  }
+
+  const ids = rowsToAnonymize.map((r: any) => r.id);
+  const { error: updateErr } = await supabase
+    .from('service_logs')
+    .update({ ip_address: null })
+    .in('id', ids);
+
+  if (updateErr) {
+    console.error('Error anonymizing ip_address in service_logs:', updateErr.message);
+    return {
+      cutoffIso,
+      retentionDays,
+      anonymizedCount: 0,
+      anonymizedLogIds: [],
+    };
+  }
+
+  return {
+    cutoffIso,
+    retentionDays,
+    anonymizedCount: ids.length,
+    anonymizedLogIds: ids,
+  };
+}
+

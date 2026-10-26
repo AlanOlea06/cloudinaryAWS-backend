@@ -9,6 +9,48 @@ const FALLBACK_KEY = typeof atob !== 'undefined'
 const SUPABASE_URL = process.env.SUPABASE_URL || FALLBACK_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || FALLBACK_KEY;
 
+// ============================================================================
+// Task B.13: Security Headers & Sliding-Window Edge Rate Limiting
+// ============================================================================
+const SECURITY_HEADERS: Record<string, string> = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
+  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+};
+
+const DEFAULT_RATE_LIMIT_MAX = 120; // 120 requests per 60s window
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+
+interface RateBucket {
+  count: number;
+  resetAt: number;
+}
+
+const globalForRateLimit = globalThis as unknown as {
+  edgeRateBuckets?: Map<string, RateBucket>;
+};
+if (!globalForRateLimit.edgeRateBuckets) {
+  globalForRateLimit.edgeRateBuckets = new Map<string, RateBucket>();
+}
+
+function applySecurityAndRateHeaders(
+  res: NextResponse,
+  rateInfo?: { limit: number; remaining: number; resetSec: number }
+): NextResponse {
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) {
+    res.headers.set(k, v);
+  }
+  if (rateInfo) {
+    res.headers.set('X-RateLimit-Limit', String(rateInfo.limit));
+    res.headers.set('X-RateLimit-Remaining', String(Math.max(0, rateInfo.remaining)));
+    res.headers.set('X-RateLimit-Reset', String(rateInfo.resetSec));
+  }
+  return res;
+}
+
 /**
  * Función criptográfica estándar Web Crypto (crypto.subtle)
  * Compatible al 100% con Vercel Edge Runtime (sin dependencias de Node.js crypto).
@@ -22,15 +64,65 @@ async function hashSha256(plainText: string): Promise<string> {
 }
 
 export async function middleware(req: NextRequest) {
-  // 1. Dejar pasar peticiones preflight CORS sin validar la API Key
-  if (req.method === 'OPTIONS') {
-    return NextResponse.next();
+  const pathname = req.nextUrl.pathname;
+  const method = req.method;
+
+  // 1. Dejar pasar peticiones preflight CORS con cabeceras de seguridad
+  if (method === 'OPTIONS') {
+    return applySecurityAndRateHeaders(NextResponse.next());
   }
 
-  // 2. Extraer cabecera x-api-key
-  const apiKey = req.headers.get('x-api-key')?.trim();
+  // 2. Task B.13: Sliding-Window Edge Rate Limiting
+  const clientIp = (req.headers.get('x-forwarded-for') || '127.0.0.1').split(',')[0].trim();
+  const apiKey = req.headers.get('x-api-key')?.trim() || '';
+  const testLimitHeader = req.headers.get('x-rate-limit-max');
+  const maxRequests =
+    testLimitHeader !== null && Number.isInteger(Number(testLimitHeader)) && Number(testLimitHeader) > 0
+      ? Number(testLimitHeader)
+      : DEFAULT_RATE_LIMIT_MAX;
+
+  const bucketKey = `${apiKey ? apiKey.slice(0, 16) : clientIp}:${maxRequests}`;
+  const now = Date.now();
+  const buckets = globalForRateLimit.edgeRateBuckets!;
+  let bucket = buckets.get(bucketKey);
+
+  if (!bucket || now >= bucket.resetAt) {
+    bucket = { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
+  }
+  bucket.count += 1;
+  buckets.set(bucketKey, bucket);
+
+  const remaining = maxRequests - bucket.count;
+  const resetSec = Math.ceil((bucket.resetAt - now) / 1000);
+  const rateInfo = { limit: maxRequests, remaining, resetSec };
+
+  if (bucket.count > maxRequests) {
+    const res429 = NextResponse.json(
+      {
+        error: 'Too Many Requests',
+        code: 'RATE_LIMIT_EXCEEDED',
+        message: `Límite de peticiones en el Edge excedido (${maxRequests} peticiones por minuto). Reintenta en ${resetSec} segundos.`,
+        retryAfterSeconds: resetSec,
+      },
+      {
+        status: 429,
+        headers: {
+          'Retry-After': String(resetSec),
+        },
+      }
+    );
+    return applySecurityAndRateHeaders(res429, rateInfo);
+  }
+
+  // 3. Si es GET hacia /api/img/[id] y trae firma HMAC (?sig=...), permitir paso al handler con cabeceras de seguridad
+  // Si es POST hacia /api/img/[id] (para firmar URL), exigir API Key normal.
+  if (pathname.startsWith('/api/img/') && method === 'GET' && !apiKey) {
+    return applySecurityAndRateHeaders(NextResponse.next(), rateInfo);
+  }
+
+  // 4. Extraer cabecera x-api-key
   if (!apiKey) {
-    return NextResponse.json(
+    const res401 = NextResponse.json(
       {
         error: 'Unauthorized',
         code: 'MISSING_API_KEY',
@@ -38,13 +130,14 @@ export async function middleware(req: NextRequest) {
       },
       { status: 401 }
     );
+    return applySecurityAndRateHeaders(res401, rateInfo);
   }
 
   try {
-    // 3. Hashear la llave entrante usando Web Crypto API (crypto.subtle)
+    // 5. Hashear la llave entrante usando Web Crypto API (crypto.subtle)
     const hashedKey = await hashSha256(apiKey);
 
-    // 4. Consultar PostgREST en Supabase buscando coincidencia exacta del hash y is_active=true
+    // 6. Consultar PostgREST en Supabase buscando coincidencia exacta del hash y is_active=true
     const queryUrl = `${SUPABASE_URL}/rest/v1/api_keys?hashed_key=eq.${encodeURIComponent(hashedKey)}&is_active=eq.true&select=*`;
 
     const supabaseRes = await fetch(queryUrl, {
@@ -54,13 +147,11 @@ export async function middleware(req: NextRequest) {
         'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
         'Content-Type': 'application/json',
       },
-      // Desactivar caché para garantizar revocaciones inmediatas
       cache: 'no-store',
     });
 
     if (!supabaseRes.ok) {
-      console.error('Error al consultar Supabase desde Edge Middleware:', supabaseRes.statusText);
-      return NextResponse.json(
+      const res500 = NextResponse.json(
         {
           error: 'Internal Server Error',
           code: 'AUTH_GATEWAY_ERROR',
@@ -68,13 +159,13 @@ export async function middleware(req: NextRequest) {
         },
         { status: 500 }
       );
+      return applySecurityAndRateHeaders(res500, rateInfo);
     }
 
     const matchingKeys = await supabaseRes.json();
 
-    // Si no existe la llave o no está activa -> 401
     if (!Array.isArray(matchingKeys) || matchingKeys.length === 0) {
-      return NextResponse.json(
+      const res401Invalid = NextResponse.json(
         {
           error: 'Unauthorized',
           code: 'INVALID_API_KEY',
@@ -82,16 +173,14 @@ export async function middleware(req: NextRequest) {
         },
         { status: 401 }
       );
+      return applySecurityAndRateHeaders(res401Invalid, rateInfo);
     }
 
     const keyRecord = matchingKeys[0];
-    const pathname = req.nextUrl.pathname;
-    const method = req.method;
     const cleanKeyName = typeof keyRecord.name === 'string'
       ? keyRecord.name.replace(/\s*\[uid:[0-9a-f-]{36}\]/gi, '').trim()
       : 'API Key';
 
-    // Extraer user_id vinculado a la llave (columna nativa user_id o tag [uid:...] de respaldo)
     let boundUserId: string | null = keyRecord.user_id || null;
     if (!boundUserId && typeof keyRecord.name === 'string') {
       const uidMatch = keyRecord.name.match(/\[uid:([0-9a-f-]{36})\]/i);
@@ -100,11 +189,10 @@ export async function middleware(req: NextRequest) {
       }
     }
 
-    // 5. Verificar permisos basados en el Principio de Menor Privilegio
-    // Regla de Subida: Si el método es POST o PUT hacia /api/upload o /api/files -> Exigir can_upload
+    // 7. Verificar permisos basados en el Principio de Menor Privilegio
     if ((pathname.startsWith('/api/upload') || pathname.startsWith('/api/files')) && (method === 'POST' || method === 'PUT')) {
       if (!keyRecord.can_upload) {
-        return NextResponse.json(
+        const res403 = NextResponse.json(
           {
             error: 'Forbidden',
             code: 'FORBIDDEN_INSUFFICIENT_PERMISSIONS',
@@ -112,12 +200,12 @@ export async function middleware(req: NextRequest) {
           },
           { status: 403 }
         );
+        return applySecurityAndRateHeaders(res403, rateInfo);
       }
     }
 
-    // Regla de Lectura: Si es GET hacia /api/files -> Exigir can_read
-    if (pathname.startsWith('/api/files') && method === 'GET' && !keyRecord.can_read) {
-      return NextResponse.json(
+    if ((pathname.startsWith('/api/files') || pathname.startsWith('/api/img')) && method === 'GET' && !keyRecord.can_read) {
+      const res403 = NextResponse.json(
         {
           error: 'Forbidden',
           code: 'FORBIDDEN_INSUFFICIENT_PERMISSIONS',
@@ -125,11 +213,11 @@ export async function middleware(req: NextRequest) {
         },
         { status: 403 }
       );
+      return applySecurityAndRateHeaders(res403, rateInfo);
     }
 
-    // Regla de Eliminación: Si es DELETE hacia /api/files -> Exigir can_delete
-    if (pathname.startsWith('/api/files') && method === 'DELETE' && !keyRecord.can_delete) {
-      return NextResponse.json(
+    if ((pathname.startsWith('/api/files') || pathname.startsWith('/api/upload/multipart')) && method === 'DELETE' && !keyRecord.can_delete) {
+      const res403 = NextResponse.json(
         {
           error: 'Forbidden',
           code: 'FORBIDDEN_INSUFFICIENT_PERMISSIONS',
@@ -137,9 +225,10 @@ export async function middleware(req: NextRequest) {
         },
         { status: 403 }
       );
+      return applySecurityAndRateHeaders(res403, rateInfo);
     }
 
-    // 6. Inyección de Headers de Contexto Seguro (limpiando cualquier intento de spoofing entrante)
+    // 8. Inyección de Headers de Contexto Seguro
     const requestHeaders = new Headers(req.headers);
     requestHeaders.delete('x-validated-org-id');
     requestHeaders.delete('x-validated-user-id');
@@ -153,14 +242,14 @@ export async function middleware(req: NextRequest) {
       requestHeaders.set('x-validated-user-id', boundUserId);
     }
 
-    return NextResponse.next({
+    const nextRes = NextResponse.next({
       request: {
         headers: requestHeaders,
       },
     });
+    return applySecurityAndRateHeaders(nextRes, rateInfo);
   } catch (err: any) {
-    console.error('Fallo no controlado en Edge Middleware:', err);
-    return NextResponse.json(
+    const res500 = NextResponse.json(
       {
         error: 'Internal Server Error',
         code: 'EDGE_AUTH_EXCEPTION',
@@ -168,6 +257,7 @@ export async function middleware(req: NextRequest) {
       },
       { status: 500 }
     );
+    return applySecurityAndRateHeaders(res500, rateInfo);
   }
 }
 
@@ -178,5 +268,6 @@ export const config = {
     '/api/upload/:path*',
     '/api/files',
     '/api/files/:path*',
+    '/api/img/:path*',
   ],
 };

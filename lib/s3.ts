@@ -8,6 +8,10 @@ import {
   CopyObjectCommand,
   DeleteObjectsCommand,
   ListObjectsV2Command,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  ListPartsCommand,
+  CompleteMultipartUploadCommand,
   AbortMultipartUploadCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -648,5 +652,153 @@ export async function abortS3MultipartUpload(key: string, uploadId: string): Pro
   );
   return true;
 }
+
+export interface CreateMultipartParams {
+  key: string;
+  contentType: string;
+  visibility?: 'private' | 'public';
+  extension?: string;
+}
+
+/**
+ * Task B.9: Initiates an S3 Multipart Upload in static/pending/<rand128_A>.<ext>
+ * with explicit CacheControl and ContentDisposition policies.
+ */
+export async function createS3MultipartUpload({
+  key,
+  contentType,
+  visibility = 'private',
+  extension = '',
+}: CreateMultipartParams): Promise<{ uploadId: string; cacheControl: string; contentDisposition: 'inline' | 'attachment' }> {
+  const client = getS3Client();
+  if (!client || !bucketName) {
+    throw new Error('Credenciales AWS S3 incompletas en el entorno.');
+  }
+
+  const cacheControl = getCacheControlForVisibility(visibility, true);
+  const contentDisposition: 'inline' | 'attachment' =
+    extension.toLowerCase() === '.pdf' || contentType.toLowerCase() === 'application/pdf'
+      ? 'attachment'
+      : 'inline';
+
+  const cmdInput: Record<string, any> = {
+    Bucket: bucketName.trim(),
+    Key: key.replace(/^\/+/, ''),
+    ContentType: contentType,
+    CacheControl: cacheControl,
+  };
+
+  if (contentDisposition === 'attachment') {
+    cmdInput.ContentDisposition = 'attachment';
+  }
+
+  const res = await client.send(new CreateMultipartUploadCommand(cmdInput as any));
+  if (!res.UploadId) {
+    throw new Error('AWS S3 no devolvió un UploadId al iniciar Multipart Upload.');
+  }
+
+  return {
+    uploadId: res.UploadId,
+    cacheControl,
+    contentDisposition,
+  };
+}
+
+/**
+ * Task B.9: Generates a short-lived Presigned PUT URL for uploading a single part (1..10000) on demand.
+ */
+export async function generatePresignedUploadPartUrl(
+  key: string,
+  uploadId: string,
+  partNumber: number,
+  expiresIn = 900
+): Promise<string> {
+  const client = getS3Client();
+  if (!client || !bucketName) {
+    throw new Error('Credenciales AWS S3 incompletas en el entorno.');
+  }
+
+  const command = new UploadPartCommand({
+    Bucket: bucketName.trim(),
+    Key: key.replace(/^\/+/, ''),
+    UploadId: uploadId,
+    PartNumber: partNumber,
+  });
+
+  return getSignedUrl(client, command, { expiresIn });
+}
+
+export interface S3UploadedPartInfo {
+  PartNumber: number;
+  ETag: string;
+  Size: number;
+  LastModified?: string;
+}
+
+/**
+ * Task B.9: Lists already uploaded parts for an active S3 Multipart Upload so clients can resume interrupted uploads.
+ */
+export async function listS3UploadedParts(
+  key: string,
+  uploadId: string
+): Promise<S3UploadedPartInfo[]> {
+  const client = getS3Client();
+  if (!client || !bucketName) {
+    throw new Error('Credenciales AWS S3 incompletas en el entorno.');
+  }
+
+  const res = await client.send(
+    new ListPartsCommand({
+      Bucket: bucketName.trim(),
+      Key: key.replace(/^\/+/, ''),
+      UploadId: uploadId,
+    })
+  );
+
+  return (res.Parts || []).map((p) => ({
+    PartNumber: Number(p.PartNumber || 0),
+    ETag: String(p.ETag || ''),
+    Size: Number(p.Size || 0),
+    LastModified: p.LastModified ? p.LastModified.toISOString() : undefined,
+  }));
+}
+
+/**
+ * Task B.9: Completes an S3 Multipart Upload by assembling the uploaded parts in order of PartNumber.
+ */
+export async function completeS3MultipartUpload(
+  key: string,
+  uploadId: string,
+  parts: Array<{ PartNumber: number; ETag: string }>
+): Promise<{ location?: string; etag?: string }> {
+  const client = getS3Client();
+  if (!client || !bucketName) {
+    throw new Error('Credenciales AWS S3 incompletas en el entorno.');
+  }
+
+  const sortedParts = [...parts]
+    .map((p) => ({
+      PartNumber: Number(p.PartNumber),
+      ETag: String(p.ETag).startsWith('"') ? String(p.ETag) : `"${String(p.ETag)}"`,
+    }))
+    .sort((a, b) => a.PartNumber - b.PartNumber);
+
+  const res = await client.send(
+    new CompleteMultipartUploadCommand({
+      Bucket: bucketName.trim(),
+      Key: key.replace(/^\/+/, ''),
+      UploadId: uploadId,
+      MultipartUpload: {
+        Parts: sortedParts,
+      },
+    })
+  );
+
+  return {
+    location: res.Location,
+    etag: res.ETag,
+  };
+}
+
 
 
