@@ -1,35 +1,35 @@
-const DEFAULT_CLOUDFRONT_DOMAIN = 'd1nuawu3owad6c.cloudfront.net';
+import { requireEnv } from '@/lib/env';
 
 /**
- * Obtiene y normaliza el dominio de la distribución de Amazon CloudFront
- * Soporta tanto AWS_CLOUDFRONT_DOMAIN como CLOUDFRONT_DOMAIN.
- * Ejemplo: "https://d1nuawu3owad6c.cloudfront.net/" -> "d1nuawu3owad6c.cloudfront.net"
+ * Obtiene y normaliza el dominio de CloudFront configurado obligatoriamente en AWS_CLOUDFRONT_DOMAIN,
+ * eliminando cualquier protocolo (http/https) o barra diagonal final.
+ * Lanza un error claro si AWS_CLOUDFRONT_DOMAIN no está definida (sin valores por defecto).
  */
 export function getCloudFrontDomain(): string {
-  const rawDomain = (
-    process.env.AWS_CLOUDFRONT_DOMAIN ||
-    process.env.CLOUDFRONT_DOMAIN ||
-    DEFAULT_CLOUDFRONT_DOMAIN
-  ).trim();
-
-  return rawDomain
+  const rawDomain = requireEnv('AWS_CLOUDFRONT_DOMAIN');
+  const cleaned = rawDomain
+    .trim()
     .replace(/^https?:\/\//i, '')
     .replace(/\/+$/, '');
+
+  if (!cleaned) {
+    throw new Error(
+      "[ENV_INVALID] La variable 'AWS_CLOUDFRONT_DOMAIN' no contiene un dominio válido."
+    );
+  }
+
+  return cleaned;
 }
 
-/**
- * Verifica si el dominio de CloudFront está configurado
- */
 export function isCloudFrontConfigured(): boolean {
-  return Boolean(getCloudFrontDomain());
+  return Boolean(process.env.AWS_CLOUDFRONT_DOMAIN?.trim());
 }
 
 /**
- * Normaliza la ruta de S3 para el Behavior `/static/*` de CloudFront
- * y codifica cada segmento preservando las barras diagonales '/'.
+ * Normaliza una ruta S3 para garantizar que siempre comience con el prefijo 'static/'
  */
 export function ensureStaticPrefix(s3Key: string): string {
-  const cleanKey = s3Key.replace(/^\/+/, '');
+  const cleanKey = (s3Key || '').trim().replace(/^\/+/, '');
   return cleanKey.startsWith('static/') ? cleanKey : `static/${cleanKey}`;
 }
 
@@ -42,14 +42,20 @@ function encodeS3KeyForUrl(s3Key: string): string {
 }
 
 /**
- * Construye la URL de CloudFront bajo el prefijo /static/* para almacenar en Supabase (cloudfront_url) y entregar archivos
+ * Construye la URL de CloudFront bajo el prefijo /static/* para almacenar en Supabase (cloudfront_url)
+ * y entregar archivos públicos.
  */
 export function getBaseCloudFrontUrl(s3Key: string): string | null {
-  const domain = getCloudFrontDomain();
-  if (!domain || !s3Key) {
+  if (!s3Key || !s3Key.trim()) {
     return null;
   }
+  const domain = getCloudFrontDomain();
+  const encodedKey = encodeS3KeyForUrl(s3Key);
+  return `https://${domain}/${encodedKey}`;
+}
 
+export function getCloudFrontUrl(s3Key: string): string {
+  const domain = getCloudFrontDomain();
   const encodedKey = encodeS3KeyForUrl(s3Key);
   return `https://${domain}/${encodedKey}`;
 }
@@ -59,19 +65,32 @@ export interface CloudFrontUrlResult {
   domain: string;
 }
 
-/**
- * Genera la URL de consumo a través de Amazon CloudFront (CDN) bajo el Behavior /static/*.
- */
 export function generateCloudFrontUrl(s3Key: string): CloudFrontUrlResult | null {
-  const domain = getCloudFrontDomain();
-  const baseUrl = getBaseCloudFrontUrl(s3Key);
-
-  if (!domain || !baseUrl) {
+  if (!s3Key || !s3Key.trim()) {
     return null;
   }
-
+  const domain = getCloudFrontDomain();
+  const baseUrl = getBaseCloudFrontUrl(s3Key);
+  if (!baseUrl) {
+    return null;
+  }
   return {
     url: baseUrl,
     domain,
   };
+}
+
+/**
+ * Devuelve la URL de entrega según la visibilidad del archivo:
+ * - 'public' -> URL de CloudFront CDN (solo para objetos públicos)
+ * - 'private' -> null (los archivos privados requieren URL prefirmada de S3 de corta duración)
+ */
+export function getDeliveryUrlForVisibility(
+  s3Key: string,
+  visibility: string = 'private'
+): string | null {
+  if (visibility.toLowerCase() === 'public') {
+    return getBaseCloudFrontUrl(s3Key);
+  }
+  return null;
 }

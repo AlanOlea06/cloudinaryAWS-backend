@@ -1,81 +1,68 @@
 // ============================================================================
-// [TEMPORARY-LAMBDA-FALLBACK: TASK-B7-WEBHOOK-RECEIVER-AND-CONFIG]
+// [TEMPORARY-LAMBDA-FALLBACK: TASK-B11-WEBHOOK-TEST-RECEIVER]
 // Búsqueda rápida: "TEMPORARY-LAMBDA-FALLBACK"
-// Endpoint receptor de prueba y configurador de Webhooks firmados con HMAC-SHA256.
+// Endpoint: POST, GET, PUT /api/webhooks/test-receiver
+// Nota (Sección 2): Protegido con ADMIN_API_SECRET; PUT deshabilitado en producción;
+// sin secretos por defecto.
 // ============================================================================
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { verifyWebhookSignature } from '@/lib/lambda-fallback/webhook-dispatcher';
+import { verifyAdminSecretHeader } from '@/lib/env';
+
+interface ReceivedWebhookEntry {
+  receivedAt: string;
+  validSignature: boolean;
+  reason?: string;
+  event: string | null;
+  eventId: string | null;
+  timestampHeader: string;
+  signatureHeader: string;
+  attemptHeader: string | null;
+  payload: any;
+}
+
+const receivedWebhooksStore: ReceivedWebhookEntry[] =
+  (globalThis as any).__antigravityReceivedWebhooks || [];
+(globalThis as any).__antigravityReceivedWebhooks = receivedWebhooksStore;
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'POST, PUT, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
   'Access-Control-Allow-Headers':
-    'Content-Type, x-webhook-signature, x-webhook-timestamp, x-webhook-event, x-webhook-attempt',
+    'Content-Type, Authorization, x-admin-secret, X-Webhook-Event, X-Webhook-Id, X-Webhook-Timestamp, X-Webhook-Signature-256, X-Webhook-Attempt, x-webhook-secret-test',
+  'X-Content-Type-Options': 'nosniff',
 };
 
 export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: corsHeaders });
 }
 
-/**
- * POST /api/webhooks/test-receiver
- * Validates HMAC-SHA256 signature on incoming webhook notifications.
- * Supports `?simulateFail=true` to force HTTP 500 and verify the 3-attempt retry logic.
- */
-export async function POST(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const simulateFail = searchParams.get('simulateFail') === 'true';
-  const customSecret = searchParams.get('secret') || undefined;
-
-  const signature = req.headers.get('x-webhook-signature') || '';
-  const timestamp = req.headers.get('x-webhook-timestamp') || '';
-  const eventType = req.headers.get('x-webhook-event') || '';
-  const attempt = req.headers.get('x-webhook-attempt') || '1';
-
-  const rawBody = await req.text();
-
-  if (simulateFail) {
+function enforceAdminAuth(req: NextRequest): NextResponse | null {
+  const check = verifyAdminSecretHeader(req.headers);
+  if (!check.valid) {
     return NextResponse.json(
       {
-        received: false,
-        simulatedFailure: true,
-        attempt: Number(attempt),
-        message: `Fallo simulado en el receptor de Webhook (intento ${attempt}).`,
+        error: check.status === 401 ? 'Unauthorized' : 'Forbidden',
+        code: check.code,
+        message: check.message,
       },
-      { status: 500, headers: corsHeaders }
+      { status: check.status, headers: corsHeaders }
     );
   }
+  return null;
+}
 
-  const isValidSignature = verifyWebhookSignature(rawBody, timestamp, signature, customSecret);
-  if (!isValidSignature) {
-    return NextResponse.json(
-      {
-        received: false,
-        hmacVerified: false,
-        error: 'INVALID_WEBHOOK_SIGNATURE',
-        message: 'La firma HMAC-SHA256 del Webhook es inválida o no coincide.',
-      },
-      { status: 401, headers: corsHeaders }
-    );
-  }
-
-  let parsedBody: any = null;
-  try {
-    parsedBody = JSON.parse(rawBody);
-  } catch {
-    parsedBody = rawBody;
-  }
+export async function GET(req: NextRequest) {
+  const authError = enforceAdminAuth(req);
+  if (authError) return authError;
 
   return NextResponse.json(
     {
-      received: true,
-      hmacVerified: true,
-      event: eventType,
-      attempt: Number(attempt),
-      timestamp,
-      payload: parsedBody,
+      status: 'success',
+      count: receivedWebhooksStore.length,
+      events: receivedWebhooksStore.slice(0, 25),
     },
     { status: 200, headers: corsHeaders }
   );
@@ -83,16 +70,30 @@ export async function POST(req: NextRequest) {
 
 /**
  * PUT /api/webhooks/test-receiver
- * Updates an organization's webhook_url and webhook_secret in public.organizations.
+ * Disabled in production. In development, requires ADMIN_API_SECRET.
  */
 export async function PUT(req: NextRequest) {
+  if (process.env.NODE_ENV === 'production') {
+    return NextResponse.json(
+      {
+        error: 'Forbidden',
+        code: 'ENDPOINT_DISABLED_IN_PRODUCTION',
+        message: 'PUT /api/webhooks/test-receiver está deshabilitado en producción.',
+      },
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  const authError = enforceAdminAuth(req);
+  if (authError) return authError;
+
   try {
     const body = await req.json();
     const { orgId, webhookUrl = null, webhookSecret = null } = body;
 
     if (!orgId) {
       return NextResponse.json(
-        { error: 'Bad Request', code: 'MISSING_ORG_ID', message: 'Se requiere orgId.' },
+        { error: 'Bad Request', code: 'MISSING_ORG_ID', message: 'El campo orgId es obligatorio.' },
         { status: 400, headers: corsHeaders }
       );
     }
@@ -109,16 +110,92 @@ export async function PUT(req: NextRequest) {
 
     if (error) {
       return NextResponse.json(
-        { error: 'Database Error', message: error.message },
+        { error: 'Database Error', code: 'DB_UPDATE_ERROR', message: error.message },
         { status: 500, headers: corsHeaders }
       );
     }
 
     return NextResponse.json(
       {
-        status: 'success',
+        status: 'updated',
         organization: data,
         webhookSecretConfigured: Boolean(webhookSecret),
+      },
+      { status: 200, headers: corsHeaders }
+    );
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: 'Internal Server Error', message: err.message },
+      { status: 500, headers: corsHeaders }
+    );
+  }
+}
+
+export async function POST(req: NextRequest) {
+  const authError = enforceAdminAuth(req);
+  if (authError) return authError;
+
+  try {
+    const rawBody = await req.text();
+    const timestampHeader = req.headers.get('x-webhook-timestamp') || '';
+    const signatureHeader =
+      req.headers.get('x-webhook-signature') ||
+      req.headers.get('x-webhook-signature-256') ||
+      '';
+    const eventHeader = req.headers.get('x-webhook-event');
+    const eventIdHeader = req.headers.get('x-webhook-id');
+    const attemptHeader = req.headers.get('x-webhook-attempt');
+    const secretToVerify = req.headers.get('x-webhook-secret-test')?.trim() || '';
+
+    const isValidSig = verifyWebhookSignature(
+      rawBody,
+      timestampHeader,
+      signatureHeader,
+      secretToVerify
+    );
+
+    let parsedPayload: any = null;
+    try {
+      parsedPayload = rawBody ? JSON.parse(rawBody) : null;
+    } catch {
+      parsedPayload = rawBody;
+    }
+
+    const entry: ReceivedWebhookEntry = {
+      receivedAt: new Date().toISOString(),
+      validSignature: isValidSig,
+      reason: isValidSig ? undefined : 'Firma HMAC-SHA256 inválida o falta x-webhook-secret-test.',
+      event: eventHeader || parsedPayload?.event || null,
+      eventId: eventIdHeader || parsedPayload?.eventId || null,
+      timestampHeader,
+      signatureHeader,
+      attemptHeader,
+      payload: parsedPayload,
+    };
+
+    receivedWebhooksStore.unshift(entry);
+    if (receivedWebhooksStore.length > 50) {
+      receivedWebhooksStore.pop();
+    }
+
+    if (!isValidSig) {
+      return NextResponse.json(
+        {
+          status: 'rejected',
+          code: 'INVALID_WEBHOOK_SIGNATURE',
+          message: entry.reason,
+        },
+        { status: 401, headers: corsHeaders }
+      );
+    }
+
+    return NextResponse.json(
+      {
+        status: 'verified',
+        code: 'WEBHOOK_SIGNATURE_VALID',
+        message: 'Firma HMAC-SHA256 (X-Webhook-Signature-256) y timestamp anti-replay verificados correctamente.',
+        event: entry.event,
+        eventId: entry.eventId,
       },
       { status: 200, headers: corsHeaders }
     );

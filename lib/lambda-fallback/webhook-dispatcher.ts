@@ -4,16 +4,12 @@
 // Búsqueda rápida en el proyecto: "TEMPORARY-LAMBDA-FALLBACK"
 // Este módulo envía notificaciones Webhook firmadas con HMAC-SHA256 (hasta 3
 // reintentos) cuando processUpload(fileId) completa o falla el procesamiento.
+// Nota (Sección 2): Sin secretos por defecto ni reutilización de TICKET_SIGNING_SECRET.
 // ============================================================================
 
 import crypto from 'crypto';
 import { addServiceLog } from '@/lib/service-logs';
 import { supabase } from '@/lib/supabase';
-
-const DEFAULT_WEBHOOK_SECRET =
-  process.env.WEBHOOK_SIGNING_SECRET ||
-  process.env.TICKET_SIGNING_SECRET ||
-  'cloudinary-aws-default-webhook-hmac-secret-2026';
 
 export interface WebhookPayload {
   event: 'file.processed' | 'file.failed';
@@ -44,14 +40,20 @@ export interface WebhookDispatchResult {
 }
 
 /**
- * Generates an HMAC-SHA256 signature over `${timestamp}.${payloadJson}`
+ * Generates an HMAC-SHA256 signature over `${timestamp}.${payloadJson}` using the organization's explicit webhook_secret.
+ * Throws if secret is missing or empty (no fallback secret).
  */
 export function signWebhookPayload(
   payloadJson: string,
   timestamp: string,
-  secret: string = DEFAULT_WEBHOOK_SECRET
+  secret: string
 ): string {
-  const effectiveSecret = (secret || DEFAULT_WEBHOOK_SECRET).trim();
+  const effectiveSecret = (secret || '').trim();
+  if (!effectiveSecret) {
+    throw new Error(
+      '[WEBHOOK_SECRET_MISSING] Se requiere un webhook_secret explícito de la organización para firmar el webhook (no existen valores por defecto).'
+    );
+  }
   const digest = crypto
     .createHmac('sha256', effectiveSecret)
     .update(`${timestamp}.${payloadJson}`)
@@ -61,17 +63,19 @@ export function signWebhookPayload(
 
 /**
  * Verifies an incoming HMAC-SHA256 webhook signature using constant-time comparison.
+ * Requires an explicit secret (returns false if secret is empty).
  */
 export function verifyWebhookSignature(
   payloadJson: string,
   timestamp: string,
   signatureHeader: string,
-  secret: string = DEFAULT_WEBHOOK_SECRET
+  secret: string
 ): boolean {
-  if (!payloadJson || !timestamp || !signatureHeader) {
+  const effectiveSecret = (secret || '').trim();
+  if (!payloadJson || !timestamp || !signatureHeader || !effectiveSecret) {
     return false;
   }
-  const expected = signWebhookPayload(payloadJson, timestamp, secret);
+  const expected = signWebhookPayload(payloadJson, timestamp, effectiveSecret);
   const a = Buffer.from(expected, 'utf8');
   const b = Buffer.from(signatureHeader.trim(), 'utf8');
   if (a.length !== b.length) {
@@ -95,15 +99,14 @@ export async function dispatchFileWebhook(params: {
   let webhookUrl = overrideWebhookUrl ? overrideWebhookUrl.trim() : '';
   let webhookSecret = overrideWebhookSecret ? overrideWebhookSecret.trim() : '';
 
-  // Look up organization's webhook_url and webhook_secret if not overridden
-  if (!webhookUrl && payload.orgId) {
+  if ((!webhookUrl || !webhookSecret) && payload.orgId) {
     const { data: orgData } = await supabase
       .from('organizations')
       .select('webhook_url, webhook_secret')
       .eq('id', payload.orgId)
       .maybeSingle();
 
-    if (orgData?.webhook_url) {
+    if (!webhookUrl && orgData?.webhook_url) {
       webhookUrl = String(orgData.webhook_url).trim();
     }
     if (!webhookSecret && orgData?.webhook_secret) {
@@ -123,10 +126,33 @@ export async function dispatchFileWebhook(params: {
     };
   }
 
-  const effectiveSecret = webhookSecret || DEFAULT_WEBHOOK_SECRET;
+  if (!webhookSecret) {
+    await addServiceLog({
+      method: 'POST',
+      action: 'WEBHOOK_SKIPPED_NO_SECRET',
+      status: 'BLOCKED',
+      userId: payload.userId || undefined,
+      orgId: payload.orgId || undefined,
+      ticketId: payload.ticketId || undefined,
+      fileId: payload.fileId,
+      ipAddress,
+      message: `Webhook omitido hacia '${webhookUrl}': la organización no tiene un webhook_secret configurado (no se permiten secretos por defecto).`,
+    });
+
+    return {
+      configured: false,
+      delivered: false,
+      attempts: 0,
+      lastStatusCode: null,
+      signature: null,
+      timestamp: null,
+      error: 'WEBHOOK_SECRET_NOT_CONFIGURED',
+    };
+  }
+
   const timestamp = payload.timestamp || new Date().toISOString();
   const payloadJson = JSON.stringify(payload);
-  const signature = signWebhookPayload(payloadJson, timestamp, effectiveSecret);
+  const signature = signWebhookPayload(payloadJson, timestamp, webhookSecret);
 
   const MAX_ATTEMPTS = 3;
   let lastStatusCode: number | null = null;
@@ -147,6 +173,7 @@ export async function dispatchFileWebhook(params: {
           'x-webhook-attempt': String(attempt),
         },
         body: payloadJson,
+        redirect: 'manual',
         signal: controller.signal,
       });
 
@@ -182,13 +209,11 @@ export async function dispatchFileWebhook(params: {
       lastError = err?.message || 'Network or timeout error';
     }
 
-    // Backoff before next retry (250ms, 500ms)
     if (attempt < MAX_ATTEMPTS) {
       await new Promise((resolve) => setTimeout(resolve, attempt * 250));
     }
   }
 
-  // All 3 attempts failed -> Record WEBHOOK_FAILED in service_logs
   await addServiceLog({
     method: 'POST',
     action: 'WEBHOOK_FAILED',

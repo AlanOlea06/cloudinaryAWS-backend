@@ -86,20 +86,16 @@ export async function GET(
       );
     }
 
-    const validatedOrgId = req.headers.get('x-validated-org-id');
-    const validatedUserId = req.headers.get('x-validated-user-id');
-    const clientProvidedUserId = (
-      req.nextUrl.searchParams.get('userId') ||
-      req.headers.get('x-user-id') ||
-      ''
-    ).trim();
+    const validatedOrgId = (req.headers.get('x-validated-org-id') || '').trim();
+    const validatedUserId = (req.headers.get('x-validated-user-id') || '').trim();
+    const queryUserId = (req.nextUrl.searchParams.get('userId') || '').trim();
 
     // Registrar solicitud inicial de lectura (FILE_REQUESTED)
     await addServiceLog({
       method: 'GET',
       action: 'FILE_REQUESTED',
       status: 'ALLOWED',
-      userId: validatedUserId || clientProvidedUserId || fileRow.user_id,
+      userId: validatedUserId || fileRow.user_id,
       orgId: validatedOrgId || fileRow.org_id,
       fileId: fileRow.id,
       ticketId: fileRow.ticket_id,
@@ -148,8 +144,8 @@ export async function GET(
       );
     }
 
-    // 4. Decisión 1-A: Bloquear suplantación de identidad si la API Key pertenece a un usuario específico
-    if (validatedUserId && clientProvidedUserId && clientProvidedUserId !== validatedUserId) {
+    // 4. Bloquear discrepancia entre query ?userId y el usuario validado por el middleware
+    if (validatedUserId && queryUserId && queryUserId !== validatedUserId) {
       await addServiceLog({
         method: 'GET',
         action: 'ACCESS_DENIED',
@@ -160,7 +156,7 @@ export async function GET(
         ticketId: fileRow.ticket_id,
         fileName: fileRow.original_name,
         ipAddress,
-        message: `Intento de suplantación bloqueado en lectura: la API Key pertenece a '${validatedUserId}', pero se solicitó como '${clientProvidedUserId}'.`,
+        message: `Intento de suplantación bloqueado en lectura: el contexto validado es '${validatedUserId}', pero se solicitó query userId='${queryUserId}'.`,
       });
 
       return NextResponse.json(
@@ -168,9 +164,9 @@ export async function GET(
           error: 'Forbidden',
           code: 'FORBIDDEN_USER_IMPERSONATION',
           message:
-            'Acceso Denegado: El userId enviado no coincide con el usuario propietario de la API Key autenticada.',
+            'Acceso Denegado: El userId enviado no coincide con el usuario validado en la cabecera x-user-id / API Key.',
           authenticatedUserId: validatedUserId,
-          attemptedUserId: clientProvidedUserId,
+          attemptedUserId: queryUserId,
         },
         {
           status: 403,
@@ -184,8 +180,9 @@ export async function GET(
     }
 
     // 5. Control de Acceso y Entrega por Visibilidad ('private' vs 'public')
+    // Solo se toma el usuario validado por el middleware (x-validated-user-id)
     const fileVisibility = (fileRow.visibility || 'private').toLowerCase() === 'public' ? 'public' : 'private';
-    const requestingUserId = clientProvidedUserId || validatedUserId || '';
+    const requestingUserId = validatedUserId;
 
     if (fileVisibility === 'private') {
       if (!requestingUserId) {

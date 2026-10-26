@@ -41,8 +41,6 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const {
-      userId: bodyUserId,
-      orgId: bodyOrgId,
       fileName = 'file.png',
       fileType = body.mimeType || 'image/png',
       fileSize: rawFileSize = body.sizeBytes ?? 1024,
@@ -52,39 +50,36 @@ export async function POST(req: NextRequest) {
     } = body;
 
     const visibility = String(rawVisibility).toLowerCase() === 'public' ? 'public' : 'private';
-    const validatedOrgId = req.headers.get('x-validated-org-id');
-    const validatedUserId = req.headers.get('x-validated-user-id');
-    const orgId = bodyOrgId || validatedOrgId;
 
-    // Decisión 1-A: Si la API Key está vinculada a un user_id (x-validated-user-id),
-    // impedir que el cliente suplante a otro usuario enviando un userId distinto en el body.
-    if (validatedUserId && bodyUserId && bodyUserId.trim() !== validatedUserId) {
-      await addServiceLog({
-        method: req.method,
-        action: 'USER_IMPERSONATION_BLOCKED',
-        status: 'ACCESS_DENIED',
-        userId: validatedUserId,
-        orgId: validatedOrgId || orgId,
-        fileName,
-        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-        message: `Intento de suplantación bloqueado: la API Key pertenece al usuario '${validatedUserId}', pero el body solicitó subir como '${bodyUserId}'.`,
-      });
+    // Section 3 (Option A): Ignore userId and orgId from the request body.
+    // Take both strictly from the middleware-validated context headers.
+    const orgId = (req.headers.get('x-validated-org-id') || '').trim();
+    const userId = (req.headers.get('x-validated-user-id') || '').trim();
 
+    if (!orgId) {
       return NextResponse.json(
         {
-          error: 'Forbidden',
-          code: 'FORBIDDEN_USER_IMPERSONATION',
+          error: 'Unauthorized',
+          code: 'MISSING_VALIDATED_ORG',
           method: req.method,
-          message:
-            'Violación de Seguridad: El userId enviado en el body no coincide con el usuario propietario de la API Key autenticada.',
-          authenticatedUserId: validatedUserId,
-          attemptedUserId: bodyUserId,
+          message: 'Contexto de organización no validado. Envía una API Key válida en x-api-key.',
         },
-        { status: 403, headers: corsHeaders }
+        { status: 401, headers: corsHeaders }
       );
     }
 
-    const userId = validatedUserId || bodyUserId;
+    if (!userId) {
+      return NextResponse.json(
+        {
+          error: 'Bad Request',
+          code: 'MISSING_END_USER_ID',
+          method: req.method,
+          message:
+            'El backend debe enviar el UUID del usuario final en la cabecera x-user-id (o usar una llave vinculada a un usuario). Se ignoran userId y orgId del cuerpo.',
+        },
+        { status: 400, headers: corsHeaders }
+      );
+    }
 
     // 1. Query User from Supabase (Real Database Lookup - No Hardcoding)
     let user: any = null;
@@ -169,31 +164,6 @@ export async function POST(req: NextRequest) {
           message: 'Target organization does not exist.',
         },
         { status: 404, headers: corsHeaders }
-      );
-    }
-
-    // CHECK 1.5: API Key Tenant Matching (Injected by Edge Middleware)
-    if (validatedOrgId && validatedOrgId !== orgId) {
-      await addServiceLog({
-        method: req.method,
-        action: 'API_KEY_ORG_MISMATCH',
-        status: 'DENIED_CROSS_ORG',
-        userId: user.id,
-        userName: user.name,
-        orgId: validatedOrgId,
-        targetOrgId: orgId,
-        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-        message: 'API Key does not belong to destination organization.',
-      });
-
-      return NextResponse.json(
-        {
-          error: 'Forbidden',
-          code: 'FORBIDDEN_API_KEY_ORG_MISMATCH',
-          method: req.method,
-          message: 'Multi-Tenant Security Violation: The provided API Key does not belong to the requested target organization.',
-        },
-        { status: 403, headers: corsHeaders }
       );
     }
 

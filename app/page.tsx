@@ -45,41 +45,62 @@ const headerCellStyle: React.CSSProperties = {
 
 export default function ServiceLogsPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [adminSecret, setAdminSecret] = useState<string>('');
+  const [authMessage, setAuthMessage] = useState<string>(
+    'Ingresa ADMIN_API_SECRET (en memoria) para consultar /api/logs.'
+  );
 
   const fetchLogs = async () => {
+    const trimmed = adminSecret.trim();
+    if (!trimmed) {
+      setLogs([]);
+      setAuthMessage('Autenticación requerida: ingresa x-admin-secret para consultar /api/logs.');
+      return;
+    }
+
     try {
       setLoading(true);
-      const res = await fetch('/api/logs', { cache: 'no-store' });
+      const res = await fetch('/api/logs', {
+        cache: 'no-store',
+        headers: {
+          'x-admin-secret': trimmed,
+        },
+      });
+      if (res.status === 401 || res.status === 403) {
+        setLogs([]);
+        setAuthMessage(`Acceso denegado (HTTP ${res.status}): ADMIN_API_SECRET inválido.`);
+        return;
+      }
       if (res.ok) {
         const data = await res.json();
         setLogs(Array.isArray(data.logs) ? data.logs : []);
+        setAuthMessage('Autenticado con ADMIN_API_SECRET (solo en memoria).');
       }
     } catch (err) {
       console.error('Error fetching logs:', err);
+      setAuthMessage('Error de red al consultar /api/logs.');
     } finally {
       setLoading(false);
     }
   };
 
-  const clearLogs = async () => {
-    if (!confirm('¿Limpiar todos los registros de service_logs en Supabase?')) return;
-    await fetch('/api/logs', { method: 'DELETE' });
-    fetchLogs();
-  };
-
-  useEffect(() => {
-    fetchLogs();
-    const interval = setInterval(fetchLogs, 4000);
-    return () => clearInterval(interval);
-  }, []);
-
   return (
     <div>
-      <div style={{ marginBottom: '10px' }}>
+      <div style={{ marginBottom: '10px', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
         <strong>BITACORA DE EVENTOS DEL SISTEMA (service_logs)</strong> | Total registros: {logs.length}{' '}
-        | <button onClick={fetchLogs} disabled={loading}>{loading ? 'Cargando...' : 'Actualizar'}</button>{' '}
-        <button onClick={clearLogs}>Limpiar Logs</button>
+        |{' '}
+        <input
+          type="password"
+          placeholder="x-admin-secret (en memoria)"
+          value={adminSecret}
+          onChange={(e) => setAdminSecret(e.target.value)}
+          style={{ padding: '4px 6px', minWidth: '220px' }}
+        />
+        <button onClick={fetchLogs} disabled={loading || !adminSecret.trim()}>
+          {loading ? 'Cargando...' : 'Consultar Logs'}
+        </button>
+        <span style={{ fontSize: '12px', color: '#555' }}>{authMessage}</span>
       </div>
 
       <div style={{ overflowX: 'auto' }}>

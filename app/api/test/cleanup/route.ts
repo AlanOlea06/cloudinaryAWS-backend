@@ -1,148 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { isAwsConfigured, deleteS3ObjectsByPrefix, deleteS3ObjectsByKeys } from '@/lib/s3';
 import { addServiceLog } from '@/lib/service-logs';
+import { deleteS3ObjectsByPrefix, deleteS3ObjectsByKeys } from '@/lib/s3';
+import { verifyAdminSecretHeader } from '@/lib/env';
 
 const corsHeaders = {
-  'Access-Control-Allow-Origin': 'http://localhost:3000',
-  'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'DELETE, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-secret',
+  'X-Content-Type-Options': 'nosniff',
 };
 
 export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: corsHeaders });
-}
-
-/**
- * Common cleanup handler for DELETE and POST
- */
-async function handleCleanup(req: NextRequest) {
-  try {
-    const { searchParams } = new URL(req.url);
-    let userId = searchParams.get('userId') || 'a1111111-0000-0000-0000-000000000001';
-    let cleanAll = searchParams.get('all') === 'true';
-
-    // Parse body payload if provided
-    try {
-      const body = await req.json().catch(() => ({}));
-      if (body.userId) userId = body.userId;
-      if (body.all !== undefined) cleanAll = Boolean(body.all);
-    } catch {
-      // Ignore if body is empty
-    }
-
-    const s3PrefixPending = cleanAll ? 'pending/' : `pending/${userId}/`;
-    let s3DeletedCount = 0;
-    let s3DeletedKeys: string[] = [];
-    let s3Status = 'aws_not_configured';
-
-    // 1. Purge S3 Objects under 'pending/'
-    if (isAwsConfigured()) {
-      try {
-        if (cleanAll) {
-          const resStaticPending = await deleteS3ObjectsByPrefix('static/pending/');
-          const resPending = await deleteS3ObjectsByPrefix('pending/');
-          s3DeletedCount = resStaticPending.count + resPending.count;
-          s3DeletedKeys = [...resStaticPending.keys, ...resPending.keys];
-        } else {
-          // Look up user's pending keys from Supabase files table before deleting database records
-          const { data: userFiles } = await supabase
-            .from('files')
-            .select('s3_pending_key')
-            .eq('user_id', userId);
-
-          const keysToDelete: string[] = [];
-          (userFiles || []).forEach((f: any) => {
-            if (f.s3_pending_key) keysToDelete.push(f.s3_pending_key);
-          });
-
-          // Delete specific keys (e.g. pending/{fileId}{ext})
-          const resKeys = await deleteS3ObjectsByKeys(keysToDelete);
-          // Also clean legacy user prefix (pending/{userId}/...) if present
-          const resLegacyPending = await deleteS3ObjectsByPrefix(`pending/${userId}/`);
-
-          s3DeletedCount = resKeys.count + resLegacyPending.count;
-          s3DeletedKeys = [...resKeys.keys, ...resLegacyPending.keys];
-        }
-        s3Status = 'success';
-      } catch (s3Err: any) {
-        console.error('Error cleaning up S3 objects:', s3Err.message);
-        s3Status = `error: ${s3Err.message}`;
-      }
-    }
-
-    // 2. Clean File Records in Supabase (files table)
-    try {
-      if (cleanAll) {
-        await supabase.from('files').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-      } else {
-        await supabase.from('files').delete().eq('user_id', userId);
-      }
-    } catch (e: any) {
-      console.warn('Warning cleaning up files table:', e.message);
-    }
-
-    // 3. Clean Audit Logs in Supabase (service_logs table)
-    try {
-      if (cleanAll) {
-        await supabase.from('service_logs').delete().not('created_at', 'is', null);
-      } else {
-        await supabase.from('service_logs').delete().eq('user_id', userId);
-      }
-    } catch (e: any) {
-      console.warn('Warning cleaning up service_logs table:', e.message);
-    }
-
-    // Record cleanup audit log
-    await addServiceLog({
-      action: 'TEST_ENVIRONMENT_CLEANUP',
-      status: 'ALLOWED',
-      userId: cleanAll ? 'admin-system' : userId,
-      userName: cleanAll ? 'System (Global)' : 'Test User',
-      details: {
-        s3Prefix: s3PrefixPending,
-        s3DeletedCount,
-        s3Status,
-        cleanAll,
-        cleanedAt: new Date().toISOString(),
-      },
-    });
-
-    return NextResponse.json(
-      {
-        status: 'success',
-        message: 'Test environment cleanup completed successfully.',
-        cleanupScope: {
-          cleanAll,
-          targetUserId: cleanAll ? 'ALL' : userId,
-          s3PrefixCleaned: s3PrefixPending,
-        },
-        results: {
-          s3: {
-            configured: isAwsConfigured(),
-            status: s3Status,
-            deletedCount: s3DeletedCount,
-            deletedKeys: s3DeletedKeys,
-          },
-          supabase: {
-            filesTable: 'Cleaned successfully',
-            serviceLogsTable: 'Cleaned successfully',
-          },
-        },
-        timestamp: new Date().toISOString(),
-      },
-      { status: 200, headers: corsHeaders }
-    );
-  } catch (error: any) {
-    return NextResponse.json(
-      {
-        status: 'error',
-        message: 'Error executing test cleanup',
-        error: error.message,
-      },
-      { status: 500, headers: corsHeaders }
-    );
-  }
 }
 
 export async function DELETE(req: NextRequest) {
@@ -153,25 +23,116 @@ export async function POST(req: NextRequest) {
   return handleCleanup(req);
 }
 
-export async function GET(req: NextRequest) {
-  return NextResponse.json(
-    {
-      message: 'Test cleanup endpoint (5GB Free Tier Protection)',
-      usage: {
-        method: 'DELETE (or POST)',
-        url: '/api/test/cleanup',
-        queryParams: {
-          userId: 'Test User ID to clean up (optional, defaults to Carlos Mendoza)',
-          all: 'true to purge all test files under pending/ (optional)',
-        },
-        examples: [
-          'DELETE /api/test/cleanup',
-          'DELETE /api/test/cleanup?userId=a1111111-0000-0000-0000-000000000001',
-          'DELETE /api/test/cleanup?all=true',
-        ],
+async function handleCleanup(req: NextRequest) {
+  if (process.env.NODE_ENV === 'production') {
+    return NextResponse.json(
+      {
+        error: 'Forbidden',
+        code: 'ENDPOINT_DISABLED_IN_PRODUCTION',
+        message: 'El endpoint /api/test/cleanup está deshabilitado permanentemente en producción.',
       },
-      awsConfigured: isAwsConfigured(),
-    },
-    { status: 200, headers: corsHeaders }
-  );
+      { status: 403, headers: corsHeaders }
+    );
+  }
+
+  const check = verifyAdminSecretHeader(req.headers);
+  if (!check.valid) {
+    return NextResponse.json(
+      {
+        error: check.status === 401 ? 'Unauthorized' : 'Forbidden',
+        code: check.code,
+        message: check.message,
+      },
+      { status: check.status, headers: corsHeaders }
+    );
+  }
+
+  try {
+    const { searchParams } = new URL(req.url);
+    const userId = searchParams.get('userId') || undefined;
+    const orgId = searchParams.get('orgId') || undefined;
+
+    let selectQuery = supabase
+      .from('files')
+      .select('id, s3_pending_key, s3_processed_key, user_id, org_id');
+
+    if (userId) {
+      selectQuery = selectQuery.eq('user_id', userId);
+    }
+    if (orgId) {
+      selectQuery = selectQuery.eq('org_id', orgId);
+    }
+
+    const { data: records } = await selectQuery;
+    const keysToDelete: string[] = [];
+
+    if (records && records.length > 0) {
+      for (const r of records) {
+        if (r.s3_pending_key) keysToDelete.push(r.s3_pending_key);
+        if (r.s3_processed_key) keysToDelete.push(r.s3_processed_key);
+      }
+    }
+
+    let s3Result = { count: 0, keys: [] as string[] };
+    if (keysToDelete.length > 0) {
+      try {
+        s3Result = await deleteS3ObjectsByKeys(keysToDelete);
+      } catch (e) {
+        console.warn('Error eliminando objetos S3 por keys en cleanup:', e);
+      }
+    }
+
+    if (userId) {
+      try {
+        const prefixRes = await deleteS3ObjectsByPrefix(`static/pending/${userId}/`);
+        s3Result.count += prefixRes.count;
+        s3Result.keys.push(...prefixRes.keys);
+      } catch (e) {
+        console.warn('Error eliminando prefijo S3 en cleanup:', e);
+      }
+    }
+
+    let deleteDbQuery = supabase.from('files').delete();
+    if (userId) {
+      deleteDbQuery = deleteDbQuery.eq('user_id', userId);
+    } else if (orgId) {
+      deleteDbQuery = deleteDbQuery.eq('org_id', orgId);
+    } else {
+      deleteDbQuery = deleteDbQuery.neq('id', '00000000-0000-0000-0000-000000000000');
+    }
+
+    const { error: dbDeleteError } = await deleteDbQuery;
+
+    if (dbDeleteError) {
+      return NextResponse.json(
+        { error: 'Error al limpiar registros en Supabase', details: dbDeleteError.message },
+        { status: 500, headers: corsHeaders }
+      );
+    }
+
+    await addServiceLog({
+      method: 'DELETE',
+      action: 'TEST_CLEANUP_EXECUTED',
+      status: 'ALLOWED',
+      userId,
+      orgId,
+      message: `Limpieza de pruebas completada (dev): ${records?.length || 0} registro(s) en DB y ${s3Result.count} objeto(s) en S3 eliminados.`,
+    });
+
+    return NextResponse.json(
+      {
+        status: 'cleaned',
+        dbDeletedCount: records?.length || 0,
+        s3DeletedCount: s3Result.count,
+        s3DeletedKeys: s3Result.keys,
+        message: 'Entorno de pruebas limpiado exitosamente (Base de datos + AWS S3).',
+      },
+      { status: 200, headers: corsHeaders }
+    );
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: 'Internal Server Error', message: err.message },
+      { status: 500, headers: corsHeaders }
+    );
+  }
 }

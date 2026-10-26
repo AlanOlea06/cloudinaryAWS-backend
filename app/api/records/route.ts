@@ -1,76 +1,185 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
+import { addServiceLog } from '@/lib/service-logs';
+import { deleteS3ObjectsByKeys } from '@/lib/s3';
+import { verifyAdminSecretHeader } from '@/lib/env';
 
 const corsHeaders = {
-  'Access-Control-Allow-Origin': 'http://localhost:3000',
+  'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-secret',
+  'X-Content-Type-Options': 'nosniff',
 };
 
 export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: corsHeaders });
 }
 
-export async function GET() {
+function enforceAdminAuth(req: NextRequest): NextResponse | null {
+  const check = verifyAdminSecretHeader(req.headers);
+  if (!check.valid) {
+    return NextResponse.json(
+      {
+        error: check.status === 401 ? 'Unauthorized' : 'Forbidden',
+        code: check.code,
+        message: check.message,
+      },
+      { status: check.status, headers: corsHeaders }
+    );
+  }
+  return null;
+}
+
+export async function GET(req: NextRequest) {
+  const authError = enforceAdminAuth(req);
+  if (authError) return authError;
+
   try {
-    // 1. Query standardized English table: files
-    let { data, error } = await supabase
+    const { searchParams } = new URL(req.url);
+    const limit = Math.min(Number(searchParams.get('limit') || '50'), 200);
+    const userId = searchParams.get('userId');
+    const orgId = searchParams.get('orgId');
+    const status = searchParams.get('status');
+
+    let query = supabase
       .from('files')
-      .select('*, users(name, email, role), organizations(name, slug)')
+      .select(`
+        *,
+        user:users!files_user_id_fkey ( id, name, email, role ),
+        organization:organizations!files_org_id_fkey ( id, name, slug )
+      `)
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(limit);
 
-    // 2. If relational query on files failed, try simple files query
-    if (error) {
-      const simpleFiles = await supabase
-        .from('files')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(50);
-
-      if (!simpleFiles.error && simpleFiles.data) {
-        data = simpleFiles.data;
-        error = null;
-      }
+    if (userId) {
+      query = query.eq('user_id', userId);
+    }
+    if (orgId) {
+      query = query.eq('org_id', orgId);
+    }
+    if (status) {
+      query = query.eq('status', status);
     }
 
-    if (error) {
-      return NextResponse.json({ error: error.message, records: [] }, { status: 500, headers: corsHeaders });
-    }
+    const { data, error } = await query;
 
-    // Format output with unified English fields
-    const formattedRecords = (data || []).map((row: any) => {
-      const fileName = row.original_name || 'unknown';
-      const extension = row.extension || (fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : '');
-      return {
-        ...row,
-        fileName,
-        extension,
-        mimeType: row.mime_type,
-        sizeBytes: row.size_bytes,
-        sha256Hash: row.sha256_hash,
-        userName: row.users?.name || 'Unknown',
-        userEmail: row.users?.email || null,
-        orgName: row.organizations?.name || null,
-        orgSlug: row.organizations?.slug || null,
-      };
-    });
+    if (error) {
+      return NextResponse.json(
+        { error: 'Error al consultar la tabla files en Supabase', details: error.message },
+        { status: 500, headers: corsHeaders }
+      );
+    }
 
     return NextResponse.json(
-      { records: formattedRecords, count: formattedRecords.length },
+      {
+        count: data?.length || 0,
+        records: data || [],
+      },
       { status: 200, headers: corsHeaders }
     );
   } catch (err: any) {
-    return NextResponse.json({ error: err.message, records: [] }, { status: 500, headers: corsHeaders });
+    return NextResponse.json(
+      { error: 'Internal Server Error', message: err.message },
+      { status: 500, headers: corsHeaders }
+    );
   }
 }
 
-export async function DELETE() {
-  try {
-    await supabase.from('files').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+export async function DELETE(req: NextRequest) {
+  if (process.env.NODE_ENV === 'production') {
+    return NextResponse.json(
+      {
+        error: 'Forbidden',
+        code: 'ENDPOINT_DISABLED_IN_PRODUCTION',
+        message: 'DELETE /api/records está deshabilitado permanentemente en producción.',
+      },
+      { status: 403, headers: corsHeaders }
+    );
+  }
 
-    return NextResponse.json({ message: 'File records cleared successfully' }, { status: 200, headers: corsHeaders });
+  const authError = enforceAdminAuth(req);
+  if (authError) return authError;
+
+  try {
+    const { searchParams } = new URL(req.url);
+    const id = searchParams.get('id');
+    const ticketId = searchParams.get('ticketId');
+
+    let selectQuery = supabase
+      .from('files')
+      .select('id, s3_pending_key, s3_processed_key');
+
+    if (id) {
+      selectQuery = selectQuery.eq('id', id);
+    } else if (ticketId) {
+      selectQuery = selectQuery.eq('ticket_id', ticketId);
+    } else {
+      selectQuery = selectQuery.neq('id', '00000000-0000-0000-0000-000000000000');
+    }
+
+    const { data: recordsToDelete } = await selectQuery;
+
+    const s3KeysToRemove: string[] = [];
+    if (recordsToDelete && recordsToDelete.length > 0) {
+      for (const rec of recordsToDelete) {
+        if (rec.s3_pending_key) s3KeysToRemove.push(rec.s3_pending_key);
+        if (rec.s3_processed_key) s3KeysToRemove.push(rec.s3_processed_key);
+      }
+    }
+
+    let s3Result = { count: 0, keys: [] as string[] };
+    if (s3KeysToRemove.length > 0) {
+      try {
+        s3Result = await deleteS3ObjectsByKeys(s3KeysToRemove);
+      } catch (s3Err) {
+        console.warn('No se pudieron limpiar objetos S3 en DELETE /api/records:', s3Err);
+      }
+    }
+
+    let deleteQuery = supabase.from('files').delete();
+
+    if (id) {
+      deleteQuery = deleteQuery.eq('id', id);
+    } else if (ticketId) {
+      deleteQuery = deleteQuery.eq('ticket_id', ticketId);
+    } else {
+      deleteQuery = deleteQuery.neq('id', '00000000-0000-0000-0000-000000000000');
+    }
+
+    const { error } = await deleteQuery;
+
+    if (error) {
+      return NextResponse.json(
+        { error: 'Error al eliminar registros en files', details: error.message },
+        { status: 500, headers: corsHeaders }
+      );
+    }
+
+    await addServiceLog({
+      method: 'DELETE',
+      action: 'RECORDS_DELETED',
+      status: 'ALLOWED',
+      ticketId: ticketId || undefined,
+      fileId: id || undefined,
+      message: id
+        ? `Registro eliminado (id: ${id}) y ${s3Result.count} objeto(s) en S3.`
+        : ticketId
+        ? `Registro eliminado (ticketId: ${ticketId}) y ${s3Result.count} objeto(s) en S3.`
+        : `Todos los registros de prueba en files fueron eliminados junto con ${s3Result.count} objeto(s) en S3.`,
+    });
+
+    return NextResponse.json(
+      {
+        message: 'Registros y objetos en S3 eliminados correctamente (entorno de desarrollo).',
+        s3DeletedCount: s3Result.count,
+        s3DeletedKeys: s3Result.keys,
+      },
+      { status: 200, headers: corsHeaders }
+    );
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500, headers: corsHeaders });
+    return NextResponse.json(
+      { error: 'Internal Server Error', message: err.message },
+      { status: 500, headers: corsHeaders }
+    );
   }
 }

@@ -48,6 +48,17 @@ export async function POST(
   req: NextRequest,
   context: { params: { id: string } | Promise<{ id: string }> }
 ) {
+  if (process.env.NODE_ENV === 'production') {
+    return NextResponse.json(
+      {
+        error: 'Service Unavailable',
+        code: 'IMAGE_TRANSFORM_DISABLED_IN_PRODUCTION',
+        message: 'El endpoint /api/img está deshabilitado en producción hasta la etapa de transformaciones.',
+      },
+      { status: 503, headers: corsHeaders }
+    );
+  }
+
   try {
     const resolvedParams = await Promise.resolve(context.params);
     const fileId = resolvedParams?.id?.trim();
@@ -206,6 +217,17 @@ export async function GET(
   req: NextRequest,
   context: { params: { id: string } | Promise<{ id: string }> }
 ) {
+  if (process.env.NODE_ENV === 'production') {
+    return NextResponse.json(
+      {
+        error: 'Service Unavailable',
+        code: 'IMAGE_TRANSFORM_DISABLED_IN_PRODUCTION',
+        message: 'El endpoint /api/img está deshabilitado en producción hasta la etapa de transformaciones.',
+      },
+      { status: 503, headers: corsHeaders }
+    );
+  }
+
   try {
     const resolvedParams = await Promise.resolve(context.params);
     const fileId = resolvedParams?.id?.trim();

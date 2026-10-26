@@ -283,58 +283,37 @@ export async function DELETE(req: NextRequest) {
 // ============================================================================
 async function handleCreateMultipart(req: NextRequest, body: any) {
   const {
-    userId: bodyUserId,
-    orgId: bodyOrgId,
     fileName = 'file.png',
     fileType = 'image/png',
     fileSize = 0,
     visibility = 'private',
   } = body;
 
-  const validatedOrgId = req.headers.get('x-validated-org-id');
-  const validatedUserId = req.headers.get('x-validated-user-id');
+  // Section 3 (Option A): Ignore userId and orgId from the request body.
+  // Take both strictly from the middleware-validated context headers.
+  const orgId = (req.headers.get('x-validated-org-id') || '').trim();
+  const userId = (req.headers.get('x-validated-user-id') || '').trim();
   const ipAddress = req.headers.get('x-forwarded-for') || '127.0.0.1';
 
-  if (validatedOrgId && bodyOrgId && bodyOrgId !== validatedOrgId) {
+  if (!orgId) {
     return NextResponse.json(
       {
-        error: 'Forbidden',
-        code: 'FORBIDDEN_TENANT_MISMATCH',
-        message: 'La llave API no pertenece a la organización solicitada.',
+        error: 'Unauthorized',
+        code: 'MISSING_VALIDATED_ORG',
+        message: 'Contexto de organización no validado. Envía una API Key válida en x-api-key.',
       },
-      { status: 403, headers: corsHeaders }
+      { status: 401, headers: corsHeaders }
     );
   }
 
-  // Decision 1-A: Block user impersonation
-  if (validatedUserId && bodyUserId && bodyUserId !== validatedUserId) {
-    await addServiceLog({
-      method: 'POST',
-      action: 'MULTIPART_IMPERSONATION_BLOCKED',
-      status: 'DENIED_USER_IMPERSONATION',
-      userId: validatedUserId,
-      orgId: validatedOrgId || bodyOrgId,
-      fileName,
-      ipAddress,
-      message: `Intento de suplantación bloqueado en multipart create: API Key pertenece a '${validatedUserId}', pero solicitó '${bodyUserId}'.`,
-    });
-
+  if (!userId) {
     return NextResponse.json(
       {
-        error: 'Forbidden',
-        code: 'FORBIDDEN_USER_IMPERSONATION',
-        message: 'El userId enviado no coincide con el propietario de la API Key autenticada.',
+        error: 'Bad Request',
+        code: 'MISSING_END_USER_ID',
+        message:
+          'El backend debe enviar el UUID del usuario final en la cabecera x-user-id (o usar una llave vinculada a un usuario). Se ignoran userId y orgId del cuerpo.',
       },
-      { status: 403, headers: corsHeaders }
-    );
-  }
-
-  const orgId = validatedOrgId || bodyOrgId;
-  const userId = validatedUserId || bodyUserId;
-
-  if (!userId || !orgId) {
-    return NextResponse.json(
-      { error: 'Bad Request', code: 'MISSING_IDENTITY', message: 'Se requiere userId y orgId.' },
       { status: 400, headers: corsHeaders }
     );
   }

@@ -1,28 +1,27 @@
 // ============================================================================
-// [TEMPORARY-LAMBDA-FALLBACK: TASK-B12-IMAGE-TRANSFORM]
-// Búsqueda rápida para migrar/eliminar cuando exista AWS Lambda: "TEMPORARY-LAMBDA-FALLBACK"
-// Propósito: Reemplazar AWS Serverless Image Handler / Lambda@Edge implementando
-// transformación dinámica de imágenes con `sharp`, parámetros firmados con HMAC-SHA256,
-// expiración obligatoria, límites de dimensiones (16..2000 px) y tope de respuesta
-// de Vercel Serverless (4 MB).
+// [TEMPORARY-LAMBDA-FALLBACK: TASK-B12-IMAGE-TRANSFORM-SIGNER]
+// Búsqueda rápida: "TEMPORARY-LAMBDA-FALLBACK"
+// Propósito: Firma y verificación HMAC-SHA256 con expiración para URLs de
+//            transformación dinámica (/api/img/[id]?w=&h=&fit=&format=&exp=&sig=).
+// Nota (Sección 2): Deshabilitado en producción hasta la etapa de transformaciones.
+// Sin secretos por defecto ni reutilización de SUPABASE_SERVICE_ROLE_KEY.
 // ============================================================================
 
 import crypto from 'crypto';
+import { requireEnv } from '@/lib/env';
 
 export const MIN_TRANSFORM_DIMENSION = 16;
 export const MAX_TRANSFORM_DIMENSION = 2000;
-export const MAX_VERCEL_RESPONSE_BYTES = 4 * 1024 * 1024; // 4 MB safety limit under Vercel's 4.5 MB limit
+export const MAX_VERCEL_RESPONSE_BYTES = 4 * 1024 * 1024; // 4 MB safety limit under Vercel's 4.5 MB cap
 
 export const ALLOWED_TRANSFORM_FITS = new Set(['cover', 'contain', 'fill', 'inside', 'outside']);
 export const ALLOWED_TRANSFORM_FORMATS = new Set(['webp', 'jpeg', 'jpg', 'png', 'avif']);
 
-const DEFAULT_TRANSFORM_SECRET =
-  process.env.IMAGE_TRANSFORM_HMAC_SECRET ||
-  process.env.TICKET_HMAC_SECRET ||
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  'cloudinary-clone-transform-hmac-secret-2026';
+function getTransformHmacSecret(): string {
+  return requireEnv('IMAGE_TRANSFORM_HMAC_SECRET');
+}
 
-export interface ImageTransformParams {
+export interface TransformParamsToSign {
   fileId: string;
   w?: number | string | null;
   h?: number | string | null;
@@ -31,60 +30,62 @@ export interface ImageTransformParams {
   exp: number | string;
 }
 
-export function buildTransformCanonicalString(params: ImageTransformParams): string {
-  const wStr = params.w !== undefined && params.w !== null && params.w !== '' ? String(params.w) : '';
-  const hStr = params.h !== undefined && params.h !== null && params.h !== '' ? String(params.h) : '';
-  const fitStr = params.fit ? String(params.fit).toLowerCase().trim() : 'cover';
-  const fmtStr = params.format ? String(params.format).toLowerCase().trim() : 'webp';
-  const expStr = String(params.exp);
+/**
+ * Builds the canonical string for signing image transformation parameters.
+ */
+export function buildCanonicalTransformString(params: TransformParamsToSign): string {
+  const fileId = String(params.fileId || '').trim();
+  const w = params.w !== undefined && params.w !== null && params.w !== '' ? String(params.w).trim() : '';
+  const h = params.h !== undefined && params.h !== null && params.h !== '' ? String(params.h).trim() : '';
+  const fit = String(params.fit || 'cover').toLowerCase().trim();
+  const format = String(params.format || 'webp').toLowerCase().trim();
+  const exp = String(params.exp || '').trim();
 
-  return `img:${params.fileId}:w=${wStr}:h=${hStr}:fit=${fitStr}:format=${fmtStr}:exp=${expStr}`;
+  return `id=${fileId}&w=${w}&h=${h}&fit=${fit}&format=${format}&exp=${exp}`;
 }
 
-export function signImageTransformParams(
-  params: ImageTransformParams,
-  secret?: string
-): {
-  sig: string;
+/**
+ * Signs image transformation parameters using HMAC-SHA256.
+ */
+export function signImageTransformParams(params: TransformParamsToSign): {
   canonical: string;
+  sig: string;
   queryString: string;
 } {
-  const effectiveSecret = (secret || DEFAULT_TRANSFORM_SECRET).trim();
-  const canonical = buildTransformCanonicalString(params);
-  const sig = crypto.createHmac('sha256', effectiveSecret).update(canonical).digest('hex');
+  const canonical = buildCanonicalTransformString(params);
+  const sig = crypto
+    .createHmac('sha256', getTransformHmacSecret())
+    .update(canonical, 'utf8')
+    .digest('hex');
 
-  const qs = new URLSearchParams();
-  if (params.w !== undefined && params.w !== null && params.w !== '') {
-    qs.set('w', String(params.w));
-  }
-  if (params.h !== undefined && params.h !== null && params.h !== '') {
-    qs.set('h', String(params.h));
-  }
-  qs.set('fit', params.fit ? String(params.fit).toLowerCase().trim() : 'cover');
-  qs.set('format', params.format ? String(params.format).toLowerCase().trim() : 'webp');
-  qs.set('exp', String(params.exp));
-  qs.set('sig', sig);
+  const query = new URLSearchParams();
+  if (params.w !== undefined && params.w !== null && params.w !== '') query.set('w', String(params.w));
+  if (params.h !== undefined && params.h !== null && params.h !== '') query.set('h', String(params.h));
+  query.set('fit', String(params.fit || 'cover').toLowerCase().trim());
+  query.set('format', String(params.format || 'webp').toLowerCase().trim());
+  query.set('exp', String(params.exp));
+  query.set('sig', sig);
 
   return {
-    sig,
     canonical,
-    queryString: qs.toString(),
+    sig,
+    queryString: query.toString(),
   };
 }
 
+/**
+ * Verifies the HMAC-SHA256 signature and expiration timestamp (`exp` in Unix seconds)
+ * for `/api/img/[id]`.
+ */
 export function verifyImageTransformSignature(
-  params: ImageTransformParams & { sig?: string | null },
-  secret?: string
-): {
-  valid: boolean;
-  code?: string;
-  message?: string;
-} {
-  if (!params.sig || !params.exp) {
+  params: TransformParamsToSign & { sig?: string | null }
+): { valid: boolean; code?: string; message?: string } {
+  const sig = String(params.sig || '').trim().toLowerCase();
+  if (!sig || !/^[a-f0-9]{64}$/.test(sig)) {
     return {
       valid: false,
       code: 'MISSING_TRANSFORM_SIGNATURE',
-      message: 'Se requieren los parámetros firmados exp y sig para transformar la imagen.',
+      message: 'El parámetro de firma criptográfica (sig) es obligatorio y debe ser un HMAC-SHA256 hexadecimal de 64 caracteres.',
     };
   }
 
@@ -92,39 +93,31 @@ export function verifyImageTransformSignature(
   if (!Number.isFinite(expNum) || expNum <= 0) {
     return {
       valid: false,
-      code: 'INVALID_TRANSFORM_EXPIRATION',
-      message: 'El parámetro exp debe ser un timestamp UNIX válido en segundos.',
+      code: 'MISSING_TRANSFORM_EXPIRATION',
+      message: 'El parámetro de expiración (exp) es obligatorio y debe ser un timestamp Unix válido en segundos.',
     };
   }
 
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (nowSec > expNum) {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (nowSeconds > expNum) {
     return {
       valid: false,
       code: 'TRANSFORM_URL_EXPIRED',
-      message: `La URL de transformación expiró hace ${nowSec - expNum} segundos.`,
+      message: `La URL de transformación ha expirado (exp=${expNum}, now=${nowSeconds}). Solicita una nueva URL firmada.`,
     };
   }
 
-  const { sig: expectedSig } = signImageTransformParams(params, secret);
-  const cleanProvided = String(params.sig).trim().toLowerCase();
+  const { sig: expectedSig } = signImageTransformParams(params);
+  const aBuf = Buffer.from(sig, 'utf8');
+  const bBuf = Buffer.from(expectedSig.toLowerCase(), 'utf8');
 
-  try {
-    const a = Buffer.from(expectedSig, 'hex');
-    const b = Buffer.from(cleanProvided, 'hex');
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-      return {
-        valid: false,
-        code: 'INVALID_TRANSFORM_SIGNATURE',
-        message: 'La firma HMAC-SHA256 de los parámetros de transformación es inválida o fue alterada.',
-      };
-    }
-    return { valid: true };
-  } catch {
+  if (aBuf.length !== bBuf.length || !crypto.timingSafeEqual(aBuf, bBuf)) {
     return {
       valid: false,
       code: 'INVALID_TRANSFORM_SIGNATURE',
-      message: 'Formato de firma HMAC-SHA256 inválido.',
+      message: 'Firma HMAC-SHA256 (sig) inválida para los parámetros de transformación solicitados (w, h, fit, format, exp).',
     };
   }
+
+  return { valid: true };
 }

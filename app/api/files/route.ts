@@ -19,25 +19,23 @@ export async function OPTIONS() {
  */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
-  const validatedOrgId = req.headers.get('x-validated-org-id');
-  const queryOrgId = searchParams.get('orgId') || validatedOrgId;
-  const queryUserId = searchParams.get('userId');
+  const validatedOrgId = (req.headers.get('x-validated-org-id') || '').trim();
+  const validatedUserId = (req.headers.get('x-validated-user-id') || '').trim();
+  const queryUserId = searchParams.get('userId')?.trim() || validatedUserId;
 
-  if (validatedOrgId && queryOrgId && queryOrgId !== validatedOrgId) {
+  if (!validatedOrgId) {
     return NextResponse.json(
-      { error: 'Forbidden', code: 'FORBIDDEN_TENANT_MISMATCH', message: 'La llave API pertenece a otra organización.' },
-      { status: 403, headers: corsHeaders }
+      { error: 'Unauthorized', code: 'MISSING_VALIDATED_ORG', message: 'Organización no validada.' },
+      { status: 401, headers: corsHeaders }
     );
   }
 
   let query = supabase
     .from('files')
     .select('*')
+    .eq('org_id', validatedOrgId)
     .order('created_at', { ascending: false });
 
-  if (queryOrgId) {
-    query = query.eq('org_id', queryOrgId);
-  }
   if (queryUserId) {
     query = query.eq('user_id', queryUserId);
   }
@@ -61,16 +59,15 @@ export async function GET(req: NextRequest) {
 }
 
 /**
- * DELETE /api/files?userId=<uuid> OR DELETE /api/files?orgId=<uuid>&confirmOrgWipe=true
+ * DELETE /api/files?userId=<uuid> OR DELETE /api/files?confirmOrgWipe=true
  * Task B.10: Derecho de Eliminación (Right to Erasure) — Borrado completo de todos los archivos
- * de un usuario (userId) o de una organización entera (orgId), eliminando tanto s3_pending_key
- * como s3_processed_key y abortando cualquier subida multipart activa.
+ * de un usuario (userId / x-user-id) o de la organización autenticada (x-validated-org-id).
  */
 export async function DELETE(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
-    const validatedOrgId = req.headers.get('x-validated-org-id');
-    const validatedUserId = req.headers.get('x-validated-user-id');
+    const validatedOrgId = (req.headers.get('x-validated-org-id') || '').trim();
+    const validatedUserId = (req.headers.get('x-validated-user-id') || '').trim();
     const ipAddress = req.headers.get('x-forwarded-for') || '127.0.0.1';
 
     let body: any = {};
@@ -80,8 +77,8 @@ export async function DELETE(req: NextRequest) {
       body = {};
     }
 
-    const targetUserId = (searchParams.get('userId') || body.userId || '').trim();
-    const targetOrgId = (searchParams.get('orgId') || body.orgId || validatedOrgId || '').trim();
+    const targetOrgId = validatedOrgId;
+    const targetUserId = (validatedUserId || searchParams.get('userId') || '').trim();
     const confirmOrgWipe =
       searchParams.get('confirmOrgWipe') === 'true' || body.confirmOrgWipe === true;
     const excludeIdsRaw = searchParams.get('excludeFileIds') || body.excludeFileIds || '';
@@ -94,22 +91,11 @@ export async function DELETE(req: NextRequest) {
     if (!targetOrgId) {
       return NextResponse.json(
         {
-          error: 'Bad Request',
-          code: 'MISSING_ORG_ID',
-          message: 'Se requiere identificar la organización (orgId) para ejecutar el borrado masivo.',
+          error: 'Unauthorized',
+          code: 'MISSING_VALIDATED_ORG',
+          message: 'Se requiere contexto de organización validado (x-api-key).',
         },
-        { status: 400, headers: corsHeaders }
-      );
-    }
-
-    if (validatedOrgId && targetOrgId !== validatedOrgId) {
-      return NextResponse.json(
-        {
-          error: 'Forbidden',
-          code: 'FORBIDDEN_TENANT_MISMATCH',
-          message: 'Acceso Denegado: No puedes borrar archivos de otra organización.',
-        },
-        { status: 403, headers: corsHeaders }
+        { status: 401, headers: corsHeaders }
       );
     }
 

@@ -1,15 +1,44 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { requireEnv } from '@/lib/env';
 
-const FALLBACK_URL = 'https://ztmjgbhdgbgbtmvxgtrc.supabase.co';
-// Clave en base64 para evitar alertas de GitHub Secret Scanning en el commit
-const FALLBACK_KEY = Buffer.from('c2Jfc2VjcmV0X0tGcjZGV19icy14eXJ3bFlGekt5S0FfZTdvTGxjUWU=', 'base64').toString('utf-8');
+let cachedClient: SupabaseClient | null = null;
+let cachedUrl: string | null = null;
+let cachedKey: string | null = null;
 
-export const supabaseUrl = process.env.SUPABASE_URL || FALLBACK_URL;
-export const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || FALLBACK_KEY;
+export function getSupabaseUrl(): string {
+  return requireEnv('SUPABASE_URL');
+}
 
-export const supabase = createClient(supabaseUrl, supabaseServiceKey, {
-  auth: {
-    persistSession: false,
-    autoRefreshToken: false,
+export function getSupabaseServiceRoleKey(): string {
+  return requireEnv('SUPABASE_SERVICE_ROLE_KEY');
+}
+
+export function getSupabaseClient(): SupabaseClient {
+  const url = getSupabaseUrl();
+  const key = getSupabaseServiceRoleKey();
+
+  if (!cachedClient || cachedUrl !== url || cachedKey !== key) {
+    cachedClient = createClient(url, key, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    });
+    cachedUrl = url;
+    cachedKey = key;
+  }
+
+  return cachedClient;
+}
+
+/**
+ * Proxy client that validates SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY
+ * on every runtime read without any hardcoded fallback URL or key.
+ */
+export const supabase: SupabaseClient = new Proxy({} as SupabaseClient, {
+  get(_target, prop, _receiver) {
+    const client = getSupabaseClient();
+    const value = (client as any)[prop];
+    return typeof value === 'function' ? value.bind(client) : value;
   },
 });

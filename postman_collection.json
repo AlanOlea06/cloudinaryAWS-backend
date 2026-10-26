@@ -1,20 +1,23 @@
 {
   "info": {
-    "name": "Cloudinary Clone - API",
-    "description": "Standardized English Postman collection with Edge API Key authentication. Fill in the variables under the Collection Variables tab (or in an Environment) before sending requests.",
+    "name": "Cloudinary Clone - API (Hardened Sections 2 & 3)",
+    "description": "Colección Postman actualizada para las Secciones 2 (Cierre de acceso abierto) y 3 (Modelo de llaves por organización - Opción A).\n\nVariables secretas (tipo 'secret'):\n- adminSecret: ADMIN_API_SECRET para rutas administrativas (/api/keys, /api/logs, /api/records, /api/users).\n- cronSecret: CRON_SECRET para /api/cron/maintenance.\n- apiKey: API Key de organización (sk_live_...) para uso exclusivo en backend.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     { "key": "baseUrl", "value": "https://cloudinary-aws-backend.vercel.app", "type": "string" },
-    { "key": "apiKey", "value": "", "type": "string" },
-    { "key": "userId", "value": "a1111111-0000-0000-0000-000000000001", "type": "string" },
+    { "key": "adminSecret", "value": "", "type": "secret" },
+    { "key": "cronSecret", "value": "", "type": "secret" },
+    { "key": "apiKey", "value": "", "type": "secret" },
+    { "key": "keyId", "value": "", "type": "string" },
     { "key": "orgId", "value": "11111111-1111-1111-1111-111111111111", "type": "string" },
-    { "key": "fileName", "value": "test-document.png", "type": "string" },
-    { "key": "extension", "value": ".png", "type": "string" },
-    { "key": "fileType", "value": "image/png", "type": "string" },
+    { "key": "userId", "value": "a1111111-0000-0000-0000-000000000001", "type": "string" },
+    { "key": "otherOrgUserId", "value": "b2222222-0000-0000-0000-000000000001", "type": "string" },
+    { "key": "fileName", "value": "imagen de prueba 1.jpg", "type": "string" },
+    { "key": "extension", "value": ".jpg", "type": "string" },
+    { "key": "fileType", "value": "image/jpeg", "type": "string" },
     { "key": "fileSize", "value": "1024", "type": "string" },
     { "key": "visibility", "value": "private", "type": "string" },
-    { "key": "sha256Hash", "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "type": "string" },
     { "key": "ticketId", "value": "", "type": "string" },
     { "key": "fileId", "value": "", "type": "string" },
     { "key": "confirmToken", "value": "", "type": "string" },
@@ -23,7 +26,20 @@
   ],
   "item": [
     {
-      "name": "0. Generate API Key (POST /api/keys)",
+      "name": "0.0 Healthcheck Público (GET /api/health)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/health",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "health"]
+        },
+        "description": "Única ruta pública bajo /api/*. Devuelve 200 OK sin exponer nombre del bucket ni datos sensibles."
+      }
+    },
+    {
+      "name": "0.1 Crear API Key de Organización (POST /api/keys)",
       "event": [
         {
           "listen": "test",
@@ -33,7 +49,9 @@
               "const json = pm.response.json();",
               "if (json.apiKey) {",
               "    pm.collectionVariables.set('apiKey', json.apiKey);",
-              "    console.log('Saved apiKey to collection variable:', json.apiKey);",
+              "}",
+              "if (json.keyMetadata && json.keyMetadata.id) {",
+              "    pm.collectionVariables.set('keyId', json.keyMetadata.id);",
               "}"
             ]
           }
@@ -42,11 +60,12 @@
       "request": {
         "method": "POST",
         "header": [
-          { "key": "Content-Type", "value": "application/json" }
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "x-admin-secret", "value": "{{adminSecret}}", "description": "Obligatorio (ADMIN_API_SECRET)" }
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"orgId\": \"{{orgId}}\",\n  \"name\": \"Postman Integration Key\",\n  \"can_read\": true,\n  \"can_upload\": true,\n  \"can_delete\": false\n}",
+          "raw": "{\n  \"org_id\": \"{{orgId}}\",\n  \"user_id\": null,\n  \"name\": \"Backend Organization Key\",\n  \"can_read\": true,\n  \"can_upload\": true,\n  \"can_delete\": true\n}",
           "options": { "raw": { "language": "json" } }
         },
         "url": {
@@ -54,27 +73,48 @@
           "host": ["{{baseUrl}}"],
           "path": ["api", "keys"]
         },
-        "description": "Generates a new secure API Key with format sk_live_... for the organization (max 3 active keys allowed). Automatically saves the plain key to {{apiKey}}."
+        "description": "Crea una API Key de organización (user_id: null) para uso en el backend del cliente. Exige x-admin-secret."
       }
     },
     {
-      "name": "0. List Organization API Keys (GET /api/keys)",
+      "name": "0.2 Listar API Keys de Organización (GET /api/keys)",
       "request": {
         "method": "GET",
-        "header": [],
+        "header": [
+          { "key": "x-admin-secret", "value": "{{adminSecret}}", "description": "Obligatorio (ADMIN_API_SECRET)" }
+        ],
         "url": {
-          "raw": "{{baseUrl}}/api/keys?orgId={{orgId}}",
+          "raw": "{{baseUrl}}/api/keys?org_id={{orgId}}",
           "host": ["{{baseUrl}}"],
           "path": ["api", "keys"],
           "query": [
-            { "key": "orgId", "value": "{{orgId}}" }
+            { "key": "org_id", "value": "{{orgId}}" }
           ]
         },
-        "description": "Lists all registered API Keys for an organization (without exposing secrets or hashes)."
+        "description": "Lista las API Keys de la organización sin exponer hashes ni secretos. Exige x-admin-secret."
       }
     },
     {
-      "name": "1. Request Upload Ticket (Presigned URL)",
+      "name": "0.3 Eliminar o Revocar API Key (DELETE /api/keys)",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          { "key": "x-admin-secret", "value": "{{adminSecret}}", "description": "Obligatorio (ADMIN_API_SECRET)" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/keys?id={{keyId}}&mode=delete",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "keys"],
+          "query": [
+            { "key": "id", "value": "{{keyId}}" },
+            { "key": "mode", "value": "delete" }
+          ]
+        },
+        "description": "Elimina o revoca una API Key por ID. Exige x-admin-secret."
+      }
+    },
+    {
+      "name": "1. Solicitar Ticket de Subida (POST /api/upload)",
       "event": [
         {
           "listen": "test",
@@ -82,10 +122,11 @@
             "type": "text/javascript",
             "exec": [
               "const json = pm.response.json();",
-              "if (json.ticketId) pm.collectionVariables.set('ticketId', json.ticketId);",
-              "if (json.fileId) pm.collectionVariables.set('fileId', json.fileId);",
-              "if (json.confirmToken) pm.collectionVariables.set('confirmToken', json.confirmToken);",
-              "if (json.uploadUrl) pm.collectionVariables.set('uploadUrl', json.uploadUrl);"
+              "const t = json.ticket || json;",
+              "if (t.ticketId) pm.collectionVariables.set('ticketId', t.ticketId);",
+              "if (t.fileId) pm.collectionVariables.set('fileId', t.fileId);",
+              "if (t.confirmToken) pm.collectionVariables.set('confirmToken', t.confirmToken);",
+              "if (t.uploadUrl) pm.collectionVariables.set('uploadUrl', t.uploadUrl);"
             ]
           }
         }
@@ -94,11 +135,12 @@
         "method": "POST",
         "header": [
           { "key": "Content-Type", "value": "application/json" },
-          { "key": "x-api-key", "value": "{{apiKey}}", "description": "Edge-validated API Key required by middleware.ts" }
+          { "key": "x-api-key", "value": "{{apiKey}}", "description": "API Key de la organización (backend)" },
+          { "key": "x-user-id", "value": "{{userId}}", "description": "UUID del usuario final validado contra la organización de la llave" }
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"orgId\": \"{{orgId}}\",\n  \"fileName\": \"{{fileName}}\",\n  \"extension\": \"{{extension}}\",\n  \"fileType\": \"{{fileType}}\",\n  \"fileSize\": \"{{fileSize}}\",\n  \"visibility\": \"{{visibility}}\",\n  \"sha256Hash\": \"{{sha256Hash}}\"\n}",
+          "raw": "{\n  \"fileName\": \"{{fileName}}\",\n  \"extension\": \"{{extension}}\",\n  \"fileType\": \"{{fileType}}\",\n  \"fileSize\": {{fileSize}},\n  \"visibility\": \"{{visibility}}\"\n}",
           "options": { "raw": { "language": "json" } }
         },
         "url": {
@@ -106,28 +148,75 @@
           "host": ["{{baseUrl}}"],
           "path": ["api", "upload"]
         },
-        "description": "Validates user/tenant/permissions and returns ticketId + S3 Presigned uploadUrl + confirmToken (TTL 5 min). Saves them automatically into collection variables."
+        "description": "Sección 3: Toma orgId y userId exclusivamente del contexto validado (x-api-key + x-user-id) e ignora userId/orgId del body."
       }
     },
     {
-      "name": "2. Direct Upload to S3 Presigned URL",
+      "name": "1.1 [Seguridad] Rechazo por usuario de otra organización (403 FORBIDDEN_USER_ORG_MISMATCH)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "x-api-key", "value": "{{apiKey}}" },
+          { "key": "x-user-id", "value": "{{otherOrgUserId}}", "description": "Usuario de Organización 2 usando llave de Organización 1" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"fileName\": \"{{fileName}}\",\n  \"extension\": \"{{extension}}\",\n  \"fileType\": \"{{fileType}}\",\n  \"fileSize\": {{fileSize}},\n  \"visibility\": \"private\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/upload",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "upload"]
+        },
+        "description": "Verifica que el middleware bloquee con 403 FORBIDDEN_USER_ORG_MISMATCH cuando x-user-id pertenece a otra organización."
+      }
+    },
+    {
+      "name": "1.2 [Seguridad] Rechazo por omitir x-user-id en llave de organización (400 MISSING_END_USER_ID)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "x-api-key", "value": "{{apiKey}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"orgId\": \"{{orgId}}\",\n  \"fileName\": \"{{fileName}}\",\n  \"extension\": \"{{extension}}\",\n  \"fileType\": \"{{fileType}}\",\n  \"fileSize\": {{fileSize}},\n  \"visibility\": \"private\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/upload",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "upload"]
+        },
+        "description": "Demuestra que enviar userId/orgId en el body es ignorado y que una llave sin user_id fijo exige la cabecera x-user-id (400 MISSING_END_USER_ID)."
+      }
+    },
+    {
+      "name": "2. Subida Directa Binaria a S3 (PUT uploadUrl)",
       "request": {
         "method": "PUT",
-        "header": [{ "key": "Content-Type", "value": "{{fileType}}" }],
+        "header": [
+          { "key": "Content-Type", "value": "{{fileType}}" },
+          { "key": "Cache-Control", "value": "private, no-store, no-cache, max-age=0, must-revalidate" }
+        ],
         "body": { "mode": "file", "file": {} },
         "url": {
           "raw": "{{uploadUrl}}",
           "host": ["{{uploadUrl}}"]
         },
-        "description": "Select the binary file in Body -> binary. The Content-Type header must match the fileType sent in Step 1. In Postman, CORS does not apply so the binary uploads directly."
+        "description": "Sube el binario directamente a S3 con las cabeceras firmadas en X-Amz-SignedHeaders."
       }
     },
     {
-      "name": "3. Confirm Upload (Persist in Database)",
+      "name": "3. Confirmar Subida y Procesar (PUT /api/upload)",
       "request": {
         "method": "PUT",
         "header": [
-          { "key": "x-api-key", "value": "{{apiKey}}", "description": "Edge-validated API Key required by middleware.ts" }
+          { "key": "x-api-key", "value": "{{apiKey}}" },
+          { "key": "x-user-id", "value": "{{userId}}" }
         ],
         "url": {
           "raw": "{{baseUrl}}/api/upload?ticketId={{ticketId}}&token={{confirmToken}}",
@@ -138,11 +227,11 @@
             { "key": "token", "value": "{{confirmToken}}" }
           ]
         },
-        "description": "Notifies backend that upload completed, verifies HMAC signature & TTL expiration, marks file as 'completed', and records audit log."
+        "description": "Verifica firma HMAC del ticket, comprueba objeto en S3 (HeadObject) y procesa el archivo hacia static/files/."
       }
     },
     {
-      "name": "3.1. Get Direct Download URL (GET /api/files/:id)",
+      "name": "3.1. Obtener URL de Entrega (GET /api/files/:id)",
       "event": [
         {
           "listen": "test",
@@ -152,7 +241,6 @@
               "const json = pm.response.json();",
               "if (json.url) {",
               "    pm.collectionVariables.set('downloadUrl', json.url);",
-              "    console.log('Saved downloadUrl:', json.url);",
               "}"
             ]
           }
@@ -161,18 +249,19 @@
       "request": {
         "method": "GET",
         "header": [
-          { "key": "x-api-key", "value": "{{apiKey}}", "description": "Edge-validated API Key (requires can_read=true)" }
+          { "key": "x-api-key", "value": "{{apiKey}}" },
+          { "key": "x-user-id", "value": "{{userId}}" }
         ],
         "url": {
           "raw": "{{baseUrl}}/api/files/{{fileId}}",
           "host": ["{{baseUrl}}"],
           "path": ["api", "files", "{{fileId}}"]
         },
-        "description": "Generates a temporary S3 Presigned GET URL (TTL 5 min) for direct binary download/view without server proxying."
+        "description": "Para archivos privados valida que x-user-id sea el propietario y devuelve URL prefirmada de S3 (5 min). Para públicos devuelve URL de CloudFront."
       }
     },
     {
-      "name": "3.2. Direct Download File from S3 (GET /pending/...)",
+      "name": "3.2. Descargar Archivo (GET downloadUrl)",
       "request": {
         "method": "GET",
         "header": [],
@@ -180,50 +269,67 @@
           "raw": "{{downloadUrl}}",
           "host": ["{{downloadUrl}}"]
         },
-        "description": "Directly downloads the binary file from AWS S3 without touching the application server."
+        "description": "Descarga el archivo directamente desde S3 (privado) o CloudFront (público)."
       }
     },
     {
-      "name": "4. Get Service Logs",
+      "name": "4. Consultar Logs de Auditoría (GET /api/logs)",
       "request": {
         "method": "GET",
-        "header": [],
+        "header": [
+          { "key": "x-admin-secret", "value": "{{adminSecret}}", "description": "Obligatorio (ADMIN_API_SECRET)" }
+        ],
         "url": {
           "raw": "{{baseUrl}}/api/logs",
           "host": ["{{baseUrl}}"],
           "path": ["api", "logs"]
         },
-        "description": "Retrieves recent audit logs from Supabase (service_logs table)."
+        "description": "Consulta la bitácora service_logs. Exige x-admin-secret."
       }
     },
     {
-      "name": "5. Get File Records",
+      "name": "5. Consultar Registros de Archivos (GET /api/records)",
       "request": {
         "method": "GET",
-        "header": [],
+        "header": [
+          { "key": "x-admin-secret", "value": "{{adminSecret}}", "description": "Obligatorio (ADMIN_API_SECRET)" }
+        ],
         "url": {
           "raw": "{{baseUrl}}/api/records",
           "host": ["{{baseUrl}}"],
           "path": ["api", "records"]
         },
-        "description": "Retrieves recent file records from Supabase (files table with user & organization join)."
+        "description": "Consulta registros administrativos en public.files. Exige x-admin-secret."
       }
     },
     {
-      "name": "6. Test Environment Cleanup",
+      "name": "6. Consultar Organizaciones y Usuarios (GET /api/users)",
       "request": {
-        "method": "DELETE",
-        "header": [],
+        "method": "GET",
+        "header": [
+          { "key": "x-admin-secret", "value": "{{adminSecret}}", "description": "Obligatorio (ADMIN_API_SECRET)" }
+        ],
         "url": {
-          "raw": "{{baseUrl}}/api/test/cleanup?userId={{userId}}",
+          "raw": "{{baseUrl}}/api/users",
           "host": ["{{baseUrl}}"],
-          "path": ["api", "test", "cleanup"],
-          "query": [
-            { "key": "userId", "value": "{{userId}}" },
-            { "key": "all", "value": "true", "description": "true to purge all test files under pending/", "disabled": true }
-          ]
+          "path": ["api", "users"]
         },
-        "description": "Purges S3 test objects under pending/ and cleans test rows from Supabase (5GB Free Tier Protection)."
+        "description": "Lista organizaciones y usuarios registrados. Exige x-admin-secret."
+      }
+    },
+    {
+      "name": "7. Ejecutar Cron de Mantenimiento (GET /api/cron/maintenance)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{cronSecret}}", "description": "Obligatorio (Bearer CRON_SECRET)" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/cron/maintenance",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "cron", "maintenance"]
+        },
+        "description": "Ejecuta limpieza de tickets vencidos, aborto de multiparts abandonados y reintentos. Exige Authorization: Bearer <CRON_SECRET>."
       }
     }
   ]

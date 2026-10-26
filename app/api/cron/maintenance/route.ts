@@ -16,11 +16,13 @@ import {
   abortS3MultipartUpload,
 } from '@/lib/s3';
 import { processUpload } from '@/lib/lambda-fallback/process-upload';
+import { verifyCronSecretHeader } from '@/lib/env';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'X-Content-Type-Options': 'nosniff',
 };
 
 export async function OPTIONS() {
@@ -28,6 +30,18 @@ export async function OPTIONS() {
 }
 
 async function runMaintenanceCron(req: NextRequest) {
+  const cronCheck = verifyCronSecretHeader(req.headers);
+  if (!cronCheck.valid) {
+    return NextResponse.json(
+      {
+        error: cronCheck.status === 401 ? 'Unauthorized' : 'Forbidden',
+        code: cronCheck.code,
+        message: cronCheck.message,
+      },
+      { status: cronCheck.status, headers: corsHeaders }
+    );
+  }
+
   const { searchParams } = new URL(req.url);
   const targetTicketId = searchParams.get('ticketId') || null;
   const expiredMinutesParam = searchParams.get('expiredMinutes');

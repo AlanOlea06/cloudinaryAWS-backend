@@ -1,54 +1,71 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { supabase } from '@/lib/supabase';
+import { verifyAdminSecretHeader } from '@/lib/env';
 
-// CORS Headers para permitir llamadas desde Postman, cliente local o producción
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DEFAULT_MAX_KEYS_PER_ORG = 3;
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-secret',
+  'X-Content-Type-Options': 'nosniff',
 };
 
-// 1. Manejador OPTIONS (Preflight)
 export async function OPTIONS() {
-  return new NextResponse(null, {
-    status: 204,
-    headers: corsHeaders,
-  });
+  return new NextResponse(null, { status: 204, headers: corsHeaders });
 }
 
-function extractBoundUserId(row: any): string | null {
-  if (row?.user_id) return row.user_id;
-  const match = typeof row?.name === 'string' ? row.name.match(/\[uid:([0-9a-f-]{36})\]/i) : null;
-  return match ? match[1] : null;
+function hashApiKey(rawKey: string): string {
+  return crypto.createHash('sha256').update(rawKey).digest('hex');
 }
 
-function stripUidTag(name: string): string {
-  return (name || '').replace(/\s*\[uid:[0-9a-f-]{36}\]/gi, '').trim();
+function enforceAdminAuth(req: NextRequest): NextResponse | null {
+  const check = verifyAdminSecretHeader(req.headers);
+  if (!check.valid) {
+    return NextResponse.json(
+      {
+        error: check.status === 401 ? 'Unauthorized' : 'Forbidden',
+        code: check.code,
+        message: check.message,
+      },
+      { status: check.status, headers: corsHeaders }
+    );
+  }
+  return null;
 }
 
-// 2. GET: Listar llaves de una organización (sin exponer secretos)
+/**
+ * GET /api/keys?org_id=<uuid>
+ * Lists API keys (never exposing hashed_key or plaintext key).
+ * Requires ADMIN_API_SECRET.
+ */
 export async function GET(req: NextRequest) {
+  const authError = enforceAdminAuth(req);
+  if (authError) return authError;
+
   try {
     const { searchParams } = new URL(req.url);
-    const orgId = searchParams.get('orgId');
+    const orgId = searchParams.get('org_id')?.trim();
 
-    if (!orgId) {
+    if (orgId && !UUID_REGEX.test(orgId)) {
       return NextResponse.json(
-        {
-          error: 'Bad Request',
-          code: 'MISSING_ORG_ID',
-          message: 'El parámetro "orgId" es requerido para listar las llaves.',
-        },
+        { error: 'Bad Request', code: 'INVALID_ORG_ID', message: 'El parámetro org_id debe ser un UUID válido.' },
         { status: 400, headers: corsHeaders }
       );
     }
 
-    const { data: rawKeys, error } = await supabase
+    let query = supabase
       .from('api_keys')
-      .select('*')
-      .eq('org_id', orgId)
+      .select('id, org_id, user_id, name, can_read, can_upload, can_delete, is_active, created_at')
       .order('created_at', { ascending: false });
+
+    if (orgId) {
+      query = query.eq('org_id', orgId);
+    }
+
+    const { data, error } = await query;
 
     if (error) {
       return NextResponse.json(
@@ -57,320 +74,290 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const keys = (rawKeys || []).map((k: any) => ({
-      id: k.id,
-      org_id: k.org_id,
-      user_id: extractBoundUserId(k),
-      name: stripUidTag(k.name),
-      can_read: k.can_read,
-      can_upload: k.can_upload,
-      can_delete: k.can_delete,
-      is_active: k.is_active,
-      created_at: k.created_at,
-    }));
-
     return NextResponse.json(
       {
         status: 'success',
-        orgId,
-        total: keys.length,
-        keys,
+        count: data?.length || 0,
+        keys: data || [],
       },
       { status: 200, headers: corsHeaders }
     );
-  } catch (error: any) {
+  } catch (err: any) {
     return NextResponse.json(
-      { error: 'Internal Server Error', message: error.message },
+      { error: 'Internal Server Error', message: err.message },
       { status: 500, headers: corsHeaders }
     );
   }
 }
 
-// 3. POST: Fabricar nueva API Key (Regla de negocio: máx 3 activas por org + vinculación a user_id Decisión 1-A)
+/**
+ * POST /api/keys
+ * Creates a new API Key for an organization.
+ * Requires ADMIN_API_SECRET.
+ *
+ * Section 3 (Option A):
+ * - Keys are bound to the organization (`org_id`) for backend-to-backend usage.
+ * - `user_id` (`user_id` or `userId`) is OPTIONAL (nullable). If omitted or null,
+ *   the key is an organization-level key and the client backend sends the end-user
+ *   via the `x-user-id` header on each request.
+ * - Active keys limit per organization is read from `organizations.max_api_keys` (default 3).
+ */
 export async function POST(req: NextRequest) {
+  const authError = enforceAdminAuth(req);
+  if (authError) return authError;
+
   try {
-    const body = await req.json().catch(() => ({}));
+    const body = await req.json();
     const {
-      orgId,
-      userId: incomingUserId,
-      user_id: incomingUserIdSnake,
+      org_id,
+      user_id,
+      userId: bodyUserId,
       name,
       can_read = false,
       can_upload = false,
       can_delete = false,
-      canRead,
-      canUpload,
-      canDelete,
     } = body;
 
-    const requestedUserId = (incomingUserId || incomingUserIdSnake || '').trim();
+    const cleanOrgId = org_id?.trim();
+    const rawUserId = user_id !== undefined ? user_id : bodyUserId;
+    const cleanUserId =
+      typeof rawUserId === 'string' && rawUserId.trim().length > 0
+        ? rawUserId.trim()
+        : null;
+    const cleanName = name?.trim();
 
-    // Validaciones básicas de entrada
-    if (!orgId) {
+    if (!cleanOrgId || !UUID_REGEX.test(cleanOrgId)) {
       return NextResponse.json(
         {
           error: 'Bad Request',
-          code: 'MISSING_ORG_ID',
-          message: 'El campo "orgId" es obligatorio para asociar la llave.',
+          code: 'INVALID_ORG_ID',
+          message: 'El campo org_id es obligatorio y debe ser un UUID v4 válido.',
         },
         { status: 400, headers: corsHeaders }
       );
     }
 
-    if (!name || typeof name !== 'string' || name.trim().length === 0) {
+    if (cleanUserId !== null && !UUID_REGEX.test(cleanUserId)) {
       return NextResponse.json(
         {
           error: 'Bad Request',
-          code: 'MISSING_KEY_NAME',
-          message: 'El campo "name" es obligatorio para identificar el propósito de la llave.',
+          code: 'INVALID_USER_ID',
+          message: 'Si se proporciona user_id, debe ser un UUID v4 válido (o null para llave de organización).',
         },
         { status: 400, headers: corsHeaders }
       );
     }
 
-    // Verificar que la organización exista en Supabase
-    const { data: orgData, error: orgErr } = await supabase
+    if (!cleanName || cleanName.length < 2 || cleanName.length > 80) {
+      return NextResponse.json(
+        {
+          error: 'Bad Request',
+          code: 'INVALID_KEY_NAME',
+          message: 'El campo name es obligatorio y debe tener entre 2 y 80 caracteres.',
+        },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    // 1. Verify organization exists and read configurable max_api_keys (default 3)
+    const { data: orgData, error: orgError } = await supabase
       .from('organizations')
-      .select('id, name, slug')
-      .eq('id', orgId)
+      .select('*')
+      .eq('id', cleanOrgId)
       .maybeSingle();
 
-    if (orgErr || !orgData) {
+    if (orgError || !orgData) {
       return NextResponse.json(
         {
           error: 'Not Found',
           code: 'ORGANIZATION_NOT_FOUND',
-          message: `La organización con ID "${orgId}" no existe en la base de datos.`,
+          message: `La organización '${cleanOrgId}' no existe.`,
         },
         { status: 404, headers: corsHeaders }
       );
     }
 
-    // Decisión 1-A: Resolver y validar el usuario propietario (user_id) de la llave API
-    let boundUser: any = null;
-    if (requestedUserId) {
-      const { data: dbUser } = await supabase
+    const maxKeysForOrg =
+      typeof orgData.max_api_keys === 'number' && orgData.max_api_keys >= 1
+        ? orgData.max_api_keys
+        : DEFAULT_MAX_KEYS_PER_ORG;
+
+    // 2. If an optional user_id was provided, verify it exists and belongs to cleanOrgId
+    if (cleanUserId !== null) {
+      const { data: userData, error: userError } = await supabase
         .from('users')
-        .select('id, org_id, name, email, role, can_upload')
-        .eq('id', requestedUserId)
+        .select('id, org_id, name, email')
+        .eq('id', cleanUserId)
         .maybeSingle();
 
-      if (!dbUser) {
+      if (userError || !userData) {
         return NextResponse.json(
           {
             error: 'Not Found',
             code: 'USER_NOT_FOUND',
-            message: `El usuario con ID "${requestedUserId}" no existe en la base de datos.`,
+            message: `El usuario '${cleanUserId}' no existe.`,
           },
           { status: 404, headers: corsHeaders }
         );
       }
 
-      if (dbUser.org_id !== orgId) {
+      if (userData.org_id !== cleanOrgId) {
         return NextResponse.json(
           {
             error: 'Forbidden',
             code: 'USER_ORG_MISMATCH',
-            message: `El usuario "${dbUser.name}" no pertenece a la organización "${orgData.name}".`,
+            message: `El usuario '${cleanUserId}' no pertenece a la organización '${cleanOrgId}'.`,
           },
           { status: 403, headers: corsHeaders }
         );
       }
-      boundUser = dbUser;
-    } else {
-      // Si no se especificó userId, asociar al administrador principal de esa organización
-      const { data: defaultUser } = await supabase
-        .from('users')
-        .select('id, org_id, name, email, role, can_upload')
-        .eq('org_id', orgId)
-        .order('role', { ascending: true })
-        .limit(1)
-        .maybeSingle();
-      boundUser = defaultUser || null;
     }
 
-    // REGLA 1: LÍMITE DE CANTIDAD (Máximo 3 llaves activas por organización)
-    const { count, error: countErr } = await supabase
+    // 3. Enforce per-organization active key limit (configurable via organizations.max_api_keys)
+    const { count: activeKeyCount, error: countError } = await supabase
       .from('api_keys')
-      .select('*', { count: 'exact', head: true })
-      .eq('org_id', orgId)
+      .select('id', { count: 'exact', head: true })
+      .eq('org_id', cleanOrgId)
       .eq('is_active', true);
 
-    if (countErr) {
+    if (countError) {
       return NextResponse.json(
-        {
-          error: 'Database Error',
-          code: 'COUNT_QUERY_FAILED',
-          message: `Error al consultar cuota de llaves: ${countErr.message}`,
-        },
+        { error: 'Database Error', message: countError.message },
         { status: 500, headers: corsHeaders }
       );
     }
 
-    if (count !== null && count >= 3) {
+    if ((activeKeyCount ?? 0) >= maxKeysForOrg) {
       return NextResponse.json(
         {
-          error: 'Bad Request',
-          code: 'API_KEY_LIMIT_REACHED',
-          message: `Límite alcanzado: La organización "${orgData.name}" ya cuenta con el máximo permitido de 3 llaves API activas. Revoca o desactiva una llave existente para generar una nueva.`,
-          currentActiveKeys: count,
-          maxAllowed: 3,
+          error: 'Conflict',
+          code: 'MAX_API_KEYS_LIMIT_REACHED',
+          message: `Límite alcanzado: la organización '${orgData.name}' ya cuenta con el máximo permitido de ${maxKeysForOrg} API Keys activas. Revoca o elimina una llave antes de emitir una nueva, o incrementa max_api_keys en la organización.`,
+          details: {
+            orgId: cleanOrgId,
+            activeKeys: activeKeyCount,
+            maxAllowed: maxKeysForOrg,
+          },
         },
-        { status: 400, headers: corsHeaders }
+        { status: 409, headers: corsHeaders }
       );
     }
 
-    // REGLA 2: GENERACIÓN SEGURA (Llave plana con prefijo sk_live_ y 32 bytes de entropía)
-    const rawEntropy = crypto.randomBytes(32).toString('hex');
-    const plainApiKey = `sk_live_${rawEntropy}`;
+    // 4. Generate 256-bit (32-byte) secret key with sk_live_ prefix
+    const randomHex = crypto.randomBytes(32).toString('hex');
+    const rawApiKey = `sk_live_${randomHex}`;
+    const hashedKey = hashApiKey(rawApiKey);
 
-    // REGLA 3: ALMACENAMIENTO SEGURO (Hashear con SHA-256; solo almacenar el digest)
-    const hashedKey = crypto.createHash('sha256').update(plainApiKey).digest('hex');
-
-    const effectiveCanRead = Boolean(can_read ?? canRead);
-    const effectiveCanUpload = Boolean(can_upload ?? canUpload);
-    const effectiveCanDelete = Boolean(can_delete ?? canDelete);
-    const cleanKeyName = stripUidTag(name);
-
-    let insertedKey: any = null;
-    let insertErr: any = null;
-
-    // Intentar insertar con la columna nativa user_id (Migración Fase 0)
-    const primaryPayload: Record<string, any> = {
-      org_id: orgId,
-      user_id: boundUser?.id || null,
-      name: cleanKeyName,
+    // 5. Persist only the SHA-256 hash in DB (user_id is null for org-level keys)
+    const insertPayload: Record<string, any> = {
+      org_id: cleanOrgId,
+      user_id: cleanUserId,
+      name: cleanName,
       hashed_key: hashedKey,
-      can_read: effectiveCanRead,
-      can_upload: effectiveCanUpload,
-      can_delete: effectiveCanDelete,
+      can_read: Boolean(can_read),
+      can_upload: Boolean(can_upload),
+      can_delete: Boolean(can_delete),
       is_active: true,
     };
 
-    const primaryRes = await supabase
+    const { data: insertedKey, error: insertError } = await supabase
       .from('api_keys')
-      .insert(primaryPayload)
-      .select('*')
+      .insert(insertPayload)
+      .select('id, org_id, user_id, name, can_read, can_upload, can_delete, is_active, created_at')
       .single();
 
-    insertedKey = primaryRes.data;
-    insertErr = primaryRes.error;
-
-    // Fallback resiliente si la migración ALTER TABLE api_keys ADD COLUMN user_id aún no se ha corrido en el SQL Editor
-    if (insertErr && insertErr.message?.includes('user_id')) {
-      const taggedName = boundUser?.id ? `${cleanKeyName} [uid:${boundUser.id}]` : cleanKeyName;
-      const fallbackRes = await supabase
-        .from('api_keys')
-        .insert({
-          org_id: orgId,
-          name: taggedName,
-          hashed_key: hashedKey,
-          can_read: effectiveCanRead,
-          can_upload: effectiveCanUpload,
-          can_delete: effectiveCanDelete,
-          is_active: true,
-        })
-        .select('*')
-        .single();
-      insertedKey = fallbackRes.data;
-      insertErr = fallbackRes.error;
-    }
-
-    if (insertErr || !insertedKey) {
+    if (insertError) {
       return NextResponse.json(
-        {
-          error: 'Database Error',
-          code: 'KEY_INSERTION_FAILED',
-          message: `No se pudo persistir la llave API: ${insertErr?.message}`,
-        },
+        { error: 'Database Error', message: insertError.message },
         { status: 500, headers: corsHeaders }
       );
     }
 
-    const finalBoundUserId = extractBoundUserId(insertedKey) || boundUser?.id || null;
-
-    // REGLA 4: RESPUESTA (Devolver la llave plana UNA SOLA VEZ)
     return NextResponse.json(
       {
-        status: 'success',
-        message: 'Llave API generada con éxito. Cópiala y guárdala en un lugar seguro; no se volverá a mostrar.',
-        apiKey: plainApiKey,
-        key: {
-          id: insertedKey.id,
-          orgId: insertedKey.org_id,
-          userId: finalBoundUserId,
-          userName: boundUser?.name || null,
-          organizationName: orgData.name,
-          organizationSlug: orgData.slug,
-          name: cleanKeyName,
-          permissions: {
-            can_read: insertedKey.can_read,
-            can_upload: insertedKey.can_upload,
-            can_delete: insertedKey.can_delete,
-          },
-          isActive: insertedKey.is_active,
-          createdAt: insertedKey.created_at,
-        },
-        // Alias retrocompatible
-        keyRecord: {
-          id: insertedKey.id,
-          orgId: insertedKey.org_id,
-          userId: finalBoundUserId,
-          name: cleanKeyName,
+        status: 'created',
+        message:
+          'IMPORTANTE: Guarda esta API Key en el backend en un lugar seguro. Por razones de seguridad (Zero-Knowledge), nunca volverá a mostrarse.',
+        apiKey: rawApiKey,
+        keyMetadata: {
+          ...insertedKey,
+          scope: cleanUserId ? 'user_bound' : 'organization_backend',
+          maxAllowedForOrg: maxKeysForOrg,
         },
       },
       { status: 201, headers: corsHeaders }
     );
-  } catch (error: any) {
+  } catch (err: any) {
     return NextResponse.json(
-      { error: 'Internal Server Error', message: error.message },
+      { error: 'Internal Server Error', message: err.message },
       { status: 500, headers: corsHeaders }
     );
   }
 }
 
-// 4. DELETE: Revocación de llave (Soft delete: is_active = false)
+/**
+ * DELETE /api/keys?id=<uuid>
+ * Revokes or permanently deletes an API Key.
+ * Requires ADMIN_API_SECRET.
+ */
 export async function DELETE(req: NextRequest) {
+  const authError = enforceAdminAuth(req);
+  if (authError) return authError;
+
   try {
     const { searchParams } = new URL(req.url);
-    const keyId = searchParams.get('keyId');
+    const keyId = searchParams.get('id')?.trim();
+    const mode = searchParams.get('mode') || 'delete'; // 'revoke' | 'delete'
 
-    if (!keyId) {
+    if (!keyId || !UUID_REGEX.test(keyId)) {
       return NextResponse.json(
-        {
-          error: 'Bad Request',
-          code: 'MISSING_KEY_ID',
-          message: 'El parámetro "keyId" es requerido para revocar la llave.',
-        },
+        { error: 'Bad Request', code: 'INVALID_KEY_ID', message: 'El parámetro id debe ser un UUID v4 válido.' },
         { status: 400, headers: corsHeaders }
       );
     }
 
-    const { data: revoked, error } = await supabase
-      .from('api_keys')
-      .update({ is_active: false })
-      .eq('id', keyId)
-      .select('id, name, org_id, is_active')
-      .single();
+    if (mode === 'revoke') {
+      const { data, error } = await supabase
+        .from('api_keys')
+        .update({ is_active: false })
+        .eq('id', keyId)
+        .select('id, org_id, user_id, name, is_active')
+        .maybeSingle();
 
-    if (error) {
+      if (error) {
+        return NextResponse.json({ error: 'Database Error', message: error.message }, { status: 500, headers: corsHeaders });
+      }
+      if (!data) {
+        return NextResponse.json({ error: 'Not Found', message: 'API Key no encontrada.' }, { status: 404, headers: corsHeaders });
+      }
+
       return NextResponse.json(
-        { error: 'Database Error', message: error.message },
-        { status: 500, headers: corsHeaders }
+        { status: 'revoked', message: 'API Key desactivada exitosamente.', key: data },
+        { status: 200, headers: corsHeaders }
       );
     }
 
+    const { data, error } = await supabase
+      .from('api_keys')
+      .delete()
+      .eq('id', keyId)
+      .select('id, org_id, user_id, name')
+      .maybeSingle();
+
+    if (error) {
+      return NextResponse.json({ error: 'Database Error', message: error.message }, { status: 500, headers: corsHeaders });
+    }
+    if (!data) {
+      return NextResponse.json({ error: 'Not Found', message: 'API Key no encontrada.' }, { status: 404, headers: corsHeaders });
+    }
+
     return NextResponse.json(
-      {
-        status: 'success',
-        message: `La llave API "${revoked.name}" (${revoked.id}) ha sido revocada exitosamente.`,
-        key: revoked,
-      },
+      { status: 'deleted', message: 'API Key eliminada permanentemente.', key: data },
       { status: 200, headers: corsHeaders }
     );
-  } catch (error: any) {
+  } catch (err: any) {
     return NextResponse.json(
-      { error: 'Internal Server Error', message: error.message },
+      { error: 'Internal Server Error', message: err.message },
       { status: 500, headers: corsHeaders }
     );
   }

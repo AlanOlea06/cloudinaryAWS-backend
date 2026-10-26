@@ -1,72 +1,77 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
+import { verifyAdminSecretHeader } from '@/lib/env';
 
 const corsHeaders = {
-  'Access-Control-Allow-Origin': 'http://localhost:3000',
+  'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-secret',
+  'X-Content-Type-Options': 'nosniff',
 };
 
 export async function OPTIONS() {
   return new NextResponse(null, { status: 204, headers: corsHeaders });
 }
 
-export async function GET() {
-  try {
-    // 1. Query users with their organization relation from Supabase
-    let users: any[] = [];
-    const { data: dbUsers, error: usersErr } = await supabase
-      .from('users')
-      .select('id, name, email, role, can_upload, org_id, organizations(id, name, slug)')
-      .order('name');
+export async function GET(req: NextRequest) {
+  const check = verifyAdminSecretHeader(req.headers);
+  if (!check.valid) {
+    return NextResponse.json(
+      {
+        error: check.status === 401 ? 'Unauthorized' : 'Forbidden',
+        code: check.code,
+        message: check.message,
+      },
+      { status: check.status, headers: corsHeaders }
+    );
+  }
 
-    if (!usersErr && dbUsers) {
-      users = dbUsers.map((u: any) => ({
-        id: u.id,
-        name: u.name,
-        email: u.email,
-        role: u.role,
-        canUpload: Boolean(u.can_upload),
-        orgId: u.org_id,
-        orgName: u.organizations?.name || 'Unknown Org',
-        orgSlug: u.organizations?.slug || '',
-      }));
-    } else if (usersErr) {
-      console.error('Error querying users from Supabase:', usersErr.message);
+  try {
+    const { searchParams } = new URL(req.url);
+    const orgId = searchParams.get('orgId');
+
+    const { data: orgs, error: orgError } = await supabase
+      .from('organizations')
+      .select('id, name, slug, description, max_storage_bytes, max_pending_tickets, max_api_keys, created_at')
+      .order('slug', { ascending: true });
+
+    if (orgError) {
+      return NextResponse.json(
+        { error: 'Error al consultar organizations', details: orgError.message },
+        { status: 500, headers: corsHeaders }
+      );
     }
 
-    // 2. Query organizations from Supabase
-    let organizations: any[] = [];
-    const { data: dbOrgs, error: orgsErr } = await supabase
-      .from('organizations')
-      .select('id, name, slug, description')
-      .order('name');
+    let userQuery = supabase
+      .from('users')
+      .select('id, org_id, name, email, role, can_upload, created_at')
+      .order('name', { ascending: true });
 
-    if (!orgsErr && dbOrgs) {
-      organizations = dbOrgs;
-    } else if (orgsErr) {
-      console.error('Error querying organizations from Supabase:', orgsErr.message);
+    if (orgId) {
+      userQuery = userQuery.eq('org_id', orgId);
+    }
+
+    const { data: users, error: userError } = await userQuery;
+
+    if (userError) {
+      return NextResponse.json(
+        { error: 'Error al consultar users', details: userError.message },
+        { status: 500, headers: corsHeaders }
+      );
     }
 
     return NextResponse.json(
       {
-        status: 'success',
-        users,
-        organizations,
-        source: 'supabase_database_live',
-        count: {
-          users: users.length,
-          organizations: organizations.length,
-        },
+        organizationsCount: orgs?.length || 0,
+        organizations: orgs || [],
+        usersCount: users?.length || 0,
+        users: users || [],
       },
       { status: 200, headers: corsHeaders }
     );
-  } catch (error: any) {
+  } catch (err: any) {
     return NextResponse.json(
-      {
-        status: 'error',
-        message: error.message,
-      },
+      { error: 'Internal Server Error', message: err.message },
       { status: 500, headers: corsHeaders }
     );
   }

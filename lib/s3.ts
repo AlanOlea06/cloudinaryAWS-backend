@@ -15,9 +15,11 @@ import {
   AbortMultipartUploadCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { requireEnv } from '@/lib/env';
 
-const region = process.env.AWS_REGION || 'us-east-1';
-const bucketName = process.env.AWS_S3_BUCKET_NAME || '';
+export function getS3BucketName(): string {
+  return requireEnv('AWS_S3_BUCKET_NAME');
+}
 
 export const PRIVATE_NO_STORE_CACHE_CONTROL =
   'private, no-store, no-cache, max-age=0, must-revalidate';
@@ -261,29 +263,33 @@ export function generateOpaqueS3Key(
 }
 
 /**
- * Checks if AWS S3 credentials and bucket name are configured in environment variables
+ * Checks if all mandatory AWS S3 environment variables are configured.
  */
 export function isAwsConfigured(): boolean {
   return Boolean(
-    process.env.AWS_ACCESS_KEY_ID &&
-    process.env.AWS_SECRET_ACCESS_KEY &&
-    process.env.AWS_S3_BUCKET_NAME
+    process.env.AWS_ACCESS_KEY_ID?.trim() &&
+    process.env.AWS_SECRET_ACCESS_KEY?.trim() &&
+    process.env.AWS_REGION?.trim() &&
+    process.env.AWS_S3_BUCKET_NAME?.trim()
   );
 }
 
 /**
- * Returns an S3Client instance configured with environment credentials
+ * Returns an S3Client instance configured with mandatory environment credentials.
+ * Throws a clear error if any of AWS_REGION, AWS_S3_BUCKET_NAME, AWS_ACCESS_KEY_ID,
+ * or AWS_SECRET_ACCESS_KEY is missing.
  */
-export function getS3Client(): S3Client | null {
-  if (!isAwsConfigured()) {
-    return null;
-  }
+export function getS3Client(): S3Client {
+  const awsRegion = requireEnv('AWS_REGION');
+  requireEnv('AWS_S3_BUCKET_NAME');
+  const accessKeyId = requireEnv('AWS_ACCESS_KEY_ID');
+  const secretAccessKey = requireEnv('AWS_SECRET_ACCESS_KEY');
 
   return new S3Client({
-    region,
+    region: awsRegion,
     credentials: {
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID!.trim(),
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!.trim(),
+      accessKeyId,
+      secretAccessKey,
     },
   });
 }
@@ -309,13 +315,11 @@ export async function generatePresignedUploadUrl(
   contentDisposition?: 'inline' | 'attachment'
 ): Promise<string | null> {
   const client = getS3Client();
-  if (!client || !bucketName) {
-    return null;
-  }
+  const bucketName = getS3BucketName();
 
   const signable = new Set<string>(['host', 'content-type', 'cache-control']);
   const putParams: Record<string, any> = {
-    Bucket: bucketName.trim(),
+    Bucket: bucketName,
     Key: key,
     ContentType: contentType,
     CacheControl: cacheControl,
@@ -353,8 +357,7 @@ export interface S3HeadMetadata {
 }
 
 export async function headS3Object(key: string): Promise<S3HeadMetadata> {
-  const client = getS3Client();
-  if (!client || !bucketName || !key) {
+  if (!key) {
     return {
       exists: false,
       contentLength: null,
@@ -364,11 +367,13 @@ export async function headS3Object(key: string): Promise<S3HeadMetadata> {
       eTag: null,
     };
   }
+  const client = getS3Client();
+  const bucketName = getS3BucketName();
 
   try {
     const res = await client.send(
       new HeadObjectCommand({
-        Bucket: bucketName.trim(),
+        Bucket: bucketName,
         Key: key.replace(/^\/+/, ''),
       })
     );
@@ -403,14 +408,15 @@ export async function headS3Object(key: string): Promise<S3HeadMetadata> {
  * Task A.5: Deletes a single S3 object by key using DeleteObjectCommand.
  */
 export async function deleteS3Object(key: string): Promise<boolean> {
-  const client = getS3Client();
-  if (!client || !bucketName || !key) {
+  if (!key) {
     return false;
   }
+  const client = getS3Client();
+  const bucketName = getS3BucketName();
 
   await client.send(
     new DeleteObjectCommand({
-      Bucket: bucketName.trim(),
+      Bucket: bucketName,
       Key: key.replace(/^\/+/, ''),
     })
   );
@@ -425,13 +431,14 @@ export async function generatePresignedReadUrl(
   key: string,
   expiresInSeconds: number = 300
 ): Promise<string | null> {
-  const client = getS3Client();
-  if (!client || !bucketName || !key) {
+  if (!key) {
     return null;
   }
+  const client = getS3Client();
+  const bucketName = getS3BucketName();
 
   const command = new GetObjectCommand({
-    Bucket: bucketName.trim(),
+    Bucket: bucketName,
     Key: key.replace(/^\/+/, ''),
     ResponseCacheControl: PRIVATE_NO_STORE_CACHE_CONTROL,
   });
@@ -450,14 +457,14 @@ export async function applyS3CacheControlMetadata(
   visibility: string = 'private',
   contentDisposition?: 'inline' | 'attachment'
 ): Promise<string | null> {
-  const client = getS3Client();
-  if (!client || !bucketName || !key) {
+  if (!key) {
     return null;
   }
+  const client = getS3Client();
+  const trimmedBucket = getS3BucketName();
 
   const cacheControl = getCacheControlForVisibility(visibility, false);
 
-  const trimmedBucket = bucketName.trim();
   const cleanKey = key.replace(/^\/+/, '');
   const encodedCopySource = `${trimmedBucket}/${cleanKey
     .split('/')
@@ -491,13 +498,11 @@ export async function applyS3CacheControlMetadata(
  */
 export async function deleteS3ObjectsByPrefix(prefix: string): Promise<{ count: number; keys: string[] }> {
   const client = getS3Client();
-  if (!client || !bucketName) {
-    return { count: 0, keys: [] };
-  }
+  const bucketName = getS3BucketName();
 
   try {
     const listCommand = new ListObjectsV2Command({
-      Bucket: bucketName.trim(),
+      Bucket: bucketName,
       Prefix: prefix,
     });
 
@@ -515,7 +520,7 @@ export async function deleteS3ObjectsByPrefix(prefix: string): Promise<{ count: 
     }
 
     const deleteCommand = new DeleteObjectsCommand({
-      Bucket: bucketName.trim(),
+      Bucket: bucketName,
       Delete: {
         Objects: objectsToDelete,
         Quiet: false,
@@ -542,10 +547,11 @@ export async function deleteS3ObjectsByPrefix(prefix: string): Promise<{ count: 
  * @returns Object with count and deleted keys
  */
 export async function deleteS3ObjectsByKeys(keys: string[]): Promise<{ count: number; keys: string[] }> {
-  const client = getS3Client();
-  if (!client || !bucketName || keys.length === 0) {
+  if (keys.length === 0) {
     return { count: 0, keys: [] };
   }
+  const client = getS3Client();
+  const bucketName = getS3BucketName();
 
   try {
     const validObjects = keys
@@ -557,7 +563,7 @@ export async function deleteS3ObjectsByKeys(keys: string[]): Promise<{ count: nu
     }
 
     const deleteCommand = new DeleteObjectsCommand({
-      Bucket: bucketName.trim(),
+      Bucket: bucketName,
       Delete: {
         Objects: validObjects,
         Quiet: false,
@@ -581,14 +587,15 @@ export async function deleteS3ObjectsByKeys(keys: string[]): Promise<{ count: nu
  * Task B.6: Downloads an object from S3 as a Buffer using GetObjectCommand.
  */
 export async function getS3ObjectBuffer(key: string): Promise<Buffer | null> {
-  const client = getS3Client();
-  if (!client || !bucketName || !key) {
+  if (!key) {
     return null;
   }
+  const client = getS3Client();
+  const bucketName = getS3BucketName();
 
   const res = await client.send(
     new GetObjectCommand({
-      Bucket: bucketName.trim(),
+      Bucket: bucketName,
       Key: key.replace(/^\/+/, ''),
     })
   );
@@ -612,13 +619,14 @@ export async function putS3ObjectBuffer(
   cacheControl: string,
   contentDisposition?: 'inline' | 'attachment'
 ): Promise<boolean> {
-  const client = getS3Client();
-  if (!client || !bucketName || !key) {
+  if (!key) {
     return false;
   }
+  const client = getS3Client();
+  const bucketName = getS3BucketName();
 
   const putParams: Record<string, any> = {
-    Bucket: bucketName.trim(),
+    Bucket: bucketName,
     Key: key.replace(/^\/+/, ''),
     Body: buffer,
     ContentType: contentType,
@@ -638,14 +646,15 @@ export async function putS3ObjectBuffer(
  * Task B.8 & B.9: Aborts an incomplete or abandoned S3 Multipart Upload using AbortMultipartUploadCommand.
  */
 export async function abortS3MultipartUpload(key: string, uploadId: string): Promise<boolean> {
-  const client = getS3Client();
-  if (!client || !bucketName || !key || !uploadId) {
+  if (!key || !uploadId) {
     return false;
   }
+  const client = getS3Client();
+  const bucketName = getS3BucketName();
 
   await client.send(
     new AbortMultipartUploadCommand({
-      Bucket: bucketName.trim(),
+      Bucket: bucketName,
       Key: key.replace(/^\/+/, ''),
       UploadId: uploadId,
     })
@@ -671,9 +680,7 @@ export async function createS3MultipartUpload({
   extension = '',
 }: CreateMultipartParams): Promise<{ uploadId: string; cacheControl: string; contentDisposition: 'inline' | 'attachment' }> {
   const client = getS3Client();
-  if (!client || !bucketName) {
-    throw new Error('Credenciales AWS S3 incompletas en el entorno.');
-  }
+  const bucketName = getS3BucketName();
 
   const cacheControl = getCacheControlForVisibility(visibility, true);
   const contentDisposition: 'inline' | 'attachment' =
@@ -682,7 +689,7 @@ export async function createS3MultipartUpload({
       : 'inline';
 
   const cmdInput: Record<string, any> = {
-    Bucket: bucketName.trim(),
+    Bucket: bucketName,
     Key: key.replace(/^\/+/, ''),
     ContentType: contentType,
     CacheControl: cacheControl,
@@ -714,12 +721,10 @@ export async function generatePresignedUploadPartUrl(
   expiresIn = 900
 ): Promise<string> {
   const client = getS3Client();
-  if (!client || !bucketName) {
-    throw new Error('Credenciales AWS S3 incompletas en el entorno.');
-  }
+  const bucketName = getS3BucketName();
 
   const command = new UploadPartCommand({
-    Bucket: bucketName.trim(),
+    Bucket: bucketName,
     Key: key.replace(/^\/+/, ''),
     UploadId: uploadId,
     PartNumber: partNumber,
@@ -743,13 +748,11 @@ export async function listS3UploadedParts(
   uploadId: string
 ): Promise<S3UploadedPartInfo[]> {
   const client = getS3Client();
-  if (!client || !bucketName) {
-    throw new Error('Credenciales AWS S3 incompletas en el entorno.');
-  }
+  const bucketName = getS3BucketName();
 
   const res = await client.send(
     new ListPartsCommand({
-      Bucket: bucketName.trim(),
+      Bucket: bucketName,
       Key: key.replace(/^\/+/, ''),
       UploadId: uploadId,
     })
@@ -772,9 +775,7 @@ export async function completeS3MultipartUpload(
   parts: Array<{ PartNumber: number; ETag: string }>
 ): Promise<{ location?: string; etag?: string }> {
   const client = getS3Client();
-  if (!client || !bucketName) {
-    throw new Error('Credenciales AWS S3 incompletas en el entorno.');
-  }
+  const bucketName = getS3BucketName();
 
   const sortedParts = [...parts]
     .map((p) => ({
@@ -785,7 +786,7 @@ export async function completeS3MultipartUpload(
 
   const res = await client.send(
     new CompleteMultipartUploadCommand({
-      Bucket: bucketName.trim(),
+      Bucket: bucketName,
       Key: key.replace(/^\/+/, ''),
       UploadId: uploadId,
       MultipartUpload: {

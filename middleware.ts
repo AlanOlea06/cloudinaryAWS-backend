@@ -1,273 +1,465 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+import {
+  requireEnv,
+  verifyAdminSecretHeader,
+  verifyCronSecretHeader,
+} from '@/lib/env';
 
-// Credenciales de conexión a Supabase REST API (Edge Compatible)
-const FALLBACK_URL = 'https://ztmjgbhdgbgbtmvxgtrc.supabase.co';
-const FALLBACK_KEY = typeof atob !== 'undefined'
-  ? atob('c2Jfc2VjcmV0X0tGcjZGV19icy14eXJ3bFlGekt5S0FfZTdvTGxjUWU=')
-  : '';
-
-const SUPABASE_URL = process.env.SUPABASE_URL || FALLBACK_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || FALLBACK_KEY;
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // ============================================================================
-// Task B.13: Security Headers & Sliding-Window Edge Rate Limiting
+// [TASK B.10] Edge Rate Limiting (Sliding Window 60s per API Key)
+// Note (Section 2): Removed x-rate-limit-max client header override hook.
 // ============================================================================
+const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 60 seconds
+const DEFAULT_RATE_LIMIT_MAX_REQUESTS = 100; // 100 requests / minute per API key
+
+interface RateLimitBucket {
+  timestamps: number[];
+}
+
+const rateLimitStore: Map<string, RateLimitBucket> =
+  (globalThis as any).__antigravityRateLimitStore ||
+  new Map<string, RateLimitBucket>();
+(globalThis as any).__antigravityRateLimitStore = rateLimitStore;
+
+function checkRateLimit(
+  keyId: string,
+  maxRequests: number = DEFAULT_RATE_LIMIT_MAX_REQUESTS
+): {
+  allowed: boolean;
+  limit: number;
+  remaining: number;
+  resetSeconds: number;
+  retryAfterSeconds: number;
+} {
+  const now = Date.now();
+  const windowStart = now - RATE_LIMIT_WINDOW_MS;
+
+  let bucket = rateLimitStore.get(keyId);
+  if (!bucket) {
+    bucket = { timestamps: [] };
+    rateLimitStore.set(keyId, bucket);
+  }
+
+  bucket.timestamps = bucket.timestamps.filter((ts) => ts > windowStart);
+
+  if (bucket.timestamps.length >= maxRequests) {
+    const oldestInWindow = bucket.timestamps[0] || now;
+    const retryAfterMs = Math.max(1000, oldestInWindow + RATE_LIMIT_WINDOW_MS - now);
+    const retryAfterSeconds = Math.ceil(retryAfterMs / 1000);
+    return {
+      allowed: false,
+      limit: maxRequests,
+      remaining: 0,
+      resetSeconds: retryAfterSeconds,
+      retryAfterSeconds,
+    };
+  }
+
+  bucket.timestamps.push(now);
+  const remaining = Math.max(0, maxRequests - bucket.timestamps.length);
+  const oldestInWindow = bucket.timestamps[0] || now;
+  const resetSeconds = Math.max(
+    1,
+    Math.ceil((oldestInWindow + RATE_LIMIT_WINDOW_MS - now) / 1000)
+  );
+
+  return {
+    allowed: true,
+    limit: maxRequests,
+    remaining,
+    resetSeconds,
+    retryAfterSeconds: 0,
+  };
+}
+
 const SECURITY_HEADERS: Record<string, string> = {
   'X-Content-Type-Options': 'nosniff',
   'X-Frame-Options': 'DENY',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
-  'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
-  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  'Strict-Transport-Security': 'max-age=63072000; includeSubDomains; preload',
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers':
+    'Content-Type, Authorization, x-api-key, x-user-id, x-end-user-id, x-admin-secret',
 };
 
-const DEFAULT_RATE_LIMIT_MAX = 120; // 120 requests per 60s window
-const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-
-interface RateBucket {
-  count: number;
-  resetAt: number;
+interface ApiKeyRecord {
+  id: string;
+  org_id: string;
+  user_id?: string | null;
+  name: string;
+  can_read: boolean;
+  can_upload: boolean;
+  can_delete: boolean;
+  is_active: boolean;
 }
 
-const globalForRateLimit = globalThis as unknown as {
-  edgeRateBuckets?: Map<string, RateBucket>;
-};
-if (!globalForRateLimit.edgeRateBuckets) {
-  globalForRateLimit.edgeRateBuckets = new Map<string, RateBucket>();
+interface UserRecord {
+  id: string;
+  org_id: string;
+  name: string;
+  email: string;
+  role: string;
+  can_upload: boolean;
 }
 
-function applySecurityAndRateHeaders(
-  res: NextResponse,
-  rateInfo?: { limit: number; remaining: number; resetSec: number }
+async function sha256Hex(input: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(input);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function applySecurityHeaders(response: NextResponse): NextResponse {
+  Object.entries(SECURITY_HEADERS).forEach(([key, value]) => {
+    response.headers.set(key, value);
+  });
+  return response;
+}
+
+function jsonError(
+  status: number,
+  error: string,
+  code: string,
+  message: string,
+  extraHeaders?: Record<string, string>
 ): NextResponse {
-  for (const [k, v] of Object.entries(SECURITY_HEADERS)) {
-    res.headers.set(k, v);
-  }
-  if (rateInfo) {
-    res.headers.set('X-RateLimit-Limit', String(rateInfo.limit));
-    res.headers.set('X-RateLimit-Remaining', String(Math.max(0, rateInfo.remaining)));
-    res.headers.set('X-RateLimit-Reset', String(rateInfo.resetSec));
+  const res = applySecurityHeaders(
+    NextResponse.json({ error, code, message }, { status })
+  );
+  if (extraHeaders) {
+    Object.entries(extraHeaders).forEach(([k, v]) => res.headers.set(k, v));
   }
   return res;
 }
 
-/**
- * Función criptográfica estándar Web Crypto (crypto.subtle)
- * Compatible al 100% con Vercel Edge Runtime (sin dependencias de Node.js crypto).
- */
-async function hashSha256(plainText: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(plainText);
-  const digestBuffer = await crypto.subtle.digest('SHA-256', data);
-  const hashArray = Array.from(new Uint8Array(digestBuffer));
-  return hashArray.map((byte) => byte.toString(16).padStart(2, '0')).join('');
+function isAdminRoute(pathname: string): boolean {
+  return (
+    pathname === '/api/keys' ||
+    pathname.startsWith('/api/keys/') ||
+    pathname === '/api/logs' ||
+    pathname.startsWith('/api/logs/') ||
+    pathname === '/api/records' ||
+    pathname.startsWith('/api/records/') ||
+    pathname === '/api/users' ||
+    pathname.startsWith('/api/users/') ||
+    pathname === '/api/webhooks' ||
+    pathname.startsWith('/api/webhooks/') ||
+    pathname === '/api/test' ||
+    pathname.startsWith('/api/test/')
+  );
 }
 
-export async function middleware(req: NextRequest) {
-  const pathname = req.nextUrl.pathname;
-  const method = req.method;
-
-  // 1. Dejar pasar peticiones preflight CORS con cabeceras de seguridad
-  if (method === 'OPTIONS') {
-    return applySecurityAndRateHeaders(NextResponse.next());
+export async function middleware(request: NextRequest) {
+  if (request.method === 'OPTIONS') {
+    return applySecurityHeaders(new NextResponse(null, { status: 204 }));
   }
 
-  // 2. Task B.13: Sliding-Window Edge Rate Limiting
-  const clientIp = (req.headers.get('x-forwarded-for') || '127.0.0.1').split(',')[0].trim();
-  const apiKey = req.headers.get('x-api-key')?.trim() || '';
-  const testLimitHeader = req.headers.get('x-rate-limit-max');
-  const maxRequests =
-    testLimitHeader !== null && Number.isInteger(Number(testLimitHeader)) && Number(testLimitHeader) > 0
-      ? Number(testLimitHeader)
-      : DEFAULT_RATE_LIMIT_MAX;
+  const { pathname } = request.nextUrl;
+  const method = request.method.toUpperCase();
+  const isProd = process.env.NODE_ENV === 'production';
 
-  const bucketKey = `${apiKey ? apiKey.slice(0, 16) : clientIp}:${maxRequests}`;
-  const now = Date.now();
-  const buckets = globalForRateLimit.edgeRateBuckets!;
-  let bucket = buckets.get(bucketKey);
-
-  if (!bucket || now >= bucket.resetAt) {
-    bucket = { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
-  }
-  bucket.count += 1;
-  buckets.set(bucketKey, bucket);
-
-  const remaining = maxRequests - bucket.count;
-  const resetSec = Math.ceil((bucket.resetAt - now) / 1000);
-  const rateInfo = { limit: maxRequests, remaining, resetSec };
-
-  if (bucket.count > maxRequests) {
-    const res429 = NextResponse.json(
-      {
-        error: 'Too Many Requests',
-        code: 'RATE_LIMIT_EXCEEDED',
-        message: `Límite de peticiones en el Edge excedido (${maxRequests} peticiones por minuto). Reintenta en ${resetSec} segundos.`,
-        retryAfterSeconds: resetSec,
-      },
-      {
-        status: 429,
-        headers: {
-          'Retry-After': String(resetSec),
-        },
-      }
-    );
-    return applySecurityAndRateHeaders(res429, rateInfo);
+  // 1. Public healthcheck endpoint (/api/health) — no sensitive data
+  if (pathname === '/api/health') {
+    return applySecurityHeaders(NextResponse.next());
   }
 
-  // 3. Si es GET hacia /api/img/[id] y trae firma HMAC (?sig=...), permitir paso al handler con cabeceras de seguridad
-  // Si es POST hacia /api/img/[id] (para firmar URL), exigir API Key normal.
-  if (pathname.startsWith('/api/img/') && method === 'GET' && !apiKey) {
-    return applySecurityAndRateHeaders(NextResponse.next(), rateInfo);
+  // 2. Disable /api/img in production until the transformations stage
+  if (pathname === '/api/img' || pathname.startsWith('/api/img/')) {
+    if (isProd) {
+      return jsonError(
+        503,
+        'Service Unavailable',
+        'IMAGE_TRANSFORM_DISABLED_IN_PRODUCTION',
+        'El endpoint de transformaciones (/api/img) está deshabilitado en producción hasta la etapa de transformaciones.'
+      );
+    }
   }
 
-  // 4. Extraer cabecera x-api-key
-  if (!apiKey) {
-    const res401 = NextResponse.json(
-      {
-        error: 'Unauthorized',
-        code: 'MISSING_API_KEY',
-        message: 'Acceso Denegado: Se requiere la cabecera "x-api-key" para acceder a esta ruta protegida.',
-      },
-      { status: 401 }
-    );
-    return applySecurityAndRateHeaders(res401, rateInfo);
+  // 3. Block destructive test/debug endpoints in production
+  if (isProd) {
+    if (
+      pathname === '/api/test/cleanup' ||
+      pathname.startsWith('/api/test/') ||
+      (pathname === '/api/logs' && method === 'DELETE') ||
+      (pathname === '/api/records' && method === 'DELETE') ||
+      (pathname === '/api/webhooks/test-receiver' && method === 'PUT')
+    ) {
+      return jsonError(
+        403,
+        'Forbidden',
+        'ENDPOINT_DISABLED_IN_PRODUCTION',
+        `La operación '${method} ${pathname}' está deshabilitada en el entorno de producción.`
+      );
+    }
   }
 
   try {
-    // 5. Hashear la llave entrante usando Web Crypto API (crypto.subtle)
-    const hashedKey = await hashSha256(apiKey);
+    // 4. Cron routes (/api/cron/*) require CRON_SECRET (Authorization: Bearer <CRON_SECRET>)
+    if (pathname === '/api/cron' || pathname.startsWith('/api/cron/')) {
+      const cronCheck = verifyCronSecretHeader(request.headers);
+      if (!cronCheck.valid) {
+        return jsonError(
+          cronCheck.status,
+          cronCheck.status === 401 ? 'Unauthorized' : 'Forbidden',
+          cronCheck.code || 'CRON_AUTH_FAILED',
+          cronCheck.message || 'No autorizado para ejecutar tareas de Cron.'
+        );
+      }
+      return applySecurityHeaders(NextResponse.next());
+    }
 
-    // 6. Consultar PostgREST en Supabase buscando coincidencia exacta del hash y is_active=true
-    const queryUrl = `${SUPABASE_URL}/rest/v1/api_keys?hashed_key=eq.${encodeURIComponent(hashedKey)}&is_active=eq.true&select=*`;
+    // 5. Administrative routes require ADMIN_API_SECRET (with ADMIN_API_SECRET_PREVIOUS support)
+    if (isAdminRoute(pathname)) {
+      const adminCheck = verifyAdminSecretHeader(request.headers);
+      if (!adminCheck.valid) {
+        return jsonError(
+          adminCheck.status,
+          adminCheck.status === 401 ? 'Unauthorized' : 'Forbidden',
+          adminCheck.code || 'ADMIN_AUTH_FAILED',
+          adminCheck.message || 'No autorizado para acceder a rutas administrativas.'
+        );
+      }
+      return applySecurityHeaders(NextResponse.next());
+    }
 
-    const supabaseRes = await fetch(queryUrl, {
+    // 6. All remaining /api/* routes require a valid organization API Key (x-api-key)
+    const supabaseUrl = requireEnv('SUPABASE_URL');
+    const supabaseServiceRoleKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
+
+    const rawApiKey = request.headers.get('x-api-key')?.trim();
+    if (!rawApiKey) {
+      return jsonError(
+        401,
+        'Unauthorized',
+        'MISSING_API_KEY',
+        'Autenticación requerida: debe enviar una API Key válida en la cabecera x-api-key.'
+      );
+    }
+
+    const hashedKey = await sha256Hex(rawApiKey);
+    const restUrl = `${supabaseUrl}/rest/v1/api_keys?hashed_key=eq.${encodeURIComponent(
+      hashedKey
+    )}&select=id,org_id,user_id,name,can_read,can_upload,can_delete,is_active&limit=1`;
+
+    const dbResponse = await fetch(restUrl, {
       method: 'GET',
       headers: {
-        'apikey': SUPABASE_SERVICE_ROLE_KEY,
-        'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        apikey: supabaseServiceRoleKey,
+        Authorization: `Bearer ${supabaseServiceRoleKey}`,
         'Content-Type': 'application/json',
       },
       cache: 'no-store',
     });
 
-    if (!supabaseRes.ok) {
-      const res500 = NextResponse.json(
-        {
-          error: 'Internal Server Error',
-          code: 'AUTH_GATEWAY_ERROR',
-          message: 'Error de comunicación al validar la llave de acceso en la base de datos.',
-        },
-        { status: 500 }
+    if (!dbResponse.ok) {
+      return jsonError(
+        500,
+        'Internal Server Error',
+        'AUTH_VERIFICATION_ERROR',
+        'Error al verificar la API Key contra el almacén de seguridad.'
       );
-      return applySecurityAndRateHeaders(res500, rateInfo);
     }
 
-    const matchingKeys = await supabaseRes.json();
+    const records = (await dbResponse.json()) as ApiKeyRecord[];
+    const keyRecord = records?.[0];
 
-    if (!Array.isArray(matchingKeys) || matchingKeys.length === 0) {
-      const res401Invalid = NextResponse.json(
-        {
-          error: 'Unauthorized',
-          code: 'INVALID_API_KEY',
-          message: 'Acceso Denegado: La llave API provista es inválida, ha sido revocada o se encuentra inactiva.',
-        },
-        { status: 401 }
+    if (!keyRecord || !keyRecord.is_active) {
+      return jsonError(
+        403,
+        'Forbidden',
+        'INVALID_OR_INACTIVE_API_KEY',
+        'Acceso denegado: la API Key proporcionada no existe o ha sido revocada.'
       );
-      return applySecurityAndRateHeaders(res401Invalid, rateInfo);
     }
 
-    const keyRecord = matchingKeys[0];
-    const cleanKeyName = typeof keyRecord.name === 'string'
-      ? keyRecord.name.replace(/\s*\[uid:[0-9a-f-]{36}\]/gi, '').trim()
-      : 'API Key';
+    // 7. Sliding Window Rate Limit (60s) per API Key (no header override allowed)
+    const rateStatus = checkRateLimit(keyRecord.id, DEFAULT_RATE_LIMIT_MAX_REQUESTS);
 
-    let boundUserId: string | null = keyRecord.user_id || null;
-    if (!boundUserId && typeof keyRecord.name === 'string') {
-      const uidMatch = keyRecord.name.match(/\[uid:([0-9a-f-]{36})\]/i);
-      if (uidMatch) {
-        boundUserId = uidMatch[1];
-      }
+    const rateLimitHeaders: Record<string, string> = {
+      'X-RateLimit-Limit': String(rateStatus.limit),
+      'X-RateLimit-Remaining': String(rateStatus.remaining),
+      'X-RateLimit-Reset': String(rateStatus.resetSeconds),
+    };
+
+    if (!rateStatus.allowed) {
+      return jsonError(
+        429,
+        'Too Many Requests',
+        'RATE_LIMIT_EXCEEDED',
+        `Límite de peticiones excedido para esta API Key (${rateStatus.limit} req / 60s). Reintenta en ${rateStatus.retryAfterSeconds} segundos.`,
+        {
+          ...rateLimitHeaders,
+          'Retry-After': String(rateStatus.retryAfterSeconds),
+        }
+      );
     }
 
-    // 7. Verificar permisos basados en el Principio de Menor Privilegio
-    if ((pathname.startsWith('/api/upload') || pathname.startsWith('/api/files')) && (method === 'POST' || method === 'PUT')) {
-      if (!keyRecord.can_upload) {
-        const res403 = NextResponse.json(
-          {
-            error: 'Forbidden',
-            code: 'FORBIDDEN_INSUFFICIENT_PERMISSIONS',
-            message: `Permisos Insuficientes: La llave API "${cleanKeyName}" no cuenta con la facultad "can_upload" requerida para operaciones ${method}.`,
-          },
-          { status: 403 }
+    // 8. Least-Privilege RBAC Verification
+    let hasPermission = false;
+    let requiredPermissionName = '';
+
+    if (method === 'GET' || method === 'HEAD') {
+      hasPermission = Boolean(keyRecord.can_read);
+      requiredPermissionName = 'can_read';
+    } else if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
+      hasPermission = Boolean(keyRecord.can_upload);
+      requiredPermissionName = 'can_upload';
+    } else if (method === 'DELETE') {
+      hasPermission = Boolean(keyRecord.can_delete);
+      requiredPermissionName = 'can_delete';
+    }
+
+    if (!hasPermission) {
+      return jsonError(
+        403,
+        'Forbidden',
+        'INSUFFICIENT_API_KEY_PERMISSIONS',
+        `Permisos insuficientes: la llave '${keyRecord.name}' no cuenta con el privilegio '${requiredPermissionName}' para ejecutar métodos ${method}.`,
+        rateLimitHeaders
+      );
+    }
+
+    // 9. Section 3 (Option A): Organization-bound API Key + End-User validation
+    const headerUserId = (
+      request.headers.get('x-user-id') ||
+      request.headers.get('x-end-user-id') ||
+      ''
+    ).trim();
+
+    const boundUserId = keyRecord.user_id ? String(keyRecord.user_id).trim() : '';
+
+    // If the key is bound to a specific user_id, prevent impersonating any other user via header
+    if (boundUserId && headerUserId && headerUserId !== boundUserId) {
+      return jsonError(
+        403,
+        'Forbidden',
+        'FORBIDDEN_USER_IMPERSONATION',
+        `La API Key '${keyRecord.name}' está vinculada exclusivamente al usuario '${boundUserId}' y no puede operar en nombre de '${headerUserId}'.`,
+        rateLimitHeaders
+      );
+    }
+
+    const candidateUserId = boundUserId || headerUserId;
+
+    // Upload ticket creation (POST /api/upload, POST /api/upload/multipart) always requires an end-user
+    const isTicketCreationRequest =
+      method === 'POST' &&
+      (pathname === '/api/upload' || pathname === '/api/upload/multipart');
+
+    if (!candidateUserId && isTicketCreationRequest) {
+      return jsonError(
+        400,
+        'Bad Request',
+        'MISSING_END_USER_ID',
+        'Las API Keys de organización (sin user_id fijo) requieren que el backend envíe el UUID del usuario final en la cabecera x-user-id.',
+        rateLimitHeaders
+      );
+    }
+
+    let validatedUserId = '';
+
+    if (candidateUserId) {
+      if (!UUID_REGEX.test(candidateUserId)) {
+        return jsonError(
+          400,
+          'Bad Request',
+          'INVALID_END_USER_ID',
+          'El identificador de usuario final en la cabecera x-user-id debe ser un UUID v4 válido.',
+          rateLimitHeaders
         );
-        return applySecurityAndRateHeaders(res403, rateInfo);
       }
-    }
 
-    if ((pathname.startsWith('/api/files') || pathname.startsWith('/api/img')) && method === 'GET' && !keyRecord.can_read) {
-      const res403 = NextResponse.json(
-        {
-          error: 'Forbidden',
-          code: 'FORBIDDEN_INSUFFICIENT_PERMISSIONS',
-          message: `Permisos Insuficientes: La llave API "${cleanKeyName}" no cuenta con la facultad "can_read" requerida para consultas.`,
+      const userRestUrl = `${supabaseUrl}/rest/v1/users?id=eq.${encodeURIComponent(
+        candidateUserId
+      )}&select=id,org_id,name,email,role,can_upload&limit=1`;
+
+      const userResp = await fetch(userRestUrl, {
+        method: 'GET',
+        headers: {
+          apikey: supabaseServiceRoleKey,
+          Authorization: `Bearer ${supabaseServiceRoleKey}`,
+          'Content-Type': 'application/json',
         },
-        { status: 403 }
-      );
-      return applySecurityAndRateHeaders(res403, rateInfo);
+        cache: 'no-store',
+      });
+
+      if (!userResp.ok) {
+        return jsonError(
+          500,
+          'Internal Server Error',
+          'USER_VERIFICATION_ERROR',
+          'Error al verificar la pertenencia del usuario final en la base de datos.',
+          rateLimitHeaders
+        );
+      }
+
+      const userRows = (await userResp.json()) as UserRecord[];
+      const userRecord = userRows?.[0];
+
+      if (!userRecord) {
+        return jsonError(
+          401,
+          'Unauthorized',
+          'USER_NOT_REGISTERED',
+          `El usuario final '${candidateUserId}' no existe en el sistema.`,
+          rateLimitHeaders
+        );
+      }
+
+      if (userRecord.org_id !== keyRecord.org_id) {
+        return jsonError(
+          403,
+          'Forbidden',
+          'FORBIDDEN_USER_ORG_MISMATCH',
+          `Aislamiento Multi-Tenant: el usuario '${candidateUserId}' no pertenece a la organización propietaria de la API Key.`,
+          rateLimitHeaders
+        );
+      }
+
+      validatedUserId = userRecord.id;
     }
 
-    if ((pathname.startsWith('/api/files') || pathname.startsWith('/api/upload/multipart')) && method === 'DELETE' && !keyRecord.can_delete) {
-      const res403 = NextResponse.json(
-        {
-          error: 'Forbidden',
-          code: 'FORBIDDEN_INSUFFICIENT_PERMISSIONS',
-          message: `Permisos Insuficientes: La llave API "${cleanKeyName}" no cuenta con la facultad "can_delete" requerida para eliminación.`,
-        },
-        { status: 403 }
-      );
-      return applySecurityAndRateHeaders(res403, rateInfo);
-    }
-
-    // 8. Inyección de Headers de Contexto Seguro
-    const requestHeaders = new Headers(req.headers);
+    // 10. Strip any client-supplied x-validated-* headers and inject server-verified context
+    const requestHeaders = new Headers(request.headers);
     requestHeaders.delete('x-validated-org-id');
     requestHeaders.delete('x-validated-user-id');
     requestHeaders.delete('x-api-key-id');
     requestHeaders.delete('x-api-key-name');
+    requestHeaders.delete('x-api-key-bound-user-id');
 
     requestHeaders.set('x-validated-org-id', keyRecord.org_id);
-    requestHeaders.set('x-api-key-id', keyRecord.id);
-    requestHeaders.set('x-api-key-name', cleanKeyName);
-    if (boundUserId) {
-      requestHeaders.set('x-validated-user-id', boundUserId);
+    if (validatedUserId) {
+      requestHeaders.set('x-validated-user-id', validatedUserId);
     }
+    requestHeaders.set('x-api-key-id', keyRecord.id);
+    requestHeaders.set('x-api-key-name', keyRecord.name);
+    requestHeaders.set('x-api-key-bound-user-id', boundUserId);
 
-    const nextRes = NextResponse.next({
+    const response = NextResponse.next({
       request: {
         headers: requestHeaders,
       },
     });
-    return applySecurityAndRateHeaders(nextRes, rateInfo);
-  } catch (err: any) {
-    const res500 = NextResponse.json(
-      {
-        error: 'Internal Server Error',
-        code: 'EDGE_AUTH_EXCEPTION',
-        message: 'Ocurrió un error inesperado al procesar la autenticación de la llave.',
-      },
-      { status: 500 }
+
+    Object.entries(rateLimitHeaders).forEach(([k, v]) => response.headers.set(k, v));
+    return applySecurityHeaders(response);
+  } catch (error: any) {
+    return jsonError(
+      500,
+      'Internal Server Error',
+      'MIDDLEWARE_INTERNAL_ERROR',
+      error?.message || 'Error inesperado en el middleware de seguridad.'
     );
-    return applySecurityAndRateHeaders(res500, rateInfo);
   }
 }
 
-// Configuración de rutas interceptadas por el Middleware
+// Intercept ALL /api/* routes (only /api/health is public inside middleware)
 export const config = {
-  matcher: [
-    '/api/upload',
-    '/api/upload/:path*',
-    '/api/files',
-    '/api/files/:path*',
-    '/api/img/:path*',
-  ],
+  matcher: ['/api/:path*'],
 };
