@@ -8,6 +8,7 @@ import {
   CopyObjectCommand,
   DeleteObjectsCommand,
   ListObjectsV2Command,
+  AbortMultipartUploadCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
@@ -571,4 +572,81 @@ export async function deleteS3ObjectsByKeys(keys: string[]): Promise<{ count: nu
     throw error;
   }
 }
+
+/**
+ * Task B.6: Downloads an object from S3 as a Buffer using GetObjectCommand.
+ */
+export async function getS3ObjectBuffer(key: string): Promise<Buffer | null> {
+  const client = getS3Client();
+  if (!client || !bucketName || !key) {
+    return null;
+  }
+
+  const res = await client.send(
+    new GetObjectCommand({
+      Bucket: bucketName.trim(),
+      Key: key.replace(/^\/+/, ''),
+    })
+  );
+
+  if (!res.Body) {
+    return null;
+  }
+
+  const byteArray = await res.Body.transformToByteArray();
+  return Buffer.from(byteArray);
+}
+
+/**
+ * Task B.6: Uploads a processed Buffer directly to S3 (e.g. static/files/<rand128_B>.<ext>)
+ * with explicit ContentType, CacheControl, and optional ContentDisposition.
+ */
+export async function putS3ObjectBuffer(
+  key: string,
+  buffer: Buffer,
+  contentType: string,
+  cacheControl: string,
+  contentDisposition?: 'inline' | 'attachment'
+): Promise<boolean> {
+  const client = getS3Client();
+  if (!client || !bucketName || !key) {
+    return false;
+  }
+
+  const putParams: Record<string, any> = {
+    Bucket: bucketName.trim(),
+    Key: key.replace(/^\/+/, ''),
+    Body: buffer,
+    ContentType: contentType,
+    CacheControl: cacheControl,
+    ContentLength: buffer.length,
+  };
+
+  if (contentDisposition === 'attachment' || key.toLowerCase().endsWith('.pdf')) {
+    putParams.ContentDisposition = 'attachment';
+  }
+
+  await client.send(new PutObjectCommand(putParams as any));
+  return true;
+}
+
+/**
+ * Task B.8 & B.9: Aborts an incomplete or abandoned S3 Multipart Upload using AbortMultipartUploadCommand.
+ */
+export async function abortS3MultipartUpload(key: string, uploadId: string): Promise<boolean> {
+  const client = getS3Client();
+  if (!client || !bucketName || !key || !uploadId) {
+    return false;
+  }
+
+  await client.send(
+    new AbortMultipartUploadCommand({
+      Bucket: bucketName.trim(),
+      Key: key.replace(/^\/+/, ''),
+      UploadId: uploadId,
+    })
+  );
+  return true;
+}
+
 
