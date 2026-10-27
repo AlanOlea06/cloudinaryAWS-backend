@@ -107,31 +107,42 @@ export async function POST(req: NextRequest) {
   if (authError) return authError;
 
   try {
-    const body = await req.json();
+    const body = await req.json().catch(() => ({}));
     const {
       org_id,
+      orgId,
       user_id,
-      userId: bodyUserId,
+      userId,
       name,
-      can_read = false,
-      can_upload = false,
-      can_delete = false,
+      can_read,
+      canRead,
+      can_upload,
+      canUpload,
+      can_delete,
+      canDelete,
     } = body;
 
-    const cleanOrgId = org_id?.trim();
-    const rawUserId = user_id !== undefined ? user_id : bodyUserId;
+    const rawOrgId = orgId !== undefined ? orgId : org_id;
+    const cleanOrgId = typeof rawOrgId === 'string' ? rawOrgId.trim() : '';
+
+    const rawUserId = userId !== undefined ? userId : user_id;
     const cleanUserId =
       typeof rawUserId === 'string' && rawUserId.trim().length > 0
         ? rawUserId.trim()
         : null;
-    const cleanName = name?.trim();
+
+    const cleanName = typeof name === 'string' ? name.trim() : '';
+
+    const effectiveCanRead = canRead !== undefined ? Boolean(canRead) : Boolean(can_read);
+    const effectiveCanUpload = canUpload !== undefined ? Boolean(canUpload) : Boolean(can_upload);
+    const effectiveCanDelete = canDelete !== undefined ? Boolean(canDelete) : Boolean(can_delete);
 
     if (!cleanOrgId || !UUID_REGEX.test(cleanOrgId)) {
       return NextResponse.json(
         {
           error: 'Bad Request',
           code: 'INVALID_ORG_ID',
-          message: 'El campo org_id es obligatorio y debe ser un UUID v4 válido.',
+          message: 'El campo org_id (u orgId) es obligatorio y debe ser un UUID v4 válido.',
         },
         { status: 400, headers: corsHeaders }
       );
@@ -254,9 +265,9 @@ export async function POST(req: NextRequest) {
       user_id: cleanUserId,
       name: cleanName,
       hashed_key: hashedKey,
-      can_read: Boolean(can_read),
-      can_upload: Boolean(can_upload),
-      can_delete: Boolean(can_delete),
+      can_read: effectiveCanRead,
+      can_upload: effectiveCanUpload,
+      can_delete: effectiveCanDelete,
       is_active: true,
     };
 
@@ -306,12 +317,20 @@ export async function DELETE(req: NextRequest) {
 
   try {
     const { searchParams } = new URL(req.url);
-    const keyId = searchParams.get('id')?.trim();
-    const mode = searchParams.get('mode') || 'delete'; // 'revoke' | 'delete'
+    let keyId = searchParams.get('id')?.trim() || searchParams.get('keyId')?.trim();
+    let mode = searchParams.get('mode') || 'delete';
+
+    if (!keyId) {
+      try {
+        const body = await req.json();
+        keyId = (body.id || body.keyId || body.apiKeyId)?.trim();
+        if (body.mode) mode = body.mode;
+      } catch {}
+    }
 
     if (!keyId || !UUID_REGEX.test(keyId)) {
       return NextResponse.json(
-        { error: 'Bad Request', code: 'INVALID_KEY_ID', message: 'El parámetro id debe ser un UUID v4 válido.' },
+        { error: 'Bad Request', code: 'INVALID_KEY_ID', message: 'El parámetro id (o keyId) debe ser un UUID v4 válido.' },
         { status: 400, headers: corsHeaders }
       );
     }
