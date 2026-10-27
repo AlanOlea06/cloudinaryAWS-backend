@@ -1,4 +1,4 @@
-# Guía Completa de Pruebas en Postman: Doble Autenticación, Webhooks, Checksum SHA-256, Multipart y S3 Directo
+# Guía Completa de Pruebas en Postman: Cabeceras (Headers), Métodos, Bodies y Respuestas
 
 > **Servicio:** Cloudinary Clone Backend (Vercel Serverless)  
 > **URL Base:** `https://cloudinary-aws-backend.vercel.app`  
@@ -8,46 +8,57 @@
 
 ---
 
-## 🔑 1. MAPA DE AUTENTICACIÓN Y MÉTODOS DISPONIBLES
+## 🔑 1. TABLA RÁPIDA DE CABECERAS (HEADERS) POR CADA PETICIÓN DE POSTMAN
 
-| Ruta | Método | Credencial / Cabecera Requerida | Propósito / Quién la usa |
-| :--- | :--- | :--- | :--- |
-| `/api/health` | `GET`, `HEAD` | **Pública** (sin credenciales) | Healthcheck público (`{ status: "ok", service: "cloudinary-aws-backend" }`). |
-| `/api/organizations` | `GET`, `PATCH` | `x-admin-secret: <ADMIN_API_SECRET>`<br>-- **O** --<br>`x-api-key: sk_live_...` *(con `can_manage_keys=true`)* | **Doble Autenticación:**<br>1. **Administrador (`x-admin-secret`):** Modifica cuotas (`maxStorageBytes`, `maxPendingTickets`, `maxApiKeys`), nombres y webhooks de cualquier organización.<br>2. **Llave Maestra (`can_manage_keys=true`):** Autoservicio para consultar su organización y actualizar **únicamente** `webhookUrl` (con validación anti-SSRF) y `webhookSecret`. Si intenta tocar cuotas recibe `403 FORBIDDEN_QUOTA_MODIFICATION`. |
-| `/api/keys` | `POST`, `GET`, `PATCH`, `DELETE` | `x-admin-secret: <ADMIN_API_SECRET>`<br>-- **O** --<br>`x-api-key: sk_live_...` *(con `can_manage_keys=true`)* | **Doble Autenticación:**<br>1. **Administrador (`x-admin-secret`):** Control total entre organizaciones, puede otorgar `canManageKeys=true` y promover llaves existentes vía `PATCH`.<br>2. **Llave Maestra (`can_manage_keys=true`):** Autoservicio para su propia organización (ignora `orgId` del body, siempre crea con `can_manage_keys=false`, anti-escalada, anti-autoeliminación y aislamiento multi-tenant). |
-| `/api/upload` | `POST`, `PUT` | `x-api-key: sk_live_...`<br>`x-user-id: <UUID_usuario>` | `POST`: Limpieza oportunista de tickets vencidos, control de cuotas (`413` / `429`) y emisión de URL prefirmada S3 con soporte de `sha256Hash`.<br>`PUT`: Confirmación con `HeadObject`, `Range GET` de 32 bytes (`422 MAGIC_BYTES_MISMATCH` si discrepa), validación `sha256Verified` y despacho de webhook `file.uploaded` con IP fijada. |
-| `/api/upload/multipart` | `POST`, `GET`, `PUT`, `DELETE` | `x-api-key: sk_live_...`<br>`x-user-id: <UUID_usuario>` | `POST (action="create")`: Inicia subida multipart en S3.<br>`POST (action="presign_part")`: Firma URL para cada parte (mín. 5 MB).<br>`GET`: Lista partes subidas en S3 (`ListPartsCommand`).<br>`PUT`: Ensambla partes en S3, valida 32 bytes (`Range GET`) y despacha webhook.<br>`DELETE`: Aborta subida multipart en S3 (`AbortMultipartUploadCommand`). |
-| `/api/files` | `GET` | `x-api-key: sk_live_...`<br>`x-user-id: <UUID_usuario>` | Lista archivos confirmados (`fileStatus: "uploaded"`) de la organización. Oculta `cloudfront_url` en archivos privados (`null`). |
-| `/api/files/:id` | `GET`, `DELETE` | `x-api-key: sk_live_...`<br>`x-user-id: <UUID_usuario>` | `GET`: Para privados entrega URL prefirmada de S3 (`delivery: "s3_presigned"`, TTL 5 min, `cloudfrontUrl: null`) solo al dueño (`403 FORBIDDEN_PRIVATE_NOT_OWNER` a otros usuarios). Para públicos entrega CDN CloudFront (`delivery: "cloudfront"`).<br>`DELETE`: Borra objeto de S3 (deduplicando claves) y registro en BD. |
-| `/api/files/:id/status` | `GET`, `POST` | `x-api-key: sk_live_...`<br>`x-user-id: <UUID_usuario>` | `GET`: Consulta estado transaccional (`fileStatus`, `scanStatus`, `sha256Verified`).<br>`POST`: Re-despacha manualmente el webhook usando la URL configurada en la organización. |
-| `/api/webhooks/test-receiver` | `POST`, `GET` | `POST`: `x-webhook-signature` (HMAC-SHA256)<br>`GET`: `x-admin-secret` | Receptor de pruebas integrado para verificar entregas reales de webhooks y validez criptográfica de la firma HMAC. |
-| `/api/logs` | `GET`, `PATCH`, `DELETE` | `x-admin-secret: <ADMIN_API_SECRET>` | Consulta y mantenimiento de bitácora de auditoría en `public.service_logs`. |
-| `/api/records` | `GET`, `DELETE` | `x-admin-secret: <ADMIN_API_SECRET>` | Consulta y limpieza administrativa de `public.files`. |
-| `/api/users` | `GET` | `x-admin-secret: <ADMIN_API_SECRET>` | Catálogo de usuarios y organizaciones registradas. |
-| `/api/cron/maintenance` | `GET`, `POST` | `Authorization: Bearer <CRON_SECRET>` | Ejecuta 5 tareas: limpieza de tickets expirados, multiparts huérfanos, reintento de webhooks pendientes, limpieza de `rate_limit_buckets` (>1 día) y anonimización de IPs (>30 días). |
+Aquí tienes **exactamente qué cabeceras (`Key` y `Value`) debes poner en la pestaña `Headers` de Postman** para cada una de las 31 peticiones:
+
+| # en Postman | Método y Ruta | Cabeceras Obligatorias en Postman (`Key: Value`) |
+| :--- | :--- | :--- |
+| **0.0** | `GET /api/health` | *(Ninguna cabecera — Ruta pública)* |
+| **0.0A** | `GET /api/organizations` | `x-api-key: <TU_API_KEY_MAESTRA>`<br>*(O bien: `x-admin-secret: <TU_ADMIN_API_SECRET>`)* |
+| **0.0B** | `PATCH /api/organizations` *(Configurar Webhook)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY_MAESTRA>` |
+| **0.0C** | `PATCH /api/organizations` *(Prueba 403 Cuotas)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY_MAESTRA>` |
+| **0.0D** | `PATCH /api/organizations` *(Prueba 400 SSRF)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY_MAESTRA>` |
+| **0.0E** | `PATCH /api/organizations` *(Admin Cuotas)* | `Content-Type: application/json`<br>`x-admin-secret: <TU_ADMIN_API_SECRET>` |
+| **0.1A** | `POST /api/keys` *(Crear Llave Maestra)* | `Content-Type: application/json`<br>`x-admin-secret: <TU_ADMIN_API_SECRET>` |
+| **0.1B** | `POST /api/keys` *(Crear Llave Delegada)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY_MAESTRA>` |
+| **0.1C** | `POST /api/keys` *(Prueba 403 Escalada)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY_SECUNDARIA>` |
+| **0.1D** | `PATCH /api/keys` *(Promover a Maestra)* | `Content-Type: application/json`<br>`x-admin-secret: <TU_ADMIN_API_SECRET>` |
+| **0.2A** | `GET /api/keys?org_id=...` *(Admin)* | `x-admin-secret: <TU_ADMIN_API_SECRET>` |
+| **0.2B** | `GET /api/keys` *(Organización)* | `x-api-key: <TU_API_KEY_MAESTRA>` |
+| **0.3A** | `DELETE /api/keys?id=...` *(Prueba 403 Auto-borrado)* | `x-api-key: <TU_API_KEY_MAESTRA>` |
+| **0.3B** | `DELETE /api/keys?id=...` *(Prueba 404 Otra Org)* | `x-api-key: <TU_API_KEY_MAESTRA>` |
+| **0.3C** | `DELETE /api/keys?id=...` *(Revocar Secundaria)* | `x-api-key: <TU_API_KEY_MAESTRA>` |
+| **1** | `POST /api/upload` *(Ticket Simple)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
+| **1.0B** | `POST /api/upload` *(Ticket con SHA-256)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
+| **1.1** | `POST /api/upload` *(Prueba 403 Usuario Otra Org)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY>`<br>`x-user-id: b2222222-0000-0000-0000-000000000001` |
+| **1.2** | `POST /api/upload` *(Prueba 400 Sin x-user-id)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY>` *(Sin `x-user-id`)* |
+| **2** | `PUT <uploadUrl>` *(Subir Binario a S3)* | **Privado:**<br>`Content-Type: image/png`<br>`Cache-Control: private, no-store, no-cache, max-age=0, must-revalidate`<br>*(+ `x-amz-checksum-sha256: <base64>` si enviaste `sha256Hash` en el Paso 1.0B)*<br>**Público:**<br>`Content-Type: image/png`<br>`Cache-Control: public, max-age=31536000, immutable`<br>⚠️ **NO enviar `x-api-key` ni `x-user-id` a S3.** |
+| **3** | `PUT /api/upload` *(Confirmar Subida)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
+| **3.1** | `GET /api/files` *(Listar Archivos)* | `x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
+| **3.2** | `GET /api/files/:id` *(Leer como Dueño)* | `x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
+| **3.2B** | `GET /api/files/:id` *(Prueba 403 No Dueño)* | `x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000002` |
+| **3.3** | `GET <downloadUrl>` *(Descargar de S3/CDN)* | *(Ninguna cabecera — La firma ya va en la URL de S3)* |
+| **3.4** | `GET /api/files/:id/status` *(Ver Estado)* | `x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
+| **3.5** | `POST /api/files/:id/status` *(Re-enviar Webhook)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
+| **3.6** | `DELETE /api/files/:id` *(Borrar Archivo)* | `x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
+| **4.1** | `POST /api/upload/multipart` *(action=create)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
+| **4.2 / 4.3**| `POST /api/upload/multipart` *(action=presign_part)*| `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
+| **4.4 / 4.5**| `PUT <partUploadUrl>` *(Subir Parte a S3)* | *(Ninguna cabecera extra — Solo `Body -> binary` con el archivo de 5 MB. NO enviar `x-api-key` a S3)* |
+| **4.6** | `GET /api/upload/multipart?ticketId=...` | `x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
+| **4.7** | `PUT /api/upload/multipart` *(Completar)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
+| **4.8** | `DELETE /api/upload/multipart?ticketId=...` | `x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
+| **5** | `GET /api/webhooks/test-receiver` | `x-admin-secret: <TU_ADMIN_API_SECRET>` |
+| **6** | `GET /api/logs` | `x-admin-secret: <TU_ADMIN_API_SECRET>` |
+| **7** | `GET /api/records` | `x-admin-secret: <TU_ADMIN_API_SECRET>` |
+| **8** | `GET /api/users` | `x-admin-secret: <TU_ADMIN_API_SECRET>` |
+| **9** | `GET /api/cron/maintenance` | `Authorization: Bearer <TU_CRON_SECRET>` |
 
 ---
 
-## 🛡️ 2. REGLAS DE SEGURIDAD VERIFICADAS EN PRODUCCIÓN
+## 📋 2. VARIABLES DE LA COLECCIÓN POSTMAN
 
-1. **Higienización de Cabeceras (Anti-Spoofing):**
-   El middleware elimina incondicionalmente cualquier cabecera interna (`x-validated-*`, `x-can-manage-keys`, `x-caller-*`, `x-api-key-*`) enviada por el cliente antes de inyectar contexto verificado. Además, `/api/keys` y `/api/organizations` re-consultan Supabase directamente por el hash SHA-256 (`hashed_key`) de la llave llamante.
-2. **Llaves Vinculadas a Usuario vs Organización:**
-   Una llave atada a un usuario (`user_id IS NOT NULL`) jamás puede gestionar llaves (`can_manage_keys = false` forzado por constraint `CHECK` en PostgreSQL). Solo las llaves de organización (`user_id IS NULL`) pueden ser maestras.
-3. **Cupo Atómico (`max_api_keys`):**
-   Se valida en PostgreSQL mediante el trigger `trigger_check_api_keys_quota` con bloqueo exclusivo `SELECT COALESCE(max_api_keys, 3) FROM public.organizations WHERE id = NEW.org_id FOR UPDATE;`. Serializa peticiones concurrentes (`Promise.all`) y devuelve `409 MAX_API_KEYS_LIMIT_REACHED` al alcanzar el tope.
-4. **Rate Limiting Compartido en PostgreSQL (Fail-Open):**
-   Límite de **20 peticiones / 60s** en `/api/keys` (`429 KEYS_RATE_LIMIT_EXCEEDED` con cabecera `Retry-After`) y **60 peticiones / 60s** en `/api/upload`. Utiliza la función atómica `check_rate_limit_atomic` sobre `public.rate_limit_buckets` guardando solo el UUID de la llave o el hash SHA-256 directo de la IP (`<scope>:<kind>:h:<sha256hex>`). Si la BD falla, opera en modo **Fail-Open** (`allowed: true`) respaldado por el limitador en memoria del Edge.
-5. **Protección Anti-SSRF con Socket Fijado a la IP y Circuit Breaker en Webhooks:**
-   - `isIpBlocked()` rechaza por defecto cualquier cadena no interpretable como IP y bloquea loopback (`127.0.0.0/8`, `::1`), red cero (`0.0.0.0/8`), IPv4-mapped IPv6 (`::ffff:127.0.0.1`, `::ffff:7f00:1`), redes privadas (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`), link-local (`169.254/16`) y notaciones octales/hexadecimales/decimales.
-   - `executePinnedHttpsPost()` abre la conexión HTTPS fijando la función `lookup` a la IP ya validada (`[{ address: pinnedIp, family: pinnedFamily }]` cuando `options.all === true`), conservando `Host` y SNI TLS sin segundo DNS lookup (mitigación total contra DNS Rebinding / TOCTOU).
-   - **Circuit Breaker:** Si las últimas 3 entregas de la organización no fueron entregadas (`status !== 'delivered'`), la siguiente subida encola el webhook inmediatamente (`error: "CIRCUIT_BREAKER_QUEUED"`) sin bloquear la respuesta HTTP del usuario.
-
----
-
-## 📋 3. VARIABLES DE LA COLECCIÓN POSTMAN
-
-Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cloudinary-project/servicio/postman_collection.json) en Postman, configura estas variables en la pestaña **Variables** de la colección:
+Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cloudinary-project/servicio/postman_collection.json) en Postman, todas las cabeceras anteriores **ya están preconfiguradas** usando estas variables en la pestaña **Variables** de la colección:
 
 | Variable | Valor por Defecto / Ejemplo | Descripción |
 | :--- | :--- | :--- |
@@ -66,16 +77,17 @@ Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cl
 
 ---
 
-## 🚀 4. GUÍA PASO A PASO DE TODOS LOS MÉTODOS EN POSTMAN
+## 🚀 3. DETALLE PASO A PASO DE CADA PETICIÓN (CON CABECERAS EXACTAS)
 
 ---
 
-### SECCIÓN 0: Salud, Organizaciones, Webhooks y Protección Anti-SSRF (`/api/health`, `/api/organizations`)
+### SECCIÓN 0: Salud, Organizaciones, Webhooks y Protección Anti-SSRF
 
-#### Método 0.0: Healthcheck Público (`GET /api/health`)
+#### 0.0 Healthcheck Público (`GET /api/health`)
 * **Método:** `GET`
-* **URL:** `{{baseUrl}}/api/health`
-* **Headers:** Ninguno (ruta pública).
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/health`
+* **Cabeceras (Headers en Postman):**
+  *(Ninguna cabecera requerida)*
 * **Respuesta Esperada (`200 OK`):**
   ```json
   {
@@ -85,25 +97,28 @@ Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cl
   }
   ```
 
-#### Método 0.0A: Consultar Mi Organización (`GET /api/organizations`)
-* **Método:** `GET`
-* **URL:** `{{baseUrl}}/api/organizations`
-* **Headers:**
-  ```http
-  x-api-key: {{apiKey}}
-  ```
-  *(También acepta `x-admin-secret: {{adminSecret}}` para listar todas las organizaciones).*
-* **Respuesta Esperada (`200 OK`):** Devuelve los límites de cuota (`max_storage_bytes`, `max_pending_tickets`, `max_api_keys`) y el `webhook_url` actual de la organización.
+---
 
-#### Método 0.0B: Configurar Webhook en Autoservicio (`PATCH /api/organizations` con `x-api-key`)
+#### 0.0A Consultar Mi Organización (`GET /api/organizations`)
+* **Método:** `GET`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/organizations`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value | Descripción |
+  | :--- | :--- | :--- |
+  | `x-api-key` | `{{apiKey}}` *(ej. `sk_live_...`)* | Llave maestra con `can_manage_keys=true` (o usa `x-admin-secret: {{adminSecret}}`) |
+* **Respuesta Esperada (`200 OK`):** Devuelve cuotas (`max_storage_bytes`, `max_pending_tickets`, `max_api_keys`) y `webhook_url` de la organización.
+
+---
+
+#### 0.0B Configurar Webhook de Organización (`PATCH /api/organizations` con `x-api-key`)
 * **Método:** `PATCH`
-* **URL:** `{{baseUrl}}/api/organizations`
-* **Headers:**
-  ```http
-  Content-Type: application/json
-  x-api-key: {{apiKey}}
-  ```
-* **Body (raw JSON):**
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/organizations`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-api-key` | `{{apiKey}}` *(Llave maestra con `can_manage_keys=true`)* |
+* **Body (`raw` -> `JSON`):**
   ```json
   {
     "webhookUrl": "https://cloudinary-aws-backend.vercel.app/api/webhooks/test-receiver",
@@ -114,72 +129,58 @@ Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cl
   ```json
   {
     "status": "updated",
-    "message": "Configuración de webhook actualizada exitosamente.",
-    "organization": {
-      "id": "11111111-1111-1111-1111-111111111111",
-      "webhook_url": "https://cloudinary-aws-backend.vercel.app/api/webhooks/test-receiver",
-      "has_webhook_secret": true
-    }
+    "message": "Configuración de webhook actualizada exitosamente."
   }
   ```
 
-#### Método 0.0C: [Seguridad] Bloqueo de Modificación de Cuotas con Llave Maestra (`PATCH /api/organizations`)
+---
+
+#### 0.0C [Seguridad] Intento de Modificar Cuotas con Llave Maestra (`PATCH /api/organizations`)
 * **Método:** `PATCH`
-* **URL:** `{{baseUrl}}/api/organizations`
-* **Headers:**
-  ```http
-  Content-Type: application/json
-  x-api-key: {{apiKey}}
-  ```
-* **Body (raw JSON):**
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/organizations`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-api-key` | `{{apiKey}}` |
+* **Body (`raw` -> `JSON`):**
   ```json
   {
     "maxStorageBytes": 999999999999,
     "maxApiKeys": 50
   }
   ```
-* **Respuesta Esperada (`403 Forbidden`):**
-  ```json
-  {
-    "error": "Forbidden",
-    "code": "FORBIDDEN_QUOTA_MODIFICATION",
-    "message": "Las llaves de organización solo pueden modificar webhookUrl y webhookSecret. La modificación de cuotas requiere x-admin-secret."
-  }
-  ```
+* **Respuesta Esperada (`403 Forbidden`):** `"code": "FORBIDDEN_QUOTA_MODIFICATION"`.
 
-#### Método 0.0D: [Seguridad SSRF] Bloqueo de Webhook hacia IP Interna/Loopback (`PATCH /api/organizations`)
+---
+
+#### 0.0D [Seguridad SSRF] Bloqueo de Webhook hacia IP Interna/Loopback (`PATCH /api/organizations`)
 * **Método:** `PATCH`
-* **URL:** `{{baseUrl}}/api/organizations`
-* **Headers:**
-  ```http
-  Content-Type: application/json
-  x-api-key: {{apiKey}}
-  ```
-* **Body (raw JSON):**
-  *(Puedes probar cualquiera de los vectores bloqueados: `https://[::1]/`, `https://[::ffff:127.0.0.1]/`, `https://[::ffff:7f00:1]/`, `https://[fd00::1]/`, `https://127.1/`, `https://0x7f.1/`, `https://2130706433/`, `https://0177.0.0.1/` o `https://localtest.me/`)*:
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/organizations`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-api-key` | `{{apiKey}}` |
+* **Body (`raw` -> `JSON`):**
   ```json
   {
     "webhookUrl": "https://[::ffff:127.0.0.1]/internal"
   }
   ```
-* **Respuesta Esperada (`400 Bad Request`):**
-  ```json
-  {
-    "error": "Bad Request",
-    "code": "INVALID_WEBHOOK_URL",
-    "message": "SSRF bloqueado: la IP literal '::ffff:7f00:1' pertenece a un rango privado, loopback o reservado."
-  }
-  ```
+* **Respuesta Esperada (`400 Bad Request`):** `"code": "INVALID_WEBHOOK_URL"`.
 
-#### Método 0.0E: Modificar Cuotas o Restaurar Webhook como Admin (`PATCH /api/organizations` con `x-admin-secret`)
+---
+
+#### 0.0E Modificar Cuotas o Restaurar Webhook como Admin (`PATCH /api/organizations` con `x-admin-secret`)
 * **Método:** `PATCH`
-* **URL:** `{{baseUrl}}/api/organizations`
-* **Headers:**
-  ```http
-  Content-Type: application/json
-  x-admin-secret: {{adminSecret}}
-  ```
-* **Body (raw JSON):**
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/organizations`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-admin-secret` | `{{adminSecret}}` *(Tu `ADMIN_API_SECRET`)* |
+* **Body (`raw` -> `JSON`):**
   ```json
   {
     "id": "11111111-1111-1111-1111-111111111111",
@@ -189,21 +190,21 @@ Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cl
     "webhookUrl": null
   }
   ```
-* **Respuesta Esperada (`200 OK`):** Actualiza las cuotas y limpia `webhook_url` a `null`.
+* **Respuesta Esperada (`200 OK`):** Actualiza cuotas y restaura `webhook_url` a `null`.
 
 ---
 
 ### SECCIÓN 0.1 - 0.3: Gestión de API Keys con Doble Autenticación (`/api/keys`)
 
-#### Método 0.1A: Crear API Key Maestra de Organización (`POST /api/keys` con `x-admin-secret`)
+#### 0.1A Crear API Key Maestra de Organización (`POST /api/keys` con `x-admin-secret`)
 * **Método:** `POST`
-* **URL:** `{{baseUrl}}/api/keys`
-* **Headers:**
-  ```http
-  Content-Type: application/json
-  x-admin-secret: {{adminSecret}}
-  ```
-* **Body (raw JSON):**
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-admin-secret` | `{{adminSecret}}` |
+* **Body (`raw` -> `JSON`):**
   ```json
   {
     "orgId": "11111111-1111-1111-1111-111111111111",
@@ -215,17 +216,19 @@ Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cl
     "canManageKeys": true
   }
   ```
-* **Respuesta Esperada (`201 Created`):** Guarda automáticamente `apiKey` y `keyId` en las variables de la colección Postman.
+* **Respuesta Esperada (`201 Created`):** Devuelve `apiKey` (`sk_live_...`) y `keyMetadata.id`.
 
-#### Método 0.1B: Delegación — Crear API Key Secundaria (`POST /api/keys` con `x-api-key` maestra)
+---
+
+#### 0.1B Delegación: Crear API Key Secundaria (`POST /api/keys` con `x-api-key`)
 * **Método:** `POST`
-* **URL:** `{{baseUrl}}/api/keys`
-* **Headers:**
-  ```http
-  Content-Type: application/json
-  x-api-key: {{apiKey}}
-  ```
-* **Body (raw JSON):**
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-api-key` | `{{apiKey}}` *(Llave maestra con `can_manage_keys=true`)* |
+* **Body (`raw` -> `JSON`):**
   ```json
   {
     "name": "Llave Secundaria de Subida",
@@ -234,17 +237,19 @@ Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cl
     "canDelete": false
   }
   ```
-* **Respuesta Esperada (`201 Created`):** Crea la llave subordinada con `can_manage_keys: false` y guarda `secondaryApiKey` y `secondaryKeyId`. Si la organización ya tiene 3 llaves activas (`max_api_keys = 3`), el trigger atómico en PostgreSQL la rechaza con **`409 Conflict` (`MAX_API_KEYS_LIMIT_REACHED`)**.
+* **Respuesta Esperada (`201 Created` o `409 Conflict` si ya hay 3 llaves activas):** Crea la llave subordinada con `can_manage_keys: false`.
 
-#### Método 0.1C: [Seguridad] Intento de Escalada de Privilegios (`POST /api/keys`)
+---
+
+#### 0.1C [Seguridad] Intento de Escalada de Privilegios (`POST /api/keys`)
 * **Método:** `POST`
-* **URL:** `{{baseUrl}}/api/keys`
-* **Headers:**
-  ```http
-  Content-Type: application/json
-  x-api-key: {{secondaryApiKey}}
-  ```
-* **Body (raw JSON):**
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-api-key` | `{{secondaryApiKey}}` *(Llave secundaria sin permiso `can_delete` ni `can_manage_keys`)* |
+* **Body (`raw` -> `JSON`):**
   ```json
   {
     "name": "Intento Escalada",
@@ -253,49 +258,94 @@ Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cl
     "canDelete": true
   }
   ```
-* **Respuesta Esperada (`403 Forbidden`):** Código `CANNOT_MANAGE_KEYS` (si llama una llave con `can_manage_keys=false`) o `PRIVILEGE_ESCALATION_BLOCKED` (si una llave maestra intenta otorgar un permiso que ella no tiene).
+* **Respuesta Esperada (`403 Forbidden`):** `"code": "CANNOT_MANAGE_KEYS"` o `"PRIVILEGE_ESCALATION_BLOCKED"`.
 
-#### Método 0.1D: Promover Llave Existente a Maestra (`PATCH /api/keys` con `x-admin-secret`)
+---
+
+#### 0.1D Promover Llave Existente a Maestra (`PATCH /api/keys`)
 * **Método:** `PATCH`
-* **URL:** `{{baseUrl}}/api/keys`
-* **Headers:**
-  ```http
-  Content-Type: application/json
-  x-admin-secret: {{adminSecret}}
-  ```
-* **Body (raw JSON):**
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-admin-secret` | `{{adminSecret}}` |
+* **Body (`raw` -> `JSON`):**
   ```json
   {
     "id": "{{keyId}}",
     "canManageKeys": true
   }
   ```
-* **Respuesta Esperada (`200 OK`):** Actualiza `can_manage_keys: true` sin ser bloqueado por el trigger de cupo aunque la organización esté al límite de llaves activas.
-
-#### Métodos 0.2A y 0.2B: Listar API Keys (`GET /api/keys`)
-* **Con `x-admin-secret`:** `GET {{baseUrl}}/api/keys?org_id={{orgId}}`
-* **Con `x-api-key` maestra:** `GET {{baseUrl}}/api/keys`
-* **Respuesta Esperada (`200 OK`):** Lista metadatos de las llaves sin exponer jamás la llave en claro ni el hash completo.
-
-#### Métodos 0.3A, 0.3B y 0.3C: Revocar o Eliminar API Keys (`DELETE /api/keys`)
-* **0.3A (Auto-eliminación bloqueada):** `DELETE {{baseUrl}}/api/keys?id={{keyId}}&mode=revoke` con `x-api-key: {{apiKey}}` -> **`403 CANNOT_DELETE_SELF`**.
-* **0.3B (Aislamiento entre organizaciones):** `DELETE {{baseUrl}}/api/keys?id={{otherOrgKeyId}}&mode=revoke` con `x-api-key: {{apiKey}}` -> **`404 API_KEY_NOT_FOUND`** (impide revocar llaves de otra organización).
-* **0.3C (Revocación legítima de llave secundaria):** `DELETE {{baseUrl}}/api/keys?id={{secondaryKeyId}}&mode=revoke` con `x-api-key: {{apiKey}}` -> **`200 OK`**.
+* **Respuesta Esperada (`200 OK`):** Actualiza `can_manage_keys: true`.
 
 ---
 
-### SECCIÓN 1 - 3: Subida Simple Directa a S3, Checksum SHA-256, Magic Bytes y Entrega (`/api/upload`, `/api/files`)
+#### 0.2A Listar API Keys como Administrador (`GET /api/keys`)
+* **Método:** `GET`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys?org_id=11111111-1111-1111-1111-111111111111`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-admin-secret` | `{{adminSecret}}` |
 
-#### Método 1 (y 1.0B): Solicitar Ticket de Subida (`POST /api/upload`)
+---
+
+#### 0.2B Listar API Keys como Organización (`GET /api/keys`)
+* **Método:** `GET`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-api-key` | `{{apiKey}}` *(Llave maestra con `can_manage_keys=true`)* |
+
+---
+
+#### 0.3A [Seguridad] Auto-eliminación Bloqueada (`DELETE /api/keys`)
+* **Método:** `DELETE`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys?id={{keyId}}&mode=revoke`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-api-key` | `{{apiKey}}` |
+* **Respuesta Esperada (`403 Forbidden`):** `"code": "CANNOT_DELETE_SELF"`.
+
+---
+
+#### 0.3B [Seguridad] Revocar Llave de Otra Organización Bloqueado (`DELETE /api/keys`)
+* **Método:** `DELETE`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys?id=00000000-0000-4000-8000-000000000099&mode=revoke`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-api-key` | `{{apiKey}}` |
+* **Respuesta Esperada (`404 Not Found`):** `"code": "API_KEY_NOT_FOUND"`.
+
+---
+
+#### 0.3C Revocar o Eliminar Llave Secundaria (`DELETE /api/keys`)
+* **Método:** `DELETE`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys?id={{secondaryKeyId}}&mode=revoke`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-api-key` | `{{apiKey}}` |
+* **Respuesta Esperada (`200 OK`):** Llave secundaria revocada.
+
+---
+
+### SECCIÓN 1 - 3: Subida Simple Directa a S3, Checksum SHA-256, Magic Bytes y Entrega
+
+#### 1 (y 1.0B) Solicitar Ticket de Subida (`POST /api/upload`)
 * **Método:** `POST`
-* **URL:** `{{baseUrl}}/api/upload`
-* **Headers:**
-  ```http
-  Content-Type: application/json
-  x-api-key: {{apiKey}}
-  x-user-id: {{userId}}
-  ```
-* **Body (raw JSON — Subida Simple o con Checksum SHA-256):**
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/upload`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value | Descripción |
+  | :--- | :--- | :--- |
+  | `Content-Type` | `application/json` | Formato JSON del body |
+  | `x-api-key` | `{{apiKey}}` | API Key activa de la organización con `can_upload=true` |
+  | `x-user-id` | `a1111111-0000-0000-0000-000000000001` | UUID del usuario dueño del archivo (obligatorio en llaves de organización) |
+* **Body (`raw` -> `JSON`):**
   ```json
   {
     "fileName": "prueba.png",
@@ -306,152 +356,289 @@ Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cl
     "sha256Hash": "r8b2eb9f79a5cf26d2a4943e8a0cd6ed4c65fb949956c3b6f6a5646f0e49e13d"
   }
   ```
-  *(Nota: `sha256Hash` es opcional y acepta SHA-256 en Hex de 64 caracteres o Base64 de 44 caracteres. Si se envía, la URL prefirmada de S3 firmará `x-amz-checksum-sha256` en `X-Amz-SignedHeaders`).*
-* **Respuestas de Control de Cuotas (cuando se exceden límites):**
-  * Si supera `max_storage_bytes`: **`413 Payload Too Large` (`STORAGE_QUOTA_EXCEEDED`)**.
-  * Si supera `max_pending_tickets` (después de ejecutar la limpieza oportunista de tickets vencidos): **`429 Too Many Requests` (`PENDING_TICKETS_QUOTA_EXCEEDED`)**.
-* **Respuesta Esperada (`200 OK`):** Guarda automáticamente `ticketId`, `fileId`, `confirmToken` y `uploadUrl` en las variables de la colección.
+  *(Nota: `sha256Hash` es opcional. Si lo envías, la respuesta incluirá `x-amz-checksum-sha256` dentro de `requiredHeaders`).*
+* **Respuesta Esperada (`200 OK`):** Devuelve `ticketId`, `fileId`, `uploadUrl`, `requiredHeaders` y `confirmToken`.
 
-#### Método 2: Subida Directa Binaria a AWS S3 (`PUT {{uploadUrl}}`)
-* **Método:** `PUT`
-* **URL:** `{{uploadUrl}}`
-* **Headers:** Copia exactamente las cabeceras devueltas en `requiredHeaders` del Paso 1:
-  ```http
-  Content-Type: image/png
-  Cache-Control: private, no-store, no-cache, max-age=0, must-revalidate
-  ```
-  *(Si usaste el Paso 1.0B con `sha256Hash`, incluye también `x-amz-checksum-sha256: <valor_base64_devuelto_en_requiredHeaders>`).*
-* **Verificación de Integridad en S3:**
-  * Si envías un `x-amz-checksum-sha256` distinto al firmado, **AWS S3 rechaza la subida con `403 Forbidden` (`SignatureDoesNotMatch` / `BadDigest`)**.
-  * Si el checksum y las cabeceras coinciden, **AWS S3 responde `200 OK`**.
+---
 
-#### Método 3: Confirmar Subida en el Backend (`PUT /api/upload`)
+#### 1.1 [Seguridad] Rechazo por Usuario de Otra Organización (`POST /api/upload`)
+* **Método:** `POST`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/upload`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-api-key` | `{{apiKey}}` *(Org 1)* |
+  | `x-user-id` | `b2222222-0000-0000-0000-000000000001` *(Usuario de Org 2)* |
+* **Respuesta Esperada (`403 Forbidden`):** `"code": "FORBIDDEN_USER_ORG_MISMATCH"`.
+
+---
+
+#### 1.2 [Seguridad] Rechazo por Omitir `x-user-id` (`POST /api/upload`)
+* **Método:** `POST`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/upload`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-api-key` | `{{apiKey}}` *(Sin cabecera `x-user-id`)* |
+* **Respuesta Esperada (`400 Bad Request`):** `"code": "MISSING_END_USER_ID"`.
+
+---
+
+#### 2 Subida Directa Binaria a AWS S3 (`PUT {{uploadUrl}}`)
 * **Método:** `PUT`
-* **URL:** `{{baseUrl}}/api/upload`
-* **Headers:**
-  ```http
-  Content-Type: application/json
-  x-api-key: {{apiKey}}
-  x-user-id: {{userId}}
-  ```
-* **Body (raw JSON):**
+* **URL:** `{{uploadUrl}}` *(La URL larga de S3 devuelta en el Paso 1)*
+* **Cabeceras (Headers en Postman) — Deben coincidir EXACTAMENTE con `requiredHeaders` del Paso 1:**
+  * **Si el archivo es `private`:**
+    | Key | Value |
+    | :--- | :--- |
+    | `Content-Type` | `image/png` *(o el `fileType` solicitado)* |
+    | `Cache-Control` | `private, no-store, no-cache, max-age=0, must-revalidate` |
+    | `x-amz-checksum-sha256` | *(Solo si enviaste `sha256Hash` en el Paso 1.0B: poner el valor Base64 devuelto en `requiredHeaders["x-amz-checksum-sha256"]`)* |
+  * **Si el archivo es `public`:**
+    | Key | Value |
+    | :--- | :--- |
+    | `Content-Type` | `image/png` |
+    | `Cache-Control` | `public, max-age=31536000, immutable` |
+  > ⚠️ **IMPORTANTE EN S3:** No envíes `x-api-key` ni `x-user-id` en esta petición porque va directo a Amazon S3.
+* **Body en Postman:** Selecciona `binary` y elige tu archivo `.png` o `.jpg`.
+* **Respuesta Esperada (`200 OK`):** Cuerpo vacío devuelto por S3 (o `403 SignatureDoesNotMatch` si enviaste un checksum incorrecto).
+
+---
+
+#### 3 Confirmar Subida y Verificar Magic Bytes + Webhook (`PUT /api/upload`)
+* **Método:** `PUT`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/upload`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-api-key` | `{{apiKey}}` |
+  | `x-user-id` | `a1111111-0000-0000-0000-000000000001` |
+* **Body (`raw` -> `JSON`):**
   ```json
   {
     "ticketId": "{{ticketId}}",
     "confirmToken": "{{confirmToken}}"
   }
   ```
-* **Respuesta Esperada (`200 OK`):**
-  ```json
-  {
-    "status": "success",
-    "fileId": "...",
-    "fileStatus": "uploaded",
-    "scanStatus": "not_scanned",
-    "visibility": "private",
-    "sha256Verified": true,
-    "cloudfrontUrl": null,
-    "verification": {
-      "magicBytesVerified": true,
-      "detectedMimeType": "image/png",
-      "sha256Verified": true
-    },
-    "webhook": {
-      "delivered": true,
-      "attempts": 1,
-      "lastStatusCode": 200,
-      "deliveryId": "..."
-    }
-  }
-  ```
-* **Respuesta de Rechazo por Seguridad de Magic Bytes (`422 Unprocessable Entity`):**
-  Si el archivo subido a S3 no tiene la firma binaria real del MIME declarado (por ejemplo, texto plano subido como `image/png`), el backend lee los primeros 32 bytes mediante `Range: bytes=0-31`, elimina el objeto de S3, marca el registro como `failed` y responde:
-  ```json
-  {
-    "error": "Unprocessable Entity",
-    "code": "MAGIC_BYTES_MISMATCH",
-    "method": "PUT",
-    "message": "Cabecera binaria inválida: detectado 'desconocido' no coincide con el tipo MIME declarado 'image/png'.",
-    "detectedMime": "desconocido",
-    "declaredMime": "image/png"
-  }
-  ```
-
-#### Método 3.1: Listar Archivos de la Organización (`GET /api/files`)
-* **Método:** `GET`
-* **URL:** `{{baseUrl}}/api/files?limit=20&offset=0`
-* **Headers:** `x-api-key: {{apiKey}}`, `x-user-id: {{userId}}`
-* **Respuesta Esperada (`200 OK`):** Lista los archivos con `fileStatus: "uploaded"` y `sha256_verified`. Los archivos privados tienen siempre `cloudfront_url: null`.
-
-#### Métodos 3.2 y 3.2B: Obtener URL de Entrega Privada vs Pública (`GET /api/files/{{fileId}}`)
-* **3.2 Como Propietario (`x-user-id: {{userId}}`):**
-  * **Si el archivo es `private`:** Devuelve `200 OK` con `delivery: "s3_presigned"`, `cloudfrontUrl: null`, `expiresInSeconds: 300` y una URL prefirmada directa de S3 (`practicas-alan-418272802078.s3.us-east-1.amazonaws.com/static/private/...`).
-  * **Si el archivo es `public`:** Devuelve `200 OK` con `delivery: "cloudfront"` y `cloudfrontUrl: "https://d1nuawu3owad6c.cloudfront.net/static/files/..."`.
-* **3.2B Como Otro Usuario (`x-user-id: {{otherSameOrgUserId}}`) sobre un archivo `private`:**
-  * Devuelve **`403 Forbidden`** con `"code": "FORBIDDEN_PRIVATE_NOT_OWNER"`.
-
-#### Métodos 3.4, 3.5 y 3.6: Estado, Re-despacho de Webhook y Eliminación (`/api/files/{{fileId}}`)
-* **3.4 Consultar Estado (`GET /api/files/{{fileId}}/status`):** Devuelve `fileStatus: "uploaded"`, `scanStatus: "not_scanned"`, `sha256Verified`.
-* **3.5 Re-despachar Webhook (`POST /api/files/{{fileId}}/status`):** Re-envía el evento `file.uploaded` al `webhook_url` configurado en la organización.
-* **3.6 Eliminar Archivo (`DELETE /api/files/{{fileId}}`):** Borra el objeto en S3 (deduplicando `s3_pending_key` y `s3_processed_key`) y elimina la fila en base de datos (`200 OK`).
+* **Respuesta Esperada (`200 OK`):** Devuelve `fileStatus: "uploaded"`, `sha256Verified: true` y el resultado de `webhook`. Si el archivo subido en el Paso 2 tenía bytes falsos (ej. texto plano en vez de PNG), devuelve **`422 Unprocessable Entity` (`MAGIC_BYTES_MISMATCH`)**.
 
 ---
 
-### SECCIÓN 4: Subida Multipart para Archivos Grandes (`/api/upload/multipart`)
+#### 3.1 Listar Archivos de la Organización (`GET /api/files`)
+* **Método:** `GET`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/files?limit=20&offset=0`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-api-key` | `{{apiKey}}` |
+  | `x-user-id` | `a1111111-0000-0000-0000-000000000001` |
 
-> **Nota de AWS S3:** En subidas multipart de más de 1 parte, AWS S3 exige que cada parte (excepto la última) tenga un tamaño mínimo de **5 MB (`5,242,880` bytes)**. Además, la **Parte 1** debe iniciar con los magic bytes reales del formato declarado (ej. cabecera PNG `89 50 4E 47 0D 0A 1A 0A`).
+---
 
-1. **Método 4.1 — Iniciar Subida Multipart (`POST /api/upload/multipart`):**
-   * **Body:**
-     ```json
-     {
-       "action": "create",
-       "fileName": "archivo-grande.png",
-       "fileType": "image/png",
-       "fileSize": 10485760,
-       "visibility": "private"
-     }
-     ```
-   * **Resultado (`200 OK`):** Guarda automáticamente `multipartTicketId`, `multipartFileId`, `multipartUploadId` y `multipartConfirmToken`.
-2. **Métodos 4.2 y 4.3 — Obtener URLs Prefirmadas por Parte (`POST /api/upload/multipart`):**
-   * **Body:** `{ "action": "presign_part", "ticketId": "{{multipartTicketId}}", "partNumber": 1 }` (y luego `partNumber: 2`).
-   * **Resultado (`200 OK`):** Guarda `part1UploadUrl` y `part2UploadUrl`.
-3. **Métodos 4.4 y 4.5 — Subir Binario de Parte 1 y Parte 2 a S3 (`PUT {{part1UploadUrl}}` y `PUT {{part2UploadUrl}}`):**
-   * Adjunta el binario de 5 MB en `Body -> binary` y envía el `PUT` directo a S3.
-   * El script de test de Postman captura automáticamente la cabecera `ETag` devuelta por S3 en `part1ETag` y `part2ETag`.
-4. **Método 4.6 — Listar Partes Subidas en S3 (`GET /api/upload/multipart?ticketId={{multipartTicketId}}`):**
-   * Consulta en tiempo real a S3 (`ListPartsCommand`) las partes recibidas y sus `ETag`.
-5. **Método 4.7 — Completar Subida Multipart (`PUT /api/upload/multipart`):**
-   * **Body:**
-     ```json
-     {
-       "ticketId": "{{multipartTicketId}}",
-       "confirmToken": "{{multipartConfirmToken}}",
-       "parts": [
-         { "PartNumber": 1, "ETag": "{{part1ETag}}" },
-         { "PartNumber": 2, "ETag": "{{part2ETag}}" }
-       ]
-     }
-     ```
-   * **Resultado (`200 OK`):** S3 ensambla el objeto de 10 MB, el backend verifica los primeros 32 bytes mediante `Range GET` (`magicBytesVerified: true`), actualiza `fileStatus: "uploaded"` y despacha el webhook.
-6. **Método 4.8 — Abortar Subida Multipart (`DELETE /api/upload/multipart?ticketId={{multipartTicketId}}`):**
-   * Cancela una subida multipart en curso (`AbortMultipartUploadCommand`) y elimina el ticket pendiente.
+#### 3.2 Obtener URL de Entrega como Propietario (`GET /api/files/:id`)
+* **Método:** `GET`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/files/{{fileId}}`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-api-key` | `{{apiKey}}` |
+  | `x-user-id` | `a1111111-0000-0000-0000-000000000001` *(Propietario del archivo)* |
+* **Respuesta Esperada (`200 OK`):**
+  * Si es `private`: `delivery: "s3_presigned"`, `cloudfrontUrl: null`, `expiresInSeconds: 300`.
+  * Si es `public`: `delivery: "cloudfront"`, `cloudfrontUrl: "https://d1nuawu3owad6c.cloudfront.net/static/files/..."`.
+
+---
+
+#### 3.2B [Seguridad] Acceso Denegado a Archivo Privado por Otro Usuario (`GET /api/files/:id`)
+* **Método:** `GET`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/files/{{fileId}}`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-api-key` | `{{apiKey}}` |
+  | `x-user-id` | `a1111111-0000-0000-0000-000000000002` *(Otro usuario que NO es el dueño)* |
+* **Respuesta Esperada (`403 Forbidden`):** `"code": "FORBIDDEN_PRIVATE_NOT_OWNER"`.
+
+---
+
+#### 3.3 Descargar Archivo Directo de S3 / CloudFront (`GET {{downloadUrl}}`)
+* **Método:** `GET`
+* **URL:** `{{downloadUrl}}`
+* **Cabeceras (Headers en Postman):**
+  *(Ninguna cabecera requerida — descarga directa de S3 o CloudFront).*
+
+---
+
+#### 3.4 Consultar Estado Transaccional del Archivo (`GET /api/files/:id/status`)
+* **Método:** `GET`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/files/{{fileId}}/status`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-api-key` | `{{apiKey}}` |
+  | `x-user-id` | `a1111111-0000-0000-0000-000000000001` |
+
+---
+
+#### 3.5 Re-despachar Webhook Manualmente (`POST /api/files/:id/status`)
+* **Método:** `POST`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/files/{{fileId}}/status`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-api-key` | `{{apiKey}}` |
+  | `x-user-id` | `a1111111-0000-0000-0000-000000000001` |
+* **Body (`raw` -> `JSON`):** `{}`
+
+---
+
+#### 3.6 Eliminar Archivo de S3 y Base de Datos (`DELETE /api/files/:id`)
+* **Método:** `DELETE`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/files/{{fileId}}`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-api-key` | `{{apiKey}}` |
+  | `x-user-id` | `a1111111-0000-0000-0000-000000000001` |
+
+---
+
+### SECCIÓN 4: Subida Multipart Completa (`/api/upload/multipart`)
+
+#### 4.1 Iniciar Subida Multipart (`POST /api/upload/multipart`)
+* **Método:** `POST`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/upload/multipart`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-api-key` | `{{apiKey}}` |
+  | `x-user-id` | `a1111111-0000-0000-0000-000000000001` |
+* **Body (`raw` -> `JSON`):**
+  ```json
+  {
+    "action": "create",
+    "fileName": "archivo-grande.png",
+    "fileType": "image/png",
+    "fileSize": 10485760,
+    "visibility": "private"
+  }
+  ```
+
+---
+
+#### 4.2 y 4.3 Firmar URL para Parte 1 y Parte 2 (`POST /api/upload/multipart`)
+* **Método:** `POST`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/upload/multipart`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-api-key` | `{{apiKey}}` |
+  | `x-user-id` | `a1111111-0000-0000-0000-000000000001` |
+* **Body (`raw` -> `JSON`):**
+  ```json
+  {
+    "action": "presign_part",
+    "ticketId": "{{multipartTicketId}}",
+    "partNumber": 1
+  }
+  ```
+  *(En el paso 4.3 cambia `"partNumber": 2`).*
+
+---
+
+#### 4.4 y 4.5 Subir Binario de Parte 1 y Parte 2 a S3 (`PUT {{part1UploadUrl}}` y `PUT {{part2UploadUrl}}`)
+* **Método:** `PUT`
+* **URL:** `{{part1UploadUrl}}` (y luego `{{part2UploadUrl}}`)
+* **Cabeceras (Headers en Postman):**
+  *(Ninguna cabecera manual — No envíes `x-api-key` ni `x-user-id` a S3).*
+* **Body en Postman:** Selecciona `binary` y adjunta el archivo de cada parte (mín. 5 MB en la Parte 1). El script de Postman guarda automáticamente la cabecera `ETag` de respuesta de S3 en `{{part1ETag}}` y `{{part2ETag}}`.
+
+---
+
+#### 4.6 Consultar Partes Subidas en S3 (`GET /api/upload/multipart`)
+* **Método:** `GET`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/upload/multipart?ticketId={{multipartTicketId}}`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-api-key` | `{{apiKey}}` |
+  | `x-user-id` | `a1111111-0000-0000-0000-000000000001` |
+
+---
+
+#### 4.7 Completar Subida Multipart (`PUT /api/upload/multipart`)
+* **Método:** `PUT`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/upload/multipart`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Content-Type` | `application/json` |
+  | `x-api-key` | `{{apiKey}}` |
+  | `x-user-id` | `a1111111-0000-0000-0000-000000000001` |
+* **Body (`raw` -> `JSON`):**
+  ```json
+  {
+    "ticketId": "{{multipartTicketId}}",
+    "confirmToken": "{{multipartConfirmToken}}",
+    "parts": [
+      { "PartNumber": 1, "ETag": "{{part1ETag}}" },
+      { "PartNumber": 2, "ETag": "{{part2ETag}}" }
+    ]
+  }
+  ```
+
+---
+
+#### 4.8 Abortar Subida Multipart en Curso (`DELETE /api/upload/multipart`)
+* **Método:** `DELETE`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/upload/multipart?ticketId={{multipartTicketId}}`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-api-key` | `{{apiKey}}` |
+  | `x-user-id` | `a1111111-0000-0000-0000-000000000001` |
 
 ---
 
 ### SECCIÓN 5 - 9: Receptor de Webhooks, Auditoría y Cron de Mantenimiento
 
-* **Método 5 (`GET /api/webhooks/test-receiver` con `x-admin-secret`):** Devuelve los últimos webhooks recibidos en el endpoint de pruebas junto con `"signatureValid": true` y el payload verificado.
-* **Método 6 (`GET /api/logs` con `x-admin-secret`):** Consulta la bitácora `service_logs`.
-* **Método 7 (`GET /api/records` con `x-admin-secret`):** Consulta registros administrativos de `public.files`.
-* **Método 8 (`GET /api/users` con `x-admin-secret`):** Lista organizaciones y usuarios registrados.
-* **Método 9 (`GET /api/cron/maintenance` con `Authorization: Bearer {{cronSecret}}`):** Ejecuta las 5 tareas de limpieza (tickets expirados, multiparts abandonados, reintentos de webhooks pendientes, limpieza de `rate_limit_buckets` > 1 día y anonimización de IPs en logs > 30 días).
+#### 5 Inspeccionar Webhooks Recibidos (`GET /api/webhooks/test-receiver`)
+* **Método:** `GET`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/webhooks/test-receiver`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-admin-secret` | `{{adminSecret}}` |
 
 ---
 
-## ✅ 5. RESUMEN DE VERIFICACIÓN EN PRODUCCIÓN (FASE 2 COMPLETADA)
+#### 6, 7 y 8 Consultas Administrativas (`GET /api/logs`, `GET /api/records`, `GET /api/users`)
+* **Método:** `GET`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/logs` *(o `/api/records`, `/api/users`)*
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `x-admin-secret` | `{{adminSecret}}` |
 
-Todas las pruebas de la Fase 2 fueron ejecutadas y verificadas contra el despliegue en producción (`https://cloudinary-aws-backend.vercel.app`) usando la Organización 1 de prueba y restaurando todos los límites y registros al finalizar:
+---
+
+#### 9 Ejecutar Cron de Mantenimiento (`GET /api/cron/maintenance`)
+* **Método:** `GET`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/cron/maintenance`
+* **Cabeceras (Headers en Postman):**
+  | Key | Value |
+  | :--- | :--- |
+  | `Authorization` | `Bearer {{cronSecret}}` |
+
+---
+
+## ✅ 4. RESUMEN DE VERIFICACIÓN EN PRODUCCIÓN (FASE 2 COMPLETADA)
 
 | # | Prueba Verificada en Producción | Endpoint / Acción | Código HTTP Obtenido | Resultado y Evidencia |
 | :-: | :--- | :--- | :-: | :--- |
