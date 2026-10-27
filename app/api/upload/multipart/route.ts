@@ -790,13 +790,13 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
 
     return NextResponse.json(
       {
-        error: 'Bad Request',
-        code: 'INVALID_MAGIC_BYTES',
+        error: 'Unprocessable Entity',
+        code: 'MAGIC_BYTES_MISMATCH',
         message: magicMismatch,
         detectedMime: detectedMagicMime,
         declaredMime,
       },
-      { status: 400, headers: corsHeaders }
+      { status: 422, headers: corsHeaders }
     );
   }
 

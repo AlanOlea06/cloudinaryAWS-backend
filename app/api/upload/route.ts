@@ -925,14 +925,14 @@ export async function PUT(req: NextRequest) {
 
     return NextResponse.json(
       {
-        error: 'Bad Request',
-        code: 'INVALID_MAGIC_BYTES',
+        error: 'Unprocessable Entity',
+        code: 'MAGIC_BYTES_MISMATCH',
         method: req.method,
         message: magicMismatchReason,
         detectedMime: detectedMagicMime,
         declaredMime,
       },
-      { status: 400, headers: corsHeaders }
+      { status: 422, headers: corsHeaders }
     );
   }
 
