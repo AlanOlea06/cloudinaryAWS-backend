@@ -18,6 +18,7 @@ import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/tick
 import { getBaseCloudFrontUrl } from '@/lib/cloudfront';
 import { detectMagicBytesMime } from '@/lib/magic-bytes';
 import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
+import { dispatchFileWebhook } from '@/lib/lambda-fallback/webhook-dispatcher';
 import { checkOrganizationQuotas } from '@/lib/quotas';
 
 const corsHeaders = {
@@ -573,8 +574,6 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
   const ticketId = body.ticketId || searchParams.get('ticketId');
   const fileId = body.fileId || searchParams.get('fileId');
   const confirmToken = body.confirmToken || searchParams.get('token');
-  const webhookUrl = body.webhookUrl || undefined;
-  const webhookSecret = body.webhookSecret || undefined;
   const validatedOrgId = req.headers.get('x-validated-org-id');
   const validatedUserId = req.headers.get('x-validated-user-id');
   const ipAddress = req.headers.get('x-forwarded-for') || '127.0.0.1';
@@ -772,8 +771,6 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
   if (ENABLE_SERVER_PROCESSING_FALLBACK) {
     const processResult = await processUpload(fileRow.id, {
       triggerSource: 'multipart_complete',
-      webhookUrl,
-      webhookSecret,
       ipAddress,
     });
 
@@ -852,6 +849,26 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
     message: `Multipart upload completado: status='uploaded', scan_status='not_scanned', parts=${partsToComplete.length}, size=${actualSize}, magicBytesVerified=true, sha256_verified=${isChecksumVerified}.`,
   });
 
+  const webhookResult = await dispatchFileWebhook({
+    payload: {
+      event: 'file.uploaded',
+      timestamp: new Date().toISOString(),
+      fileId: fileRow.id,
+      ticketId: fileRow.ticket_id,
+      orgId: fileRow.org_id || null,
+      userId: fileRow.user_id || null,
+      status: 'uploaded',
+      scanStatus: 'not_scanned',
+      visibility: fileRow.visibility,
+      mimeType: fileRow.mime_type || declaredMime,
+      sizeBytes: actualSize,
+      sha256Hash: fileRow.sha256_hash || null,
+      cloudfrontUrl: publicCfUrl,
+      errorMessage: null,
+    },
+    ipAddress,
+  });
+
   return NextResponse.json(
     {
       status: 'success',
@@ -868,6 +885,7 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
         magicBytesVerified: true,
         detectedMimeType: detectedMagicMime,
       },
+      webhook: webhookResult,
     },
     { status: 200, headers: corsHeaders }
   );

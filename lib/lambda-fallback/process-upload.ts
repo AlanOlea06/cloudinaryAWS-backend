@@ -44,8 +44,6 @@ export const ENABLE_SERVER_PROCESSING_FALLBACK =
   process.env.ENABLE_SERVER_PROCESSING_FALLBACK === 'true';
 
 export interface ProcessUploadOptions {
-  webhookUrl?: string | null;
-  webhookSecret?: string | null;
   ipAddress?: string;
   triggerSource?: 'put_confirm' | 'cron_retry' | 'manual_status_endpoint' | 'multipart_complete';
 }
@@ -303,8 +301,6 @@ export async function processUpload(
         cloudfrontUrl: publicCfUrl,
         errorMessage: null,
       },
-      overrideWebhookUrl: options.webhookUrl,
-      overrideWebhookSecret: options.webhookSecret,
       ipAddress,
     });
 
@@ -381,8 +377,6 @@ export async function processUpload(
         cloudfrontUrl: null,
         errorMessage,
       },
-      overrideWebhookUrl: options.webhookUrl,
-      overrideWebhookSecret: options.webhookSecret,
       ipAddress,
     });
 

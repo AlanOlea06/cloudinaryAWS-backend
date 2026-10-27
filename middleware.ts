@@ -141,6 +141,25 @@ function jsonError(
   return res;
 }
 
+const SUPABASE_TIMEOUT_MS = 3500;
+
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number = SUPABASE_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 /**
  * Strips any spoofable client-supplied internal headers.
  * Condition 1: El middleware debe ELIMINAR siempre cualquier x-validated-* y x-can-manage-keys
@@ -291,7 +310,7 @@ export async function middleware(request: NextRequest) {
         hashedKey
       )}&select=id,org_id,user_id,name,can_read,can_upload,can_delete,can_manage_keys,is_active&limit=1`;
 
-      const dbResponse = await fetch(restUrl, {
+      const dbResponse = await fetchWithTimeout(restUrl, {
         method: 'GET',
         headers: {
           apikey: supabaseServiceRoleKey,
@@ -385,7 +404,7 @@ export async function middleware(request: NextRequest) {
       hashedKey
     )}&select=id,org_id,user_id,name,can_read,can_upload,can_delete,is_active&limit=1`;
 
-    const dbResponse = await fetch(restUrl, {
+    const dbResponse = await fetchWithTimeout(restUrl, {
       method: 'GET',
       headers: {
         apikey: supabaseServiceRoleKey,
@@ -517,7 +536,7 @@ export async function middleware(request: NextRequest) {
         candidateUserId
       )}&select=id,org_id,name,email,role,can_upload&limit=1`;
 
-      const userResp = await fetch(userRestUrl, {
+      const userResp = await fetchWithTimeout(userRestUrl, {
         method: 'GET',
         headers: {
           apikey: supabaseServiceRoleKey,
@@ -583,6 +602,14 @@ export async function middleware(request: NextRequest) {
     Object.entries(rateLimitHeaders).forEach(([k, v]) => response.headers.set(k, v));
     return applySecurityHeaders(response);
   } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      return jsonError(
+        504,
+        'Gateway Timeout',
+        'AUTH_TIMEOUT_ERROR',
+        'El almacén de autenticación tardó más de 3.5 segundos en responder. Intenta nuevamente.'
+      );
+    }
     return jsonError(
       500,
       'Internal Server Error',

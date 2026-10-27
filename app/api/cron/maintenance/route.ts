@@ -17,6 +17,7 @@ import {
   listS3UploadedParts,
 } from '@/lib/s3';
 import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
+import { retryPendingWebhooks } from '@/lib/lambda-fallback/webhook-dispatcher';
 import { verifyCronSecretHeader } from '@/lib/env';
 
 const corsHeaders = {
@@ -50,8 +51,9 @@ async function runMaintenanceCron(req: NextRequest) {
 
   const expiredCutoffMinutes =
     expiredMinutesParam !== null ? Math.max(0, Number(expiredMinutesParam)) : 7;
+  // Default to 75 minutes: 60-minute multipart ticket confirmation window + 15-minute grace margin
   const multipartCutoffMinutes =
-    multipartMinutesParam !== null ? Math.max(0, Number(multipartMinutesParam)) : 30;
+    multipartMinutesParam !== null ? Math.max(0, Number(multipartMinutesParam)) : 75;
 
   const nowMs = Date.now();
   const expiredCutoffIso = new Date(nowMs - expiredCutoffMinutes * 60 * 1000).toISOString();
@@ -65,6 +67,7 @@ async function runMaintenanceCron(req: NextRequest) {
       fileId: string;
       ticketId: string;
       aborted: boolean;
+      skippedDueToActiveUpload?: boolean;
     }>,
     retriedProcessings: [] as Array<{
       fileId: string;
@@ -72,6 +75,7 @@ async function runMaintenanceCron(req: NextRequest) {
       success: boolean;
       newStatus: string;
     }>,
+    retriedWebhooks: null as any,
   };
 
   // ==========================================================================
@@ -150,10 +154,26 @@ async function runMaintenanceCron(req: NextRequest) {
     if (!s3Key || !uploadId) continue;
 
     let partsCount = 0;
+    let hasRecentParts = false;
     try {
       const parts = await listS3UploadedParts(s3Key, uploadId);
       partsCount = parts.length;
+      // If any part was uploaded within the last 15 minutes, the upload is active -> do not abort
+      const fifteenMinutesAgo = Date.now() - 15 * 60 * 1000;
+      hasRecentParts = parts.some(
+        (p) => p.LastModified && new Date(p.LastModified).getTime() > fifteenMinutesAgo
+      );
     } catch {}
+
+    if (hasRecentParts) {
+      summary.abandonedMultipartAborted.push({
+        fileId: row.id,
+        ticketId: row.ticket_id,
+        aborted: false,
+        skippedDueToActiveUpload: true,
+      });
+      continue;
+    }
 
     let abortedSuccessfully = false;
     try {
@@ -254,7 +274,18 @@ async function runMaintenanceCron(req: NextRequest) {
   }
 
   // --------------------------------------------------------------------------
-  // 4. Task B.11: Enforce IP address retention policy in service_logs (default 30 days)
+  // 4. Retry Persistent Pending Webhooks with Real Backoff (Task C)
+  // --------------------------------------------------------------------------
+  try {
+    const webhooksSummary = await retryPendingWebhooks();
+    summary.retriedWebhooks = webhooksSummary;
+  } catch (webhookCronErr: any) {
+    console.warn('[CRON_MAINTENANCE] Error processing pending webhooks:', webhookCronErr?.message);
+    summary.retriedWebhooks = { error: webhookCronErr?.message };
+  }
+
+  // --------------------------------------------------------------------------
+  // 5. Task B.11: Enforce IP address retention policy in service_logs (default 30 days)
   // --------------------------------------------------------------------------
   const ipRetentionDays = Number(searchParams.get('ipRetentionDays') ?? 30);
   const ipRetentionMinutesParam = searchParams.get('ipRetentionMinutes');

@@ -144,8 +144,7 @@ export async function POST(
     }
 
     const body = await req.json().catch(() => ({}));
-    const webhookUrl = body?.webhookUrl || null;
-    const webhookSecret = body?.webhookSecret || null;
+    const triggerWebhook = Boolean(body?.triggerWebhook || body?.action === 'webhook');
     const clientIp = req.headers.get('x-forwarded-for') || '127.0.0.1';
 
     const { data: fileRow } = await supabase
@@ -177,42 +176,39 @@ export async function POST(
       );
     }
 
-    // If already processed and caller provided a webhookUrl, dispatch the HMAC-SHA256 webhook directly
-    if (fileRow.s3_processed_key && webhookUrl) {
+    // Manual webhook dispatch using organization configuration
+    if (triggerWebhook) {
       const visibility =
         String(fileRow.visibility || 'private').toLowerCase() === 'public' ? 'public' : 'private';
       const webhookRes = await dispatchFileWebhook({
         payload: {
-          event: 'file.processed',
+          event: fileRow.status === 'failed' ? 'file.failed' : (fileRow.status === 'uploaded' ? 'file.uploaded' : 'file.processed'),
           timestamp: new Date().toISOString(),
           fileId: fileRow.id,
           ticketId: fileRow.ticket_id || null,
           orgId: fileRow.org_id || null,
           userId: fileRow.user_id || null,
-          status: 'processed',
+          status: fileRow.status === 'failed' ? 'failed' : (fileRow.status === 'uploaded' ? 'uploaded' : 'processed'),
           scanStatus: fileRow.scan_status || 'not_scanned',
           visibility,
           mimeType: fileRow.mime_type,
           sizeBytes: Number(fileRow.size_bytes),
           sha256Hash: fileRow.sha256_hash || null,
           cloudfrontUrl: visibility === 'public' ? fileRow.cloudfront_url : null,
-          errorMessage: null,
+          errorMessage: fileRow.error_message || null,
         },
-        overrideWebhookUrl: webhookUrl,
-        overrideWebhookSecret: webhookSecret,
         ipAddress: clientIp,
       });
 
       return NextResponse.json(
         {
-          status: webhookRes.delivered ? 'success' : 'webhook_failed',
+          status: webhookRes.delivered ? 'success' : 'webhook_dispatch_recorded',
           fileId: fileRow.id,
-          processingStatus: 'processed',
-          dbStatus: fileRow.status,
+          fileStatus: fileRow.status,
           scanStatus: fileRow.scan_status || 'not_scanned',
           webhook: webhookRes,
         },
-        { status: webhookRes.delivered ? 200 : 502, headers: corsHeaders }
+        { status: 200, headers: corsHeaders }
       );
     }
 
@@ -232,8 +228,6 @@ export async function POST(
     }
 
     const procResult = await processUpload(fileId, {
-      webhookUrl,
-      webhookSecret,
       ipAddress: clientIp,
       triggerSource: 'manual_status_endpoint',
     });

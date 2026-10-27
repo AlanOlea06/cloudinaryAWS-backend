@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { supabase } from '@/lib/supabase';
 import { verifyAdminSecretHeader } from '@/lib/env';
 import { addServiceLog } from '@/lib/service-logs';
+import { checkSharedRateLimit } from '@/lib/shared-rate-limit';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_MAX_KEYS_PER_ORG = 3;
@@ -265,6 +266,28 @@ export async function POST(req: NextRequest) {
     } else {
       // Delegated: orgId always originates from the caller's verified key
       effectiveOrgId = authResult.auth.callerKey.org_id;
+    }
+
+    // Shared rate limiting check across serverless instances (Section C)
+    const rateCheck = await checkSharedRateLimit(`keys:org:${effectiveOrgId}`, 20, 60);
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        {
+          error: 'Too Many Requests',
+          code: 'KEYS_RATE_LIMIT_EXCEEDED',
+          message: `Límite de peticiones de administración de llaves excedido (${rateCheck.limit} req / 60s). Reintenta en ${rateCheck.resetSeconds} segundos. (Estado compartido en base de datos).`,
+        },
+        {
+          status: 429,
+          headers: {
+            ...corsHeaders,
+            'X-RateLimit-Limit': String(rateCheck.limit),
+            'X-RateLimit-Remaining': String(rateCheck.remaining),
+            'X-RateLimit-Reset': String(rateCheck.resetSeconds),
+            'Retry-After': String(rateCheck.resetSeconds),
+          },
+        }
+      );
     }
 
     // 2. Resolve User ID (optional)
@@ -674,6 +697,28 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json(
         { error: 'Not Found', code: 'API_KEY_NOT_FOUND', message: 'API Key no encontrada.' },
         { status: 404, headers: corsHeaders }
+      );
+    }
+
+    // Shared rate limiting check across serverless instances (Section C)
+    const rateCheck = await checkSharedRateLimit(`keys:org:${targetKey.org_id}`, 20, 60);
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        {
+          error: 'Too Many Requests',
+          code: 'KEYS_RATE_LIMIT_EXCEEDED',
+          message: `Límite de peticiones de administración de llaves excedido (${rateCheck.limit} req / 60s). Reintenta en ${rateCheck.resetSeconds} segundos. (Estado compartido en base de datos).`,
+        },
+        {
+          status: 429,
+          headers: {
+            ...corsHeaders,
+            'X-RateLimit-Limit': String(rateCheck.limit),
+            'X-RateLimit-Remaining': String(rateCheck.remaining),
+            'X-RateLimit-Reset': String(rateCheck.resetSeconds),
+            'Retry-After': String(rateCheck.resetSeconds),
+          },
+        }
       );
     }
 

@@ -19,6 +19,7 @@ import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/tick
 import { getBaseCloudFrontUrl } from '@/lib/cloudfront';
 import { detectMagicBytesMime } from '@/lib/magic-bytes';
 import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
+import { dispatchFileWebhook } from '@/lib/lambda-fallback/webhook-dispatcher';
 import { checkOrganizationQuotas } from '@/lib/quotas';
 
 // CORS Headers
@@ -561,16 +562,12 @@ export async function PUT(req: NextRequest) {
   const ticketId = searchParams.get('ticketId') || '';
   const skipProcess = searchParams.get('skipProcess') === 'true';
   let confirmToken = searchParams.get('token') || searchParams.get('confirmToken') || '';
-  let webhookUrl = searchParams.get('webhookUrl') || '';
-  let webhookSecret = searchParams.get('webhookSecret') || '';
 
-  // Read confirmToken and optional webhook overrides from request body if sent as JSON
+  // Read confirmToken from request body if sent as JSON
   try {
     const body = await req.json().catch(() => ({}));
     if (body?.token) confirmToken = body.token;
     if (body?.confirmToken) confirmToken = body.confirmToken;
-    if (body?.webhookUrl) webhookUrl = body.webhookUrl;
-    if (body?.webhookSecret) webhookSecret = body.webhookSecret;
   } catch {
     // Body is optional if confirmToken was sent via query parameter
   }
@@ -991,8 +988,6 @@ export async function PUT(req: NextRequest) {
   // Fallback for local testing only (disabled by default in production per "no binary files through Vercel" rule)
   if (ENABLE_SERVER_PROCESSING_FALLBACK) {
     const procResult = await processUpload(fileRow.id, {
-      webhookUrl: webhookUrl || null,
-      webhookSecret: webhookSecret || null,
       ipAddress: clientIp,
       triggerSource: 'put_confirm',
     });
@@ -1093,6 +1088,26 @@ export async function PUT(req: NextRequest) {
     message: `File confirmed in S3: status='uploaded', scan_status='not_scanned', visibility='${fileVisibility}', size=${actualSize}, magicBytesVerified=true, sha256_verified=${isChecksumVerified}`,
   });
 
+  const webhookResult = await dispatchFileWebhook({
+    payload: {
+      event: 'file.uploaded',
+      timestamp: nowIso,
+      fileId: fileRow.id,
+      ticketId: ticketId,
+      orgId: fileRow.org_id || null,
+      userId: fileRow.user_id || null,
+      status: 'uploaded',
+      scanStatus: 'not_scanned',
+      visibility: fileVisibility,
+      mimeType: fileRow.mime_type || actualMime,
+      sizeBytes: actualSize,
+      sha256Hash: fileRow.sha256_hash || null,
+      cloudfrontUrl: publicCfUrl,
+      errorMessage: null,
+    },
+    ipAddress: clientIp,
+  });
+
   return NextResponse.json(
     {
       status: 'success',
@@ -1122,6 +1137,7 @@ export async function PUT(req: NextRequest) {
         detectedMimeType: detectedMagicMime,
         checksumVerified: isChecksumVerified,
       },
+      webhook: webhookResult,
     },
     { status: 200, headers: corsHeaders }
   );
