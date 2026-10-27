@@ -16,6 +16,8 @@
 
 import crypto from 'crypto';
 import dns from 'dns';
+import https from 'https';
+import net from 'net';
 import { supabase } from '@/lib/supabase';
 import { addServiceLog } from '@/lib/service-logs';
 
@@ -37,69 +39,145 @@ const DELIVERED_RETENTION_DAYS = 30;
 const FAILED_RETENTION_DAYS = 90;
 
 // ============================================================================
-// 1. SSRF
+// 1. SSRF & CONEXIÓN FIJADA A LA IP VALIDADA (Anti-DNS Rebinding / TOCTOU)
 // ============================================================================
 
-function ipv4ToLong(ip: string): number {
-  return ip.split('.').reduce((acc, o) => ((acc << 8) + parseInt(o, 10)) >>> 0, 0);
-}
-
-function isIpv4InCidr(ip: string, cidr: string): boolean {
-  const [range, bitsStr] = cidr.split('/');
-  const bits = parseInt(bitsStr, 10);
-  const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
-  return (ipv4ToLong(ip) & mask) === (ipv4ToLong(range) & mask);
-}
-
-const FORBIDDEN_IPV4_CIDRS = [
-  '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
-  '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24', '192.88.99.0/24', '192.168.0.0/16',
-  '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4',
-  '255.255.255.255/32',
-];
-
-export function isIpBlocked(ip: string): boolean {
-  const t = ip.trim().toLowerCase().replace(/^\[|\]$/g, '');
-  if (t.startsWith('::ffff:')) return isIpBlocked(t.substring(7));
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(t)) {
-    return FORBIDDEN_IPV4_CIDRS.some((c) => isIpv4InCidr(t, c));
+export function parseIpToBytes(raw: string): { family: 4 | 6; bytes: number[] } | null {
+  const ip = String(raw || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (net.isIPv4(ip)) {
+    const parts = ip.split('.').map((x) => parseInt(x, 10));
+    if (parts.length === 4 && parts.every((p) => !isNaN(p) && p >= 0 && p <= 255)) {
+      return { family: 4, bytes: parts };
+    }
+    return null;
   }
-  if (t.includes(':')) {
-    if (t === '::' || t === '::1') return true;
-    if (/^fe[89ab]/.test(t)) return true; // link-local fe80::/10
-    if (/^f[cd]/.test(t)) return true; // unique local fc00::/7 (incl. fd00:ec2::254 metadata)
-    if (t.startsWith('ff')) return true; // multicast
-    if (t.startsWith('64:ff9b:')) return true; // NAT64 (could map to private IPv4)
+  if (net.isIPv6(ip)) {
+    let s = ip;
+    if (s.includes('.')) {
+      const lastColon = s.lastIndexOf(':');
+      const v4part = s.substring(lastColon + 1);
+      if (!net.isIPv4(v4part)) return null;
+      const v4bytes = v4part.split('.').map((x) => parseInt(x, 10));
+      const hexPart =
+        ((v4bytes[0] << 8) | v4bytes[1]).toString(16) + ':' + (((v4bytes[2] << 8) | v4bytes[3]) >>> 0).toString(16);
+      s = s.substring(0, lastColon + 1) + hexPart;
+    }
+    const parts = s.split('::');
+    if (parts.length > 2) return null;
+    const left = parts[0] ? parts[0].split(':') : [];
+    const right = parts[1] ? parts[1].split(':') : [];
+    const missing = 8 - (left.length + right.length);
+    if (missing < 0) return null;
+    const middle = new Array(missing).fill('0');
+    const full = (parts.length === 2 ? [...left, ...middle, ...right] : left).map((h) => parseInt(h || '0', 16));
+    if (full.length !== 8 || full.some((h) => isNaN(h) || h < 0 || h > 0xffff)) return null;
+    const bytes: number[] = [];
+    for (const h of full) {
+      bytes.push((h >> 8) & 0xff);
+      bytes.push(h & 0xff);
+    }
+    const isV4Mapped = bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 0xff && bytes[11] === 0xff;
+    if (isV4Mapped) {
+      return { family: 4, bytes: bytes.slice(12) };
+    }
+    return { family: 6, bytes };
+  }
+  return null;
+}
+
+export function isIpBlocked(raw: string): boolean {
+  const parsed = parseIpToBytes(raw);
+  // Rechaza por defecto cualquier cadena que no pueda interpretar como IP
+  if (!parsed) return true;
+
+  if (parsed.family === 4) {
+    const b = parsed.bytes;
+    if (b[0] === 0) return true; // 0.0.0.0/8
+    if (b[0] === 10) return true; // 10.0.0.0/8
+    if (b[0] === 100 && (b[1] & 0xc0) === 64) return true; // 100.64.0.0/10
+    if (b[0] === 127) return true; // 127.0.0.0/8 Loopback
+    if (b[0] === 169 && b[1] === 254) return true; // 169.254.0.0/16 Link-local / Metadata
+    if (b[0] === 172 && (b[1] & 0xf0) === 16) return true; // 172.16.0.0/12 Private
+    if (b[0] === 192 && b[1] === 0 && b[2] === 0) return true; // 192.0.0.0/24
+    if (b[0] === 192 && b[1] === 0 && b[2] === 2) return true; // 192.0.2.0/24 TEST-NET-1
+    if (b[0] === 192 && b[1] === 88 && b[2] === 99) return true; // 192.88.99.0/24 6to4
+    if (b[0] === 192 && b[1] === 168) return true; // 192.168.0.0/16 Private
+    if (b[0] === 198 && (b[1] & 0xfe) === 18) return true; // 198.18.0.0/15
+    if (b[0] === 198 && b[1] === 51 && b[2] === 100) return true; // 198.51.100.0/24 TEST-NET-2
+    if (b[0] === 203 && b[1] === 0 && b[2] === 113) return true; // 203.0.113.0/24 TEST-NET-3
+    if (b[0] >= 224) return true; // Multicast & Reserved
     return false;
   }
-  return false; // not an IP literal (hostname) -> validated via DNS
+
+  const b = parsed.bytes;
+  if (b.every((x) => x === 0)) return true; // ::
+  if (b.slice(0, 15).every((x) => x === 0) && b[15] === 1) return true; // ::1 Loopback
+  if (b[0] === 0xfe && (b[1] & 0xc0) === 0x80) return true; // fe80::/10 Link-Local
+  if ((b[0] & 0xfe) === 0xfc) return true; // fc00::/7 Unique Local (fd00::/8)
+  if (b[0] === 0xff) return true; // ff00::/8 Multicast
+  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b && b.slice(4, 12).every((x) => x === 0)) return true; // 64:ff9b::/96
+  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x0d && b[3] === 0xb8) return true; // 2001:db8::/32 Documentation
+  if (b[0] === 0x01 && b[1] === 0x00 && b.slice(2, 8).every((x) => x === 0)) return true; // 100::/64 Discard
+  return false;
 }
 
-/** Returns a short error code (no host, no IP, no URL) or null when the URL is safe. */
-export async function validateWebhookUrlSSRF(rawUrl: string): Promise<string | null> {
+export type SSRFValidationResult =
+  | { safe: true; parsedUrl: URL; hostname: string; pinnedIp: string; pinnedFamily: 4 | 6 }
+  | { safe: false; error: string };
+
+/**
+ * Valida la URL contra SSRF y resuelve la IP para fijar la conexión TCP posterior (anti-TOCTOU).
+ */
+export async function validateWebhookUrlSSRF(rawUrl: string): Promise<SSRFValidationResult> {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
   } catch {
-    return 'SSRF_URL_MALFORMED';
+    return { safe: false, error: 'SSRF_URL_MALFORMED' };
   }
-  if (parsed.protocol !== 'https:') return 'SSRF_PROTOCOL_NOT_HTTPS';
-  if (parsed.username || parsed.password) return 'SSRF_CREDENTIALS_IN_URL';
+  if (parsed.protocol !== 'https:') return { safe: false, error: 'SSRF_PROTOCOL_NOT_HTTPS' };
+  if (parsed.username || parsed.password) return { safe: false, error: 'SSRF_CREDENTIALS_IN_URL' };
 
   const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (!host || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.internal')) {
-    return 'SSRF_BLOCKED_HOST';
+    return { safe: false, error: 'SSRF_BLOCKED_HOST' };
   }
-  if (isIpBlocked(host)) return 'SSRF_BLOCKED_IP';
 
+  // Si host es una IP literal (ej. 127.0.0.1 o [::1] o [::ffff:7f00:1])
+  const literalParsed = parseIpToBytes(host);
+  if (literalParsed) {
+    if (isIpBlocked(host)) {
+      return { safe: false, error: 'SSRF_BLOCKED_IP' };
+    }
+    return {
+      safe: true,
+      parsedUrl: parsed,
+      hostname: host,
+      pinnedIp: host,
+      pinnedFamily: literalParsed.family,
+    };
+  }
+
+  // Host es un dominio: resuelve todas sus direcciones
   try {
     const addresses = await dns.promises.lookup(host, { all: true, verbatim: true });
-    if (!addresses.length) return 'SSRF_DNS_EMPTY';
-    if (addresses.some((a) => isIpBlocked(a.address))) return 'SSRF_BLOCKED_IP';
+    if (!addresses.length) return { safe: false, error: 'SSRF_DNS_EMPTY' };
+    for (const a of addresses) {
+      if (isIpBlocked(a.address)) {
+        return { safe: false, error: 'SSRF_BLOCKED_IP' };
+      }
+    }
+    const chosen = addresses.find((a) => a.family === 4) || addresses[0];
+    return {
+      safe: true,
+      parsedUrl: parsed,
+      hostname: host,
+      pinnedIp: chosen.address,
+      pinnedFamily: (chosen.family === 6 ? 6 : 4) as 4 | 6,
+    };
   } catch {
-    return 'SSRF_DNS_ERROR';
+    return { safe: false, error: 'SSRF_DNS_ERROR' };
   }
-  return null;
 }
 
 /** For logs: scheme + host only (no userinfo, path or query string). */
@@ -120,6 +198,73 @@ function sanitizeFetchError(err: any): string {
   if (msg.includes('redirect')) return 'REDIRECT_BLOCKED';
   if (msg.includes('certificate') || msg.includes('ssl') || msg.includes('tls')) return 'TLS_ERROR';
   return 'NETWORK_ERROR';
+}
+
+/** Conecta a la IP ya validada conservando Host y SNI sin segundo resolve (inmune a rebinding). */
+export function executePinnedHttpsPost(
+  parsedUrl: URL,
+  pinnedIp: string,
+  pinnedFamily: 4 | 6,
+  headers: Record<string, string>,
+  body: string,
+  timeoutMs: number
+): Promise<{ statusCode: number; error: string | null }> {
+  return new Promise((resolve) => {
+    let finished = false;
+    const finish = (result: { statusCode: number; error: string | null }) => {
+      if (!finished) {
+        finished = true;
+        resolve(result);
+      }
+    };
+
+    const port = parsedUrl.port ? parseInt(parsedUrl.port, 10) : 443;
+    const req = https.request(
+      {
+        protocol: 'https:',
+        hostname: parsedUrl.hostname,
+        servername: parsedUrl.hostname,
+        port,
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: 'POST',
+        headers: {
+          Host: parsedUrl.hostname + (parsedUrl.port ? `:${parsedUrl.port}` : ''),
+          ...headers,
+        },
+        lookup: (_hostname, options, callback) => {
+          const cb = typeof options === 'function' ? options : callback;
+          const all = options && typeof options === 'object' && (options as any).all;
+          if (all) {
+            return cb(null, [{ address: pinnedIp, family: pinnedFamily }]);
+          }
+          return cb(null, pinnedIp, pinnedFamily);
+        },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        const statusCode = res.statusCode || 0;
+        if (statusCode >= 300 && statusCode < 400) {
+          res.destroy();
+          return finish({ statusCode, error: 'REDIRECT_BLOCKED' });
+        }
+        const ok = statusCode >= 200 && statusCode < 300;
+        res.destroy();
+        return finish({ statusCode, error: ok ? null : `HTTP_${statusCode}` });
+      }
+    );
+
+    req.on('timeout', () => {
+      req.destroy();
+      finish({ statusCode: 0, error: 'TIMEOUT' });
+    });
+
+    req.on('error', (err: any) => {
+      finish({ statusCode: 0, error: sanitizeFetchError(err) });
+    });
+
+    req.write(body);
+    req.end();
+  });
 }
 
 // ============================================================================
@@ -252,8 +397,9 @@ async function sendClaimedDelivery(d: ClaimedDelivery, ipAddress: string): Promi
     return { ...base, configured: false, delivered: false, lastStatusCode: null, error: code };
   }
 
-  const ssrfError = await validateWebhookUrlSSRF(webhookUrl);
-  if (ssrfError) {
+  const ssrfResult = await validateWebhookUrlSSRF(webhookUrl);
+  if (!ssrfResult.safe) {
+    const ssrfError = ssrfResult.error;
     await finalizeDelivery(d, { delivered: false, statusCode: null, error: ssrfError, terminal: true });
     await addServiceLog({
       method: 'POST',
@@ -277,37 +423,26 @@ async function sendClaimedDelivery(d: ClaimedDelivery, ipAddress: string): Promi
   const payloadJson = JSON.stringify(buildPayload(file, d.event_type, d.id, timestamp));
   const signature = signWebhookPayload(payloadJson, timestamp, webhookSecret);
 
-  let delivered = false;
-  let statusCode: number | null = null;
-  let error: string | null = null;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
-  try {
-    const res = await fetch(webhookUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-webhook-signature': signature,
-        'x-webhook-timestamp': timestamp,
-        'x-webhook-event': d.event_type,
-        'x-webhook-attempt': String(d.attempts),
-        ...(d.id ? { 'x-webhook-delivery-id': d.id } : {}),
-      },
-      body: payloadJson,
-      redirect: 'error',
-      signal: controller.signal,
-      cache: 'no-store',
-    });
-    statusCode = res.status;
-    delivered = res.ok;
-    if (!res.ok) error = `HTTP_${res.status}`;
-    // Body is intentionally never read or stored.
-    try { await res.body?.cancel(); } catch {}
-  } catch (err: any) {
-    error = sanitizeFetchError(err);
-  } finally {
-    clearTimeout(timer);
-  }
+  // Conexión fijada directamente a la IP validada (inmune a DNS rebinding / TOCTOU)
+  const res = await executePinnedHttpsPost(
+    ssrfResult.parsedUrl,
+    ssrfResult.pinnedIp,
+    ssrfResult.pinnedFamily,
+    {
+      'Content-Type': 'application/json',
+      'x-webhook-signature': signature,
+      'x-webhook-timestamp': timestamp,
+      'x-webhook-event': d.event_type,
+      'x-webhook-attempt': String(d.attempts),
+      ...(d.id ? { 'x-webhook-delivery-id': d.id } : {}),
+    },
+    payloadJson,
+    WEBHOOK_TIMEOUT_MS
+  );
+
+  const statusCode = res.statusCode || null;
+  const delivered = res.statusCode >= 200 && res.statusCode < 300;
+  const error = res.error;
 
   await finalizeDelivery(d, { delivered, statusCode, error });
 
@@ -334,6 +469,11 @@ async function sendClaimedDelivery(d: ClaimedDelivery, ipAddress: string): Promi
  * Creates a delivery row already claimed (status='sending', attempts=1, locked_until)
  * and sends it immediately. Because the row is born claimed, the cron's
  * claim_webhook_deliveries() cannot pick it up concurrently.
+ *
+ * [TEMPORARY-LAMBDA-FALLBACK: WEBHOOK-CIRCUIT-BREAKER]
+ * Si las últimas N entregas de esa organización fallaron consecutivamente,
+ * se encola la entrega (status='pending') sin esperarla en línea, evitando penalizar
+ * la latencia de la subida con esperas infructuosas (3.5s timeout).
  */
 export async function dispatchFileWebhook(params: {
   fileId: string;
@@ -366,6 +506,61 @@ export async function dispatchFileWebhook(params: {
     });
     return { ...notConfigured, configured: true, error: 'WEBHOOK_SECRET_NOT_CONFIGURED' };
   }
+
+  // ============================================================================
+  // [TEMPORARY-LAMBDA-FALLBACK: WEBHOOK-CIRCUIT-BREAKER]
+  // ============================================================================
+  const CIRCUIT_BREAKER_FAILURES_THRESHOLD = 3;
+  const { data: recentDeliveries } = await supabase
+    .from('webhook_deliveries')
+    .select('status')
+    .eq('org_id', file.org_id)
+    .order('created_at', { ascending: false })
+    .limit(CIRCUIT_BREAKER_FAILURES_THRESHOLD);
+
+  const isCircuitBreakerOpen =
+    Boolean(recentDeliveries &&
+    recentDeliveries.length >= CIRCUIT_BREAKER_FAILURES_THRESHOLD &&
+    recentDeliveries.every((d) => d.status === 'failed'));
+
+  if (isCircuitBreakerOpen) {
+    const { data: queuedRow } = await supabase
+      .from('webhook_deliveries')
+      .insert({
+        org_id: file.org_id,
+        file_id: fileId,
+        event_type: event,
+        status: 'pending',
+        attempts: 0,
+        max_attempts: DEFAULT_MAX_ATTEMPTS,
+        locked_until: null,
+        next_retry_at: new Date().toISOString(),
+      })
+      .select('id')
+      .maybeSingle();
+
+    await addServiceLog({
+      method: 'POST',
+      action: 'WEBHOOK_CIRCUIT_BREAKER_QUEUED',
+      status: 'QUEUED',
+      orgId: file.org_id,
+      fileId,
+      ipAddress,
+      message: `Webhook '${event}' encolado en segundo plano sin esperar en línea (circuit breaker abierto: últimas ${CIRCUIT_BREAKER_FAILURES_THRESHOLD} entregas fallaron). deliveryId=${queuedRow?.id || 'none'}.`,
+    });
+
+    return {
+      configured: true,
+      delivered: false,
+      deliveryId: queuedRow?.id || null,
+      attempts: 0,
+      lastStatusCode: null,
+      error: 'CIRCUIT_BREAKER_QUEUED',
+    };
+  }
+  // ============================================================================
+  // END [TEMPORARY-LAMBDA-FALLBACK: WEBHOOK-CIRCUIT-BREAKER]
+  // ============================================================================
 
   const { data: row, error: insertErr } = await supabase
     .from('webhook_deliveries')

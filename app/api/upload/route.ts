@@ -294,44 +294,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // CHECK 6 (Task B.13): Organization Quotas (max_storage_bytes & max_pending_tickets)
-    const quotaCheck = await checkOrganizationQuotas(orgId, fileSize, {
-      overrideMaxStorageBytes:
-        body.testMaxStorageBytes !== undefined ? Number(body.testMaxStorageBytes) : undefined,
-      overrideMaxPendingTickets:
-        body.testMaxPendingTickets !== undefined ? Number(body.testMaxPendingTickets) : undefined,
-    });
-
-    if (!quotaCheck.allowed) {
-      await addServiceLog({
-        method: req.method,
-        action: 'ORG_QUOTA_EXCEEDED',
-        status: quotaCheck.code || 'DENIED_QUOTA',
-        userId: user.id,
-        userName: user.name,
-        orgId: user.orgId,
-        orgName: userOrg?.name,
-        fileName,
-        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-        message: `${quotaCheck.code}: ${quotaCheck.message}`,
-      });
-
-      return NextResponse.json(
-        {
-          error: quotaCheck.httpStatus === 429 ? 'Too Many Requests' : 'Payload Too Large',
-          code: quotaCheck.code,
-          method: req.method,
-          message: quotaCheck.message,
-          quotaUsage: quotaCheck.usage,
-        },
-        { status: quotaCheck.httpStatus || 429, headers: corsHeaders }
-      );
-    }
-
     // ============================================================================
     // [TEMPORARY-LAMBDA-FALLBACK: OPPORTUNISTIC-TICKET-CLEANUP]
     // Reemplaza temporalmente las reglas de ciclo de vida automáticas de AWS S3.
     // Al emitir un ticket, borra de la organización hasta 3 tickets vencidos (objeto S3 y fila).
+    // SE EJECUTA ANTES de comprobar el cupo de tickets pendientes para liberar espacio.
     // NO borra la fila si falla el borrado en S3. El cron queda de respaldo.
     // ============================================================================
     try {
@@ -366,6 +333,40 @@ export async function POST(req: NextRequest) {
     // ============================================================================
     // END [TEMPORARY-LAMBDA-FALLBACK: OPPORTUNISTIC-TICKET-CLEANUP]
     // ============================================================================
+
+    // CHECK 6 (Task B.13): Organization Quotas (max_storage_bytes & max_pending_tickets)
+    const quotaCheck = await checkOrganizationQuotas(orgId, fileSize, {
+      overrideMaxStorageBytes:
+        body.testMaxStorageBytes !== undefined ? Number(body.testMaxStorageBytes) : undefined,
+      overrideMaxPendingTickets:
+        body.testMaxPendingTickets !== undefined ? Number(body.testMaxPendingTickets) : undefined,
+    });
+
+    if (!quotaCheck.allowed) {
+      await addServiceLog({
+        method: req.method,
+        action: 'ORG_QUOTA_EXCEEDED',
+        status: quotaCheck.code || 'DENIED_QUOTA',
+        userId: user.id,
+        userName: user.name,
+        orgId: user.orgId,
+        orgName: userOrg?.name,
+        fileName,
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        message: `${quotaCheck.code}: ${quotaCheck.message}`,
+      });
+
+      return NextResponse.json(
+        {
+          error: quotaCheck.httpStatus === 429 ? 'Too Many Requests' : 'Payload Too Large',
+          code: quotaCheck.code,
+          method: req.method,
+          message: quotaCheck.message,
+          quotaUsage: quotaCheck.usage,
+        },
+        { status: quotaCheck.httpStatus || 429, headers: corsHeaders }
+      );
+    }
 
     // ALL CHECKS PASSED -> Generate Ticket & Opaque 128-bit S3 Key (Task A.1)
     const fileId = crypto.randomUUID();

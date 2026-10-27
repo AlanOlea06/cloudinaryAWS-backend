@@ -9,6 +9,7 @@ const MANDATORY_ENV_VARS = [
   'TICKET_SIGNING_SECRET',
   'ADMIN_API_SECRET',
   'CRON_SECRET',
+  'RATE_LIMIT_SALT',
 ];
 
 const missingEnvVars = MANDATORY_ENV_VARS.filter((name) => {

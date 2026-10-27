@@ -17,17 +17,14 @@ const SEGMENT_RE = /^[a-z_]+$/;
 export const RATE_LIMIT_BUCKET_RETENTION_MS = 24 * 60 * 60 * 1000;
 const OPPORTUNISTIC_CLEANUP_PROBABILITY = 0.01;
 
+import { requireEnv } from '@/lib/env';
+
 /**
  * Returns the salt used for hashing sensitive identifiers (e.g. client IP) in rate limit keys.
- * Reads `RATE_LIMIT_SALT` if present. If absent, falls back to `TICKET_SIGNING_SECRET` so that
- * the server does not crash if the variable has not yet been populated in production.
+ * Reads mandatory `RATE_LIMIT_SALT`. Throws an explicit error immediately if missing. No fallbacks.
  */
 export function getRateLimitSalt(): string {
-  const salt = process.env.RATE_LIMIT_SALT?.trim();
-  if (salt) return salt;
-  const fallback = process.env.TICKET_SIGNING_SECRET?.trim();
-  if (fallback) return fallback;
-  return 'default-rate-limit-salt-fallback';
+  return requireEnv('RATE_LIMIT_SALT');
 }
 
 /**

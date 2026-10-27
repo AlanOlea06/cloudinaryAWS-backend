@@ -378,6 +378,39 @@ async function handleCreateMultipart(req: NextRequest, body: any) {
     String(visibility).toLowerCase() === 'public' ? 'public' : 'private';
   const ext = typeValidation.extension || '.bin';
   const normalizedMime = typeValidation.mimeType || fileType;
+  // ============================================================================
+  // [TEMPORARY-LAMBDA-FALLBACK: OPPORTUNISTIC-TICKET-CLEANUP]
+  // Limpieza de tickets vencidos antes de evaluar cuotas para liberar cupo
+  // ============================================================================
+  try {
+    const nowIso = new Date().toISOString();
+    const { data: expiredBatch } = await supabase
+      .from('files')
+      .select('id, s3_pending_key, expires_at')
+      .eq('org_id', orgId)
+      .eq('status', 'pending_upload')
+      .lt('expires_at', nowIso)
+      .limit(3);
+
+    if (expiredBatch && expiredBatch.length > 0) {
+      for (const exp of expiredBatch) {
+        if (exp.s3_pending_key) {
+          let s3Deleted = false;
+          try {
+            await deleteS3Object(exp.s3_pending_key);
+            s3Deleted = true;
+          } catch (err: any) {
+            console.warn('[TEMPORARY-LAMBDA-FALLBACK] Error borrando S3 en limpieza oportunista multipart:', err.message);
+          }
+          if (s3Deleted) {
+            await supabase.from('files').delete().eq('id', exp.id);
+          }
+        }
+      }
+    }
+  } catch (e: any) {
+    console.warn('[TEMPORARY-LAMBDA-FALLBACK] Limpieza oportunista multipart ignorada:', e.message);
+  }
 
   // Task B.13: Check organization quotas before initiating multipart upload
   const quotaCheck = await checkOrganizationQuotas(orgId, numericSize, {

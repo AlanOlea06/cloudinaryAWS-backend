@@ -20,12 +20,13 @@ export const MANDATORY_ENV_VARS = [
   'TICKET_SIGNING_SECRET',
   'ADMIN_API_SECRET',
   'CRON_SECRET',
+  'RATE_LIMIT_SALT',
 ] as const;
 
 export type MandatoryEnvVarName = (typeof MANDATORY_ENV_VARS)[number];
 
 /**
- * Checks all 10 mandatory environment variables at once and throws an error
+ * Checks all 11 mandatory environment variables at once and throws an error
  * listing every missing variable name if one or more are unset/empty.
  */
 export function validateAllMandatoryEnvVars(): void {
