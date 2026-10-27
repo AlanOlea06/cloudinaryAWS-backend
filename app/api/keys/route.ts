@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import { supabase } from '@/lib/supabase';
 import { verifyAdminSecretHeader } from '@/lib/env';
 import { addServiceLog } from '@/lib/service-logs';
-import { checkSharedRateLimit } from '@/lib/shared-rate-limit';
+import { checkSharedRateLimit, buildRateLimitKey } from '@/lib/shared-rate-limit';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_MAX_KEYS_PER_ORG = 3;
@@ -269,7 +269,11 @@ export async function POST(req: NextRequest) {
     }
 
     // Shared rate limiting check across serverless instances (Section C)
-    const rateCheck = await checkSharedRateLimit(`keys:org:${effectiveOrgId}`, 20, 60);
+    const rateKey =
+      authResult.auth.type === 'delegated'
+        ? buildRateLimitKey('keys', 'apikey', authResult.auth.callerKey.id)
+        : buildRateLimitKey('keys', 'admin_org', effectiveOrgId);
+    const rateCheck = await checkSharedRateLimit(rateKey, 20, 60);
     if (!rateCheck.allowed) {
       return NextResponse.json(
         {
@@ -701,7 +705,11 @@ export async function DELETE(req: NextRequest) {
     }
 
     // Shared rate limiting check across serverless instances (Section C)
-    const rateCheck = await checkSharedRateLimit(`keys:org:${targetKey.org_id}`, 20, 60);
+    const rateKey =
+      authResult.auth.type === 'delegated'
+        ? buildRateLimitKey('keys', 'apikey', authResult.auth.callerKey.id)
+        : buildRateLimitKey('keys', 'admin_org', targetKey.org_id);
+    const rateCheck = await checkSharedRateLimit(rateKey, 20, 60);
     if (!rateCheck.allowed) {
       return NextResponse.json(
         {

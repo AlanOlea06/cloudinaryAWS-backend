@@ -1,20 +1,17 @@
 // ============================================================================
 // [TEMPORARY-LAMBDA-FALLBACK: WEBHOOK-DISPATCHER]
-// UBICACIÓN RÁPIDA PARA MIGRACIÓN O ELIMINACIÓN CUANDO EXISTA AWS LAMBDA:
-// Búsqueda rápida en el proyecto: "TEMPORARY-LAMBDA-FALLBACK"
+// Búsqueda rápida: "TEMPORARY-LAMBDA-FALLBACK"
+// Sustituye a: AWS EventBridge / SQS + Lambda de notificación.
 //
-// Este módulo gestiona:
-// 1. Envío seguro de Webhooks con firma criptográfica HMAC-SHA256.
-// 2. Protección estricta contra SSRF (Server-Side Request Forgery):
-//    - Solo protocolo HTTPS.
-//    - Resolución DNS previa con bloqueo de IPs privadas (RFC 1918), loopback,
-//      link-local, CGNAT (RFC 6598), multicast/reservadas y metadata de AWS.
-//    - Prohibición de redirecciones HTTP (redirect: 'error').
-//    - Timeout corto (3.5 segundos).
-// 3. Destino y Secreto tomados EXCLUSIVAMENTE de la configuración de la organización
-//    (public.organizations.webhook_url y webhook_secret). Nunca de parámetros del cliente.
-// 4. Persistencia en base de datos (public.webhook_deliveries) con reintentos
-//    programados mediante backoff exponencial real.
+// - Destino y secreto: SIEMPRE los actuales de public.organizations (webhook_url,
+//   webhook_secret), leídos en el momento de cada envío. Nunca del cliente.
+// - SSRF: solo HTTPS, sin credenciales en la URL, DNS resuelto y validado contra
+//   rangos privados/loopback/link-local/metadata en cada envío, redirect: 'error',
+//   timeout 3.5 s.
+// - Payload: se construye en cada envío desde public.files (sin claves de S3).
+// - Persistencia: public.webhook_deliveries (sin payload ni URL). Reclamo atómico
+//   con claim_webhook_deliveries() (FOR UPDATE SKIP LOCKED).
+// - last_error: solo códigos cortos; nunca cuerpos de respuesta ni URLs.
 // ============================================================================
 
 import crypto from 'crypto';
@@ -24,198 +21,115 @@ import { addServiceLog } from '@/lib/service-logs';
 
 export type WebhookEventName = 'file.uploaded' | 'file.processed' | 'file.failed';
 
-export interface WebhookPayload {
-  event: WebhookEventName;
-  timestamp: string;
-  fileId: string;
-  ticketId: string | null;
-  orgId: string | null;
-  userId: string | null;
-  status: 'uploaded' | 'processed' | 'failed';
-  scanStatus: string;
-  visibility: 'private' | 'public';
-  mimeType: string;
-  sizeBytes: number;
-  sha256Hash: string | null;
-  cloudfrontUrl: string | null;
-  errorMessage: string | null;
-}
-
 export interface WebhookDispatchResult {
   configured: boolean;
   delivered: boolean;
-  deliveryId?: string | null;
+  deliveryId: string | null;
   attempts: number;
   lastStatusCode: number | null;
-  signature: string | null;
-  timestamp: string | null;
   error: string | null;
 }
 
+const WEBHOOK_TIMEOUT_MS = 3500;
+const SENDING_LOCK_SECONDS = 60;
+const DEFAULT_MAX_ATTEMPTS = 5;
+const DELIVERED_RETENTION_DAYS = 30;
+const FAILED_RETENTION_DAYS = 90;
+
 // ============================================================================
-// 1. SSRF PROTECTION HELPERS
+// 1. SSRF
 // ============================================================================
 
-/**
- * Converts an IPv4 dotted string to a 32-bit unsigned integer.
- */
 function ipv4ToLong(ip: string): number {
-  return ip
-    .split('.')
-    .reduce((acc, octet) => ((acc << 8) + parseInt(octet, 10)) >>> 0, 0);
+  return ip.split('.').reduce((acc, o) => ((acc << 8) + parseInt(o, 10)) >>> 0, 0);
 }
 
-/**
- * Checks whether an IPv4 address falls within a given CIDR block.
- */
 function isIpv4InCidr(ip: string, cidr: string): boolean {
   const [range, bitsStr] = cidr.split('/');
   const bits = parseInt(bitsStr, 10);
   const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
-  const ipLong = ipv4ToLong(ip);
-  const rangeLong = ipv4ToLong(range);
-  return (ipLong & mask) === (rangeLong & mask);
+  return (ipv4ToLong(ip) & mask) === (ipv4ToLong(range) & mask);
 }
 
-/**
- * Validates an IP address against forbidden ranges (private, loopback, link-local,
- * AWS metadata, CGNAT, multicast, broadcast).
- */
+const FORBIDDEN_IPV4_CIDRS = [
+  '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
+  '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24', '192.88.99.0/24', '192.168.0.0/16',
+  '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4',
+  '255.255.255.255/32',
+];
+
 export function isIpBlocked(ip: string): boolean {
-  const trimmed = ip.trim().toLowerCase();
-
-  // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
-  if (trimmed.startsWith('::ffff:')) {
-    const mappedIpv4 = trimmed.substring(7);
-    return isIpBlocked(mappedIpv4);
+  const t = ip.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (t.startsWith('::ffff:')) return isIpBlocked(t.substring(7));
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(t)) {
+    return FORBIDDEN_IPV4_CIDRS.some((c) => isIpv4InCidr(t, c));
   }
-
-  // IPv4 Checks
-  if (trimmed.includes('.')) {
-    const forbiddenCidrs = [
-      '0.0.0.0/8', // Current network (RFC 1122)
-      '10.0.0.0/8', // Private network (RFC 1918)
-      '100.64.0.0/10', // Carrier-Grade NAT (RFC 6598)
-      '127.0.0.0/8', // Loopback (RFC 1122)
-      '169.254.0.0/16', // Link-local + AWS Metadata (169.254.169.254) (RFC 3927)
-      '172.16.0.0/12', // Private network (RFC 1918)
-      '192.0.0.0/24', // IETF Protocol Assignments
-      '192.0.2.0/24', // TEST-NET-1 (RFC 5737)
-      '192.88.99.0/24', // 6to4 Relay Anycast (RFC 7526)
-      '192.168.0.0/16', // Private network (RFC 1918)
-      '198.18.0.0/15', // Network benchmark tests (RFC 2544)
-      '198.51.100.0/24', // TEST-NET-2 (RFC 5737)
-      '203.0.113.0/24', // TEST-NET-3 (RFC 5737)
-      '224.0.0.0/4', // Multicast (RFC 5771)
-      '240.0.0.0/4', // Reserved for future use (RFC 1112)
-      '255.255.255.255/32', // Broadcast
-    ];
-
-    for (const cidr of forbiddenCidrs) {
-      if (isIpv4InCidr(trimmed, cidr)) {
-        return true;
-      }
-    }
+  if (t.includes(':')) {
+    if (t === '::' || t === '::1') return true;
+    if (/^fe[89ab]/.test(t)) return true; // link-local fe80::/10
+    if (/^f[cd]/.test(t)) return true; // unique local fc00::/7 (incl. fd00:ec2::254 metadata)
+    if (t.startsWith('ff')) return true; // multicast
+    if (t.startsWith('64:ff9b:')) return true; // NAT64 (could map to private IPv4)
     return false;
   }
-
-  // IPv6 Checks
-  if (trimmed.includes(':')) {
-    if (trimmed === '::' || trimmed === '::1') return true; // Unspecified / Loopback
-    if (trimmed.startsWith('fe80:') || trimmed.startsWith('fe8') || trimmed.startsWith('fe9') || trimmed.startsWith('fea') || trimmed.startsWith('feb')) {
-      return true; // Link-local (fe80::/10)
-    }
-    if (trimmed.startsWith('fc00:') || trimmed.startsWith('fd')) {
-      return true; // Unique local (fc00::/7)
-    }
-    if (trimmed.startsWith('fd00:ec2:')) {
-      return true; // AWS IPv6 metadata
-    }
-    if (trimmed.startsWith('ff')) {
-      return true; // Multicast
-    }
-    return false;
-  }
-
-  return true; // Unknown IP format -> block by default
+  return false; // not an IP literal (hostname) -> validated via DNS
 }
 
-/**
- * Validates a Webhook URL against SSRF threats:
- * 1. Must use HTTPS scheme exclusively.
- * 2. Resolves DNS hostname to all IP addresses.
- * 3. Rejects if any resolved address belongs to a blocked/internal range.
- */
-export async function validateWebhookUrlSSRF(rawUrl: string): Promise<{ valid: boolean; error?: string }> {
+/** Returns a short error code (no host, no IP, no URL) or null when the URL is safe. */
+export async function validateWebhookUrlSSRF(rawUrl: string): Promise<string | null> {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
   } catch {
-    return { valid: false, error: 'URL_MALFORMED: La URL del webhook no es válida.' };
+    return 'SSRF_URL_MALFORMED';
   }
+  if (parsed.protocol !== 'https:') return 'SSRF_PROTOCOL_NOT_HTTPS';
+  if (parsed.username || parsed.password) return 'SSRF_CREDENTIALS_IN_URL';
 
-  // Enforce HTTPS
-  if (parsed.protocol.toLowerCase() !== 'https:') {
-    return {
-      valid: false,
-      error: 'SSRF_BLOCKED_PROTOCOL: Solo se permiten Webhooks sobre HTTPS por razones de seguridad.',
-    };
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.internal')) {
+    return 'SSRF_BLOCKED_HOST';
   }
+  if (isIpBlocked(host)) return 'SSRF_BLOCKED_IP';
 
-  const hostname = parsed.hostname.toLowerCase();
-
-  // Direct IP literal in URL hostname check
-  if (isIpBlocked(hostname)) {
-    return {
-      valid: false,
-      error: `SSRF_BLOCKED_HOST: La dirección '${hostname}' pertenece a un rango de red privado o reservado no permitido.`,
-    };
-  }
-
-  // Resolve hostname via DNS
   try {
-    const addresses = await dns.promises.lookup(hostname, { all: true });
-    if (!addresses || addresses.length === 0) {
-      return {
-        valid: false,
-        error: `SSRF_DNS_FAILED: No se pudo resolver la dirección DNS del host '${hostname}'.`,
-      };
-    }
-
-    for (const addr of addresses) {
-      if (isIpBlocked(addr.address)) {
-        return {
-          valid: false,
-          error: `SSRF_BLOCKED_IP: La dirección IP resuelta '${addr.address}' para el host '${hostname}' pertenece a un rango de red prohibido (privado, loopback o metadata).`,
-        };
-      }
-    }
-  } catch (dnsErr: any) {
-    return {
-      valid: false,
-      error: `SSRF_DNS_ERROR: Error al resolver DNS para '${hostname}': ${dnsErr?.message || dnsErr}`,
-    };
+    const addresses = await dns.promises.lookup(host, { all: true, verbatim: true });
+    if (!addresses.length) return 'SSRF_DNS_EMPTY';
+    if (addresses.some((a) => isIpBlocked(a.address))) return 'SSRF_BLOCKED_IP';
+  } catch {
+    return 'SSRF_DNS_ERROR';
   }
+  return null;
+}
 
-  return { valid: true };
+/** For logs: scheme + host only (no userinfo, path or query string). */
+function redactUrl(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    return `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ''}`;
+  } catch {
+    return '[url-invalida]';
+  }
+}
+
+/** Maps any fetch failure to a short code. Never stores response bodies or URLs. */
+function sanitizeFetchError(err: any): string {
+  const name = String(err?.name || '');
+  const msg = String(err?.message || '').toLowerCase();
+  if (name === 'AbortError' || msg.includes('abort')) return 'TIMEOUT';
+  if (msg.includes('redirect')) return 'REDIRECT_BLOCKED';
+  if (msg.includes('certificate') || msg.includes('ssl') || msg.includes('tls')) return 'TLS_ERROR';
+  return 'NETWORK_ERROR';
 }
 
 // ============================================================================
-// 2. HMAC-SHA256 SIGNATURE HELPERS
+// 2. HMAC-SHA256
 // ============================================================================
 
 export function signWebhookPayload(payloadJson: string, timestamp: string, secret: string): string {
-  const effectiveSecret = (secret || '').trim();
-  if (!effectiveSecret) {
-    throw new Error(
-      '[WEBHOOK_SECRET_MISSING] Se requiere un webhook_secret explícito de la organización para firmar el webhook.'
-    );
-  }
-  const digest = crypto
-    .createHmac('sha256', effectiveSecret)
-    .update(`${timestamp}.${payloadJson}`)
-    .digest('hex');
-  return `sha256=${digest}`;
+  const s = (secret || '').trim();
+  if (!s) throw new Error('[WEBHOOK_SECRET_MISSING]');
+  return `sha256=${crypto.createHmac('sha256', s).update(`${timestamp}.${payloadJson}`).digest('hex')}`;
 }
 
 export function verifyWebhookSignature(
@@ -224,450 +138,291 @@ export function verifyWebhookSignature(
   signatureHeader: string,
   secret: string
 ): boolean {
-  const effectiveSecret = (secret || '').trim();
-  if (!payloadJson || !timestamp || !signatureHeader || !effectiveSecret) {
-    return false;
-  }
-  const expected = signWebhookPayload(payloadJson, timestamp, effectiveSecret);
-  const a = Buffer.from(expected, 'utf8');
+  const s = (secret || '').trim();
+  if (!payloadJson || !timestamp || !signatureHeader || !s) return false;
+  const a = Buffer.from(signWebhookPayload(payloadJson, timestamp, s), 'utf8');
   const b = Buffer.from(signatureHeader.trim(), 'utf8');
-  if (a.length !== b.length) {
-    return false;
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// ============================================================================
+// 3. Backoff y payload
+// ============================================================================
+
+/** Delay before the next attempt, after `attemptsDone` failed attempts. */
+export function getBackoffSeconds(attemptsDone: number): number {
+  if (attemptsDone <= 1) return 60;
+  if (attemptsDone === 2) return 300;
+  if (attemptsDone === 3) return 1800;
+  return 7200;
+}
+
+function statusForEvent(event: WebhookEventName): 'uploaded' | 'processed' | 'failed' {
+  return event === 'file.failed' ? 'failed' : event === 'file.processed' ? 'processed' : 'uploaded';
+}
+
+/** Builds the payload from the current files row. Never includes S3 keys. */
+function buildPayload(file: any, event: WebhookEventName, deliveryId: string | null, timestamp: string) {
+  const visibility = String(file.visibility || 'private').toLowerCase() === 'public' ? 'public' : 'private';
+  let errorMessage: string | null = null;
+  if (event === 'file.failed' && file.error_message) {
+    errorMessage = String(file.error_message)
+      .replace(/static\/[A-Za-z0-9/_.-]+/g, '[redacted]')
+      .slice(0, 200);
   }
-  return crypto.timingSafeEqual(a, b);
+  return {
+    event,
+    deliveryId,
+    timestamp,
+    fileId: file.id,
+    ticketId: file.ticket_id || null,
+    orgId: file.org_id || null,
+    userId: file.user_id || null,
+    status: statusForEvent(event),
+    fileStatus: file.status,
+    scanStatus: file.scan_status || 'not_scanned',
+    visibility,
+    mimeType: file.mime_type || null,
+    sizeBytes: Number(file.size_bytes || 0),
+    sha256Hash: file.sha256_hash || null,
+    sha256Verified: Boolean(file.sha256_verified),
+    cloudfrontUrl: visibility === 'public' ? file.cloudfront_url || null : null,
+    errorMessage,
+  };
 }
 
 // ============================================================================
-// 3. PERSISTENT RETRIES WITH REAL BACKOFF
+// 4. Envío de una entrega ya reclamada (status = 'sending')
 // ============================================================================
 
-/**
- * Calculates exponential backoff in seconds for webhook delivery retries.
- * Attempt 1: +60s (1 min)
- * Attempt 2: +300s (5 min)
- * Attempt 3: +1800s (30 min)
- * Attempt 4: +7200s (2 hr)
- */
-export function getNextRetryDate(attemptNumber: number): Date {
-  const now = Date.now();
-  let delaySeconds = 60;
-  if (attemptNumber === 1) delaySeconds = 60;
-  else if (attemptNumber === 2) delaySeconds = 300;
-  else if (attemptNumber === 3) delaySeconds = 1800;
-  else delaySeconds = 7200;
-
-  return new Date(now + delaySeconds * 1000);
+interface ClaimedDelivery {
+  id: string | null; // null when the table is not migrated yet (no persistence)
+  org_id: string;
+  file_id: string;
+  event_type: WebhookEventName;
+  attempts: number;
+  max_attempts: number;
 }
 
-// ============================================================================
-// 4. MAIN DISPATCHER FUNCTION
-// ============================================================================
-
-/**
- * Dispatches an HMAC-SHA256 signed webhook using strict organization configuration:
- * - Reads webhook_url and webhook_secret STRICTLY from public.organizations (never client parameters).
- * - Validates SSRF rules (HTTPS only, private IP blocks, no redirects).
- * - Enforces short timeout (3500ms).
- * - Records persistent delivery in public.webhook_deliveries with real backoff.
- */
-export async function dispatchFileWebhook(params: {
-  payload: WebhookPayload;
-  ipAddress?: string;
-}): Promise<WebhookDispatchResult> {
-  const { payload, ipAddress = '127.0.0.1' } = params;
-
-  if (!payload.orgId) {
-    return {
-      configured: false,
-      delivered: false,
-      attempts: 0,
-      lastStatusCode: null,
-      signature: null,
-      timestamp: null,
-      error: 'NO_ORG_ID_IN_PAYLOAD',
+async function finalizeDelivery(
+  d: ClaimedDelivery,
+  outcome: { delivered: boolean; statusCode: number | null; error: string | null; terminal?: boolean }
+) {
+  if (!d.id) return;
+  const nowIso = new Date().toISOString();
+  let update: Record<string, any>;
+  if (outcome.delivered) {
+    update = { status: 'delivered', locked_until: null, last_status_code: outcome.statusCode, last_error: null, delivered_at: nowIso, updated_at: nowIso };
+  } else if (outcome.terminal || d.attempts >= d.max_attempts) {
+    update = { status: 'failed', locked_until: null, last_status_code: outcome.statusCode, last_error: outcome.error, updated_at: nowIso };
+  } else {
+    update = {
+      status: 'pending',
+      locked_until: null,
+      last_status_code: outcome.statusCode,
+      last_error: outcome.error,
+      next_retry_at: new Date(Date.now() + getBackoffSeconds(d.attempts) * 1000).toISOString(),
+      updated_at: nowIso,
     };
   }
+  // Only finalize if we still own the claim (same status and attempt number).
+  await supabase
+    .from('webhook_deliveries')
+    .update(update)
+    .eq('id', d.id)
+    .eq('status', 'sending')
+    .eq('attempts', d.attempts);
+}
 
-  // 1. Fetch organization webhook configuration strictly from DB
-  const { data: orgData, error: orgErr } = await supabase
+async function sendClaimedDelivery(d: ClaimedDelivery, ipAddress: string): Promise<WebhookDispatchResult> {
+  const base = { deliveryId: d.id, attempts: d.attempts };
+
+  // Current organization configuration (read at send time)
+  const { data: org } = await supabase
     .from('organizations')
-    .select('id, name, webhook_url, webhook_secret')
-    .eq('id', payload.orgId)
+    .select('webhook_url, webhook_secret')
+    .eq('id', d.org_id)
     .maybeSingle();
+  const webhookUrl = String(org?.webhook_url || '').trim();
+  const webhookSecret = String(org?.webhook_secret || '').trim();
 
-  if (orgErr || !orgData) {
-    return {
-      configured: false,
-      delivered: false,
-      attempts: 0,
-      lastStatusCode: null,
-      signature: null,
-      timestamp: null,
-      error: 'ORGANIZATION_NOT_FOUND',
-    };
+  if (!webhookUrl || !webhookSecret) {
+    const code = !webhookUrl ? 'WEBHOOK_NOT_CONFIGURED' : 'WEBHOOK_SECRET_NOT_CONFIGURED';
+    await finalizeDelivery(d, { delivered: false, statusCode: null, error: code, terminal: true });
+    return { ...base, configured: false, delivered: false, lastStatusCode: null, error: code };
   }
 
-  const webhookUrl = (orgData.webhook_url || '').trim();
-  const webhookSecret = (orgData.webhook_secret || '').trim();
-
-  // If organization has not configured a webhook URL, exit cleanly
-  if (!webhookUrl) {
-    return {
-      configured: false,
-      delivered: false,
-      attempts: 0,
-      lastStatusCode: null,
-      signature: null,
-      timestamp: null,
-      error: null,
-    };
-  }
-
-  // If organization configured a URL but no secret, block delivery
-  if (!webhookSecret) {
-    await addServiceLog({
-      method: 'POST',
-      action: 'WEBHOOK_SKIPPED_NO_SECRET',
-      status: 'BLOCKED',
-      userId: payload.userId || undefined,
-      orgId: payload.orgId || undefined,
-      ticketId: payload.ticketId || undefined,
-      fileId: payload.fileId,
-      ipAddress,
-      message: `Webhook omitido hacia '${webhookUrl}': la organización no tiene un webhook_secret configurado.`,
-    });
-
-    return {
-      configured: true,
-      delivered: false,
-      attempts: 0,
-      lastStatusCode: null,
-      signature: null,
-      timestamp: null,
-      error: 'WEBHOOK_SECRET_NOT_CONFIGURED',
-    };
-  }
-
-  // 2. SSRF Protection Validation
-  const ssrfCheck = await validateWebhookUrlSSRF(webhookUrl);
-  if (!ssrfCheck.valid) {
+  const ssrfError = await validateWebhookUrlSSRF(webhookUrl);
+  if (ssrfError) {
+    await finalizeDelivery(d, { delivered: false, statusCode: null, error: ssrfError, terminal: true });
     await addServiceLog({
       method: 'POST',
       action: 'WEBHOOK_SSRF_BLOCKED',
       status: 'BLOCKED',
-      userId: payload.userId || undefined,
-      orgId: payload.orgId || undefined,
-      ticketId: payload.ticketId || undefined,
-      fileId: payload.fileId,
+      orgId: d.org_id,
+      fileId: d.file_id,
       ipAddress,
-      message: `Intento de entrega de Webhook bloqueado por protección SSRF: ${ssrfCheck.error}. URL solicitada: '${webhookUrl}'.`,
+      message: `Webhook bloqueado por SSRF (${ssrfError}) hacia ${redactUrl(webhookUrl)}. deliveryId=${d.id}.`,
     });
-
-    return {
-      configured: true,
-      delivered: false,
-      attempts: 0,
-      lastStatusCode: null,
-      signature: null,
-      timestamp: null,
-      error: ssrfCheck.error || null,
-    };
+    return { ...base, configured: true, delivered: false, lastStatusCode: null, error: ssrfError };
   }
 
-  // 3. Prepare payload and signature
-  const timestamp = payload.timestamp || new Date().toISOString();
-  const payloadJson = JSON.stringify(payload);
+  const { data: file } = await supabase.from('files').select('*').eq('id', d.file_id).maybeSingle();
+  if (!file) {
+    await finalizeDelivery(d, { delivered: false, statusCode: null, error: 'FILE_NOT_FOUND', terminal: true });
+    return { ...base, configured: true, delivered: false, lastStatusCode: null, error: 'FILE_NOT_FOUND' };
+  }
+
+  const timestamp = new Date().toISOString();
+  const payloadJson = JSON.stringify(buildPayload(file, d.event_type, d.id, timestamp));
   const signature = signWebhookPayload(payloadJson, timestamp, webhookSecret);
 
-  // 4. Register delivery attempt in public.webhook_deliveries
-  let deliveryId: string | null = null;
-  try {
-    const { data: deliveryRow } = await supabase
-      .from('webhook_deliveries')
-      .insert({
-        org_id: payload.orgId,
-        file_id: payload.fileId,
-        event: payload.event,
-        target_url: webhookUrl,
-        payload: payload,
-        status: 'pending',
-        attempts: 1,
-        max_attempts: 5,
-        next_retry_at: getNextRetryDate(1).toISOString(),
-      })
-      .select('id')
-      .maybeSingle();
-
-    if (deliveryRow?.id) {
-      deliveryId = deliveryRow.id;
-    }
-  } catch (dbErr: any) {
-    // If webhook_deliveries table migration hasn't run yet, gracefully log and continue
-    console.warn('[WEBHOOK_DISPATCHER] webhook_deliveries table not yet initialized:', dbErr?.message);
-  }
-
-  // 5. Attempt Immediate HTTP Delivery
   let delivered = false;
-  let lastStatusCode: number | null = null;
-  let lastError: string | null = null;
-
+  let statusCode: number | null = null;
+  let error: string | null = null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3500); // 3.5s timeout
-
-    const response = await fetch(webhookUrl, {
+    const res = await fetch(webhookUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-webhook-signature': signature,
         'x-webhook-timestamp': timestamp,
-        'x-webhook-event': payload.event,
-        'x-webhook-attempt': '1',
+        'x-webhook-event': d.event_type,
+        'x-webhook-attempt': String(d.attempts),
+        ...(d.id ? { 'x-webhook-delivery-id': d.id } : {}),
       },
       body: payloadJson,
-      redirect: 'error', // Strict SSRF: Never follow HTTP redirects
+      redirect: 'error',
       signal: controller.signal,
+      cache: 'no-store',
     });
-
-    clearTimeout(timeout);
-    lastStatusCode = response.status;
-
-    if (response.ok) {
-      delivered = true;
-    } else {
-      lastError = `HTTP ${response.status} ${response.statusText}`;
-    }
+    statusCode = res.status;
+    delivered = res.ok;
+    if (!res.ok) error = `HTTP_${res.status}`;
+    // Body is intentionally never read or stored.
+    try { await res.body?.cancel(); } catch {}
   } catch (err: any) {
-    lastError = err?.message || 'Network, timeout or redirect error';
+    error = sanitizeFetchError(err);
+  } finally {
+    clearTimeout(timer);
   }
 
-  // 6. Update database record and write service_log
-  const nowIso = new Date().toISOString();
+  await finalizeDelivery(d, { delivered, statusCode, error });
 
-  if (delivered) {
-    if (deliveryId) {
-      try {
-        await supabase
-          .from('webhook_deliveries')
-          .update({
-            status: 'delivered',
-            last_status_code: lastStatusCode,
-            last_error: null,
-            updated_at: nowIso,
-          })
-          .eq('id', deliveryId);
-      } catch {}
-    }
+  await addServiceLog({
+    method: 'POST',
+    action: delivered ? 'WEBHOOK_SENT' : 'WEBHOOK_FAILED',
+    status: delivered ? 'DELIVERED' : d.attempts >= d.max_attempts ? 'FAILED_FINAL' : 'RETRY_SCHEDULED',
+    userId: file.user_id || undefined,
+    orgId: d.org_id,
+    ticketId: file.ticket_id || undefined,
+    fileId: d.file_id,
+    ipAddress,
+    message: `Webhook '${d.event_type}' hacia ${redactUrl(webhookUrl)}: ${delivered ? `entregado (HTTP ${statusCode})` : `fallo ${error}`}. intento=${d.attempts}/${d.max_attempts}, deliveryId=${d.id}.`,
+  });
 
-    await addServiceLog({
-      method: 'POST',
-      action: 'WEBHOOK_SENT',
-      status: 'DELIVERED',
-      userId: payload.userId || undefined,
-      orgId: payload.orgId || undefined,
-      ticketId: payload.ticketId || undefined,
-      fileId: payload.fileId,
-      ipAddress,
-      message: `Webhook '${payload.event}' entregado exitosamente a '${webhookUrl}' (HTTP ${lastStatusCode}, firma HMAC-SHA256).`,
-    });
-  } else {
-    const nextRetryIso = getNextRetryDate(1).toISOString();
-    if (deliveryId) {
-      try {
-        await supabase
-          .from('webhook_deliveries')
-          .update({
-            status: 'pending',
-            last_status_code: lastStatusCode,
-            last_error: lastError,
-            next_retry_at: nextRetryIso,
-            updated_at: nowIso,
-          })
-          .eq('id', deliveryId);
-      } catch {}
-    }
-
-    await addServiceLog({
-      method: 'POST',
-      action: 'WEBHOOK_FAILED',
-      status: 'RETRY_SCHEDULED',
-      userId: payload.userId || undefined,
-      orgId: payload.orgId || undefined,
-      ticketId: payload.ticketId || undefined,
-      fileId: payload.fileId,
-      ipAddress,
-      message: `Fallo de entrega de Webhook '${payload.event}' hacia '${webhookUrl}'. Error: ${lastError}. Reintento programado para ${nextRetryIso}.`,
-    });
-  }
-
-  return {
-    configured: true,
-    delivered,
-    deliveryId,
-    attempts: 1,
-    lastStatusCode,
-    signature,
-    timestamp,
-    error: lastError,
-  };
+  return { ...base, configured: true, delivered, lastStatusCode: statusCode, error };
 }
 
+// ============================================================================
+// 5. API pública
+// ============================================================================
+
 /**
- * Task C: Retries pending webhooks whose next_retry_at <= now().
- * Called periodically by the maintenance cron.
+ * Creates a delivery row already claimed (status='sending', attempts=1, locked_until)
+ * and sends it immediately. Because the row is born claimed, the cron's
+ * claim_webhook_deliveries() cannot pick it up concurrently.
  */
-export async function retryPendingWebhooks(): Promise<{
-  processed: number;
-  delivered: number;
-  failedAgain: number;
-  exhausted: number;
-}> {
-  const summary = {
-    processed: 0,
-    delivered: 0,
-    failedAgain: 0,
-    exhausted: 0,
+export async function dispatchFileWebhook(params: {
+  fileId: string;
+  event: WebhookEventName;
+  ipAddress?: string;
+}): Promise<WebhookDispatchResult> {
+  const { fileId, event, ipAddress = '127.0.0.1' } = params;
+  const notConfigured: WebhookDispatchResult = {
+    configured: false, delivered: false, deliveryId: null, attempts: 0, lastStatusCode: null, error: null,
   };
 
-  const nowIso = new Date().toISOString();
+  const { data: file } = await supabase.from('files').select('id, org_id').eq('id', fileId).maybeSingle();
+  if (!file?.org_id) return { ...notConfigured, error: 'FILE_NOT_FOUND' };
 
-  let pendingRows: any[] = [];
-  try {
-    const { data } = await supabase
-      .from('webhook_deliveries')
-      .select('id, org_id, file_id, event, target_url, payload, attempts, max_attempts')
-      .eq('status', 'pending')
-      .lte('next_retry_at', nowIso)
-      .limit(20);
-
-    pendingRows = data || [];
-  } catch (err: any) {
-    // If table doesn't exist yet, return empty
-    return summary;
+  const { data: org } = await supabase
+    .from('organizations')
+    .select('webhook_url, webhook_secret')
+    .eq('id', file.org_id)
+    .maybeSingle();
+  if (!String(org?.webhook_url || '').trim()) return notConfigured;
+  if (!String(org?.webhook_secret || '').trim()) {
+    await addServiceLog({
+      method: 'POST',
+      action: 'WEBHOOK_SKIPPED_NO_SECRET',
+      status: 'BLOCKED',
+      orgId: file.org_id,
+      fileId,
+      ipAddress,
+      message: 'Webhook omitido: la organización tiene webhook_url pero no webhook_secret.',
+    });
+    return { ...notConfigured, configured: true, error: 'WEBHOOK_SECRET_NOT_CONFIGURED' };
   }
 
-  for (const item of pendingRows) {
-    summary.processed++;
-    const currentAttempts = Number(item.attempts || 1);
-    const maxAttempts = Number(item.max_attempts || 5);
-    const newAttemptNumber = currentAttempts + 1;
+  const { data: row, error: insertErr } = await supabase
+    .from('webhook_deliveries')
+    .insert({
+      org_id: file.org_id,
+      file_id: fileId,
+      event_type: event,
+      status: 'sending',
+      attempts: 1,
+      max_attempts: DEFAULT_MAX_ATTEMPTS,
+      locked_until: new Date(Date.now() + SENDING_LOCK_SECONDS * 1000).toISOString(),
+    })
+    .select('id, org_id, file_id, event_type, attempts, max_attempts')
+    .maybeSingle();
 
-    // Check SSRF again before connecting
-    const ssrfCheck = await validateWebhookUrlSSRF(item.target_url);
-    if (!ssrfCheck.valid) {
-      await supabase
-        .from('webhook_deliveries')
-        .update({
-          status: 'failed',
-          last_error: ssrfCheck.error,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', item.id);
-      summary.exhausted++;
-      continue;
-    }
+  const claimed: ClaimedDelivery =
+    !insertErr && row
+      ? (row as ClaimedDelivery)
+      : // Table not migrated yet: single best-effort attempt, no persistence.
+        { id: null, org_id: file.org_id, file_id: fileId, event_type: event, attempts: 1, max_attempts: 1 };
 
-    // Read organization secret
-    const { data: orgData } = await supabase
-      .from('organizations')
-      .select('webhook_secret')
-      .eq('id', item.org_id)
-      .maybeSingle();
+  return sendClaimedDelivery(claimed, ipAddress);
+}
 
-    const webhookSecret = (orgData?.webhook_secret || '').trim();
-    if (!webhookSecret) {
-      await supabase
-        .from('webhook_deliveries')
-        .update({
-          status: 'failed',
-          last_error: 'ORGANIZATION_SECRET_REMOVED',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', item.id);
-      summary.exhausted++;
-      continue;
-    }
+/** Claims due deliveries atomically and sends them. Called from the maintenance cron. */
+export async function processPendingWebhookDeliveries(limit = 20): Promise<{
+  claimed: number;
+  delivered: number;
+  rescheduled: number;
+  failed: number;
+  error?: string;
+}> {
+  const summary = { claimed: 0, delivered: 0, rescheduled: 0, failed: 0 };
+  const { data, error } = await supabase.rpc('claim_webhook_deliveries', {
+    p_limit: limit,
+    p_lock_seconds: SENDING_LOCK_SECONDS,
+  });
+  if (error) return { ...summary, error: error.code || 'CLAIM_FAILED' };
 
-    const timestamp = new Date().toISOString();
-    const payloadJson = JSON.stringify(item.payload);
-    const signature = signWebhookPayload(payloadJson, timestamp, webhookSecret);
-
-    let delivered = false;
-    let lastStatusCode: number | null = null;
-    let lastError: string | null = null;
-
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
-
-      const response = await fetch(item.target_url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-webhook-signature': signature,
-          'x-webhook-timestamp': timestamp,
-          'x-webhook-event': item.event,
-          'x-webhook-attempt': String(newAttemptNumber),
-        },
-        body: payloadJson,
-        redirect: 'error',
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeout);
-      lastStatusCode = response.status;
-      delivered = response.ok;
-      if (!response.ok) {
-        lastError = `HTTP ${response.status} ${response.statusText}`;
-      }
-    } catch (err: any) {
-      lastError = err?.message || 'Network, timeout or redirect error';
-    }
-
-    const updateNowIso = new Date().toISOString();
-
-    if (delivered) {
-      summary.delivered++;
-      await supabase
-        .from('webhook_deliveries')
-        .update({
-          status: 'delivered',
-          attempts: newAttemptNumber,
-          last_status_code: lastStatusCode,
-          last_error: null,
-          updated_at: updateNowIso,
-        })
-        .eq('id', item.id);
-    } else {
-      if (newAttemptNumber >= maxAttempts) {
-        summary.exhausted++;
-        await supabase
-          .from('webhook_deliveries')
-          .update({
-            status: 'failed',
-            attempts: newAttemptNumber,
-            last_status_code: lastStatusCode,
-            last_error: lastError,
-            updated_at: updateNowIso,
-          })
-          .eq('id', item.id);
-      } else {
-        summary.failedAgain++;
-        const nextRetryIso = getNextRetryDate(newAttemptNumber).toISOString();
-        await supabase
-          .from('webhook_deliveries')
-          .update({
-            status: 'pending',
-            attempts: newAttemptNumber,
-            last_status_code: lastStatusCode,
-            last_error: lastError,
-            next_retry_at: nextRetryIso,
-            updated_at: updateNowIso,
-          })
-          .eq('id', item.id);
-      }
-    }
+  for (const d of (data || []) as ClaimedDelivery[]) {
+    summary.claimed++;
+    const res = await sendClaimedDelivery(d, 'cron');
+    if (res.delivered) summary.delivered++;
+    else if (d.attempts >= d.max_attempts || (res.error || '').startsWith('SSRF_') || res.error?.startsWith('WEBHOOK_') || res.error === 'FILE_NOT_FOUND') summary.failed++;
+    else summary.rescheduled++;
   }
-
   return summary;
+}
+
+/** Retention: delivered > 30 days and failed > 90 days are deleted. Called from the cron. */
+export async function purgeOldWebhookDeliveries(): Promise<{ ok: boolean; error?: string }> {
+  const now = Date.now();
+  const deliveredCutoff = new Date(now - DELIVERED_RETENTION_DAYS * 86400000).toISOString();
+  const failedCutoff = new Date(now - FAILED_RETENTION_DAYS * 86400000).toISOString();
+
+  const r1 = await supabase.from('webhook_deliveries').delete().eq('status', 'delivered').lt('updated_at', deliveredCutoff);
+  const r2 = await supabase.from('webhook_deliveries').delete().eq('status', 'failed').lt('updated_at', failedCutoff);
+  const err = r1.error || r2.error;
+  return err ? { ok: false, error: err.code || 'DELETE_FAILED' } : { ok: true };
 }

@@ -285,22 +285,8 @@ export async function processUpload(
 
     // 8. Dispatch HMAC-SHA256 Webhook if configured for the organization or request
     const webhookRes = await dispatchFileWebhook({
-      payload: {
-        event: 'file.processed',
-        timestamp: nowIso,
-        fileId,
-        ticketId: fileRow.ticket_id || null,
-        orgId: fileRow.org_id || null,
-        userId: fileRow.user_id || null,
-        status: 'processed',
-        scanStatus: 'not_scanned',
-        visibility,
-        mimeType: detectedMime,
-        sizeBytes: processedSizeBytes,
-        sha256Hash,
-        cloudfrontUrl: publicCfUrl,
-        errorMessage: null,
-      },
+      fileId,
+      event: 'file.processed',
       ipAddress,
     });
 
@@ -361,22 +347,8 @@ export async function processUpload(
     });
 
     const webhookRes = await dispatchFileWebhook({
-      payload: {
-        event: 'file.failed',
-        timestamp: failNowIso,
-        fileId,
-        ticketId: fileRow.ticket_id || null,
-        orgId: fileRow.org_id || null,
-        userId: fileRow.user_id || null,
-        status: 'failed',
-        scanStatus: 'not_scanned',
-        visibility,
-        mimeType: declaredMime,
-        sizeBytes: Number(fileRow.size_bytes || 0),
-        sha256Hash: null,
-        cloudfrontUrl: null,
-        errorMessage,
-      },
+      fileId,
+      event: 'file.failed',
       ipAddress,
     });
 

@@ -9,19 +9,63 @@ export interface SharedRateLimitResult {
   isShared: boolean;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SEGMENT_RE = /^[a-z_]+$/;
+
+/** Buckets older than this are deleted by the cron and by opportunistic cleanup. */
+export const RATE_LIMIT_BUCKET_RETENTION_MS = 24 * 60 * 60 * 1000;
+const OPPORTUNISTIC_CLEANUP_PROBABILITY = 0.01;
+
+/**
+ * Builds a rate-limit bucket key from a non-secret UUID (api_keys.id, organizations.id).
+ * Format: `<scope>:<kind>:<uuid>` — never raw API keys or IP addresses.
+ * Matches the CHECK constraint `rate_limit_buckets_key_format_check` in the database.
+ */
+export function buildRateLimitKey(scope: string, kind: string, uuid: string): string {
+  if (!SEGMENT_RE.test(scope) || !SEGMENT_RE.test(kind)) {
+    throw new Error('[RATE_LIMIT_KEY] scope/kind deben ser [a-z_]+');
+  }
+  const id = String(uuid || '').trim().toLowerCase();
+  if (!UUID_RE.test(id)) {
+    throw new Error('[RATE_LIMIT_KEY] el identificador debe ser un UUID (nunca una llave API ni una IP).');
+  }
+  return `${scope}:${kind}:${id}`;
+}
+
+/**
+ * Deletes buckets whose last_request_at is older than 1 day.
+ * Called from the maintenance cron and opportunistically from checkSharedRateLimit.
+ */
+export async function purgeStaleRateLimitBuckets(): Promise<{ ok: boolean; error?: string }> {
+  const cutoffIso = new Date(Date.now() - RATE_LIMIT_BUCKET_RETENTION_MS).toISOString();
+  const { error } = await supabase
+    .from('rate_limit_buckets')
+    .delete()
+    .lt('last_request_at', cutoffIso);
+  return error ? { ok: false, error: error.code || 'DELETE_FAILED' } : { ok: true };
+}
+
 /**
  * Checks rate limit against PostgreSQL atomic function `check_rate_limit_atomic`.
- * Shared across serverless Edge instances without new external services.
+ * Shared across serverless instances without new external services.
+ * Latency: one extra Supabase roundtrip (~40-120 ms). Applied only to /api/keys mutations.
  *
- * Latency Note:
- * Adds approximately 40ms-120ms roundtrip to Supabase.
- * Recommended use: critical mutation routes (/api/keys, /api/upload) where consistency is mandatory.
+ * `key` must come from buildRateLimitKey().
  */
 export async function checkSharedRateLimit(
   key: string,
   maxRequests: number,
   windowSeconds: number
 ): Promise<SharedRateLimitResult> {
+  const failOpen: SharedRateLimitResult = {
+    allowed: true,
+    currentCount: 0,
+    limit: maxRequests,
+    remaining: maxRequests,
+    resetSeconds: windowSeconds,
+    isShared: false,
+  };
+
   try {
     const { data, error } = await supabase.rpc('check_rate_limit_atomic', {
       p_key: key,
@@ -29,16 +73,15 @@ export async function checkSharedRateLimit(
       p_window_seconds: windowSeconds,
     });
 
-    if (error || !data || data.length === 0) {
-      // Fallback: if database function is not yet available, allow gracefully
-      return {
-        allowed: true,
-        currentCount: 1,
-        limit: maxRequests,
-        remaining: maxRequests - 1,
-        resetSeconds: windowSeconds,
-        isShared: false,
-      };
+    // Opportunistic cleanup (≈1% of calls). Failures are ignored; the cron is the backstop.
+    if (Math.random() < OPPORTUNISTIC_CLEANUP_PROBABILITY) {
+      await purgeStaleRateLimitBuckets().catch(() => undefined);
+    }
+
+    if (error || !Array.isArray(data) || data.length === 0) {
+      // Fail-open: if the function is not migrated yet or the DB fails, the
+      // in-memory Edge limiter in middleware.ts still applies.
+      return failOpen;
     }
 
     const row = data[0];
@@ -50,14 +93,7 @@ export async function checkSharedRateLimit(
       resetSeconds: Number(row.reset_seconds),
       isShared: true,
     };
-  } catch (err: any) {
-    return {
-      allowed: true,
-      currentCount: 1,
-      limit: maxRequests,
-      remaining: maxRequests - 1,
-      resetSeconds: windowSeconds,
-      isShared: false,
-    };
+  } catch {
+    return failOpen;
   }
 }

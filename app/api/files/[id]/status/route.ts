@@ -178,25 +178,16 @@ export async function POST(
 
     // Manual webhook dispatch using organization configuration
     if (triggerWebhook) {
-      const visibility =
-        String(fileRow.visibility || 'private').toLowerCase() === 'public' ? 'public' : 'private';
+      const event: 'file.uploaded' | 'file.processed' | 'file.failed' =
+        fileRow.status === 'failed'
+          ? 'file.failed'
+          : fileRow.status === 'uploaded'
+          ? 'file.uploaded'
+          : 'file.processed';
+
       const webhookRes = await dispatchFileWebhook({
-        payload: {
-          event: fileRow.status === 'failed' ? 'file.failed' : (fileRow.status === 'uploaded' ? 'file.uploaded' : 'file.processed'),
-          timestamp: new Date().toISOString(),
-          fileId: fileRow.id,
-          ticketId: fileRow.ticket_id || null,
-          orgId: fileRow.org_id || null,
-          userId: fileRow.user_id || null,
-          status: fileRow.status === 'failed' ? 'failed' : (fileRow.status === 'uploaded' ? 'uploaded' : 'processed'),
-          scanStatus: fileRow.scan_status || 'not_scanned',
-          visibility,
-          mimeType: fileRow.mime_type,
-          sizeBytes: Number(fileRow.size_bytes),
-          sha256Hash: fileRow.sha256_hash || null,
-          cloudfrontUrl: visibility === 'public' ? fileRow.cloudfront_url : null,
-          errorMessage: fileRow.error_message || null,
-        },
+        fileId: fileRow.id,
+        event,
         ipAddress: clientIp,
       });
 

@@ -17,7 +17,11 @@ import {
   listS3UploadedParts,
 } from '@/lib/s3';
 import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
-import { retryPendingWebhooks } from '@/lib/lambda-fallback/webhook-dispatcher';
+import {
+  processPendingWebhookDeliveries,
+  purgeOldWebhookDeliveries,
+} from '@/lib/lambda-fallback/webhook-dispatcher';
+import { purgeStaleRateLimitBuckets } from '@/lib/shared-rate-limit';
 import { verifyCronSecretHeader } from '@/lib/env';
 
 const corsHeaders = {
@@ -76,6 +80,8 @@ async function runMaintenanceCron(req: NextRequest) {
       newStatus: string;
     }>,
     retriedWebhooks: null as any,
+    webhookRetention: null as any,
+    rateLimitCleanup: null as any,
   };
 
   // ==========================================================================
@@ -274,10 +280,10 @@ async function runMaintenanceCron(req: NextRequest) {
   }
 
   // --------------------------------------------------------------------------
-  // 4. Retry Persistent Pending Webhooks with Real Backoff (Task C)
+  // 4. Atomic Webhook Processing with SKIP LOCKED & Backoff (Task C)
   // --------------------------------------------------------------------------
   try {
-    const webhooksSummary = await retryPendingWebhooks();
+    const webhooksSummary = await processPendingWebhookDeliveries();
     summary.retriedWebhooks = webhooksSummary;
   } catch (webhookCronErr: any) {
     console.warn('[CRON_MAINTENANCE] Error processing pending webhooks:', webhookCronErr?.message);
@@ -285,7 +291,28 @@ async function runMaintenanceCron(req: NextRequest) {
   }
 
   // --------------------------------------------------------------------------
-  // 5. Task B.11: Enforce IP address retention policy in service_logs (default 30 days)
+  // 5. Webhook Deliveries Retention (Delivered > 30d, Failed > 90d)
+  // --------------------------------------------------------------------------
+  try {
+    const webhookPurge = await purgeOldWebhookDeliveries();
+    summary.webhookRetention = webhookPurge;
+  } catch (purgeErr: any) {
+    summary.webhookRetention = { error: purgeErr?.message };
+  }
+
+  // --------------------------------------------------------------------------
+  // 6. [TEMPORARY-LAMBDA-FALLBACK: RATE-LIMIT-BUCKETS-CLEANUP]
+  // Purge stale rate limit buckets older than 1 day
+  // --------------------------------------------------------------------------
+  try {
+    const rateLimitPurge = await purgeStaleRateLimitBuckets();
+    summary.rateLimitCleanup = rateLimitPurge;
+  } catch (rlErr: any) {
+    summary.rateLimitCleanup = { error: rlErr?.message };
+  }
+
+  // --------------------------------------------------------------------------
+  // 7. Task B.11: Enforce IP address retention policy in service_logs (default 30 days)
   // --------------------------------------------------------------------------
   const ipRetentionDays = Number(searchParams.get('ipRetentionDays') ?? 30);
   const ipRetentionMinutesParam = searchParams.get('ipRetentionMinutes');

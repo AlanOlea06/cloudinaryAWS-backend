@@ -1089,22 +1089,8 @@ export async function PUT(req: NextRequest) {
   });
 
   const webhookResult = await dispatchFileWebhook({
-    payload: {
-      event: 'file.uploaded',
-      timestamp: nowIso,
-      fileId: fileRow.id,
-      ticketId: ticketId,
-      orgId: fileRow.org_id || null,
-      userId: fileRow.user_id || null,
-      status: 'uploaded',
-      scanStatus: 'not_scanned',
-      visibility: fileVisibility,
-      mimeType: fileRow.mime_type || actualMime,
-      sizeBytes: actualSize,
-      sha256Hash: fileRow.sha256_hash || null,
-      cloudfrontUrl: publicCfUrl,
-      errorMessage: null,
-    },
+    fileId: fileRow.id,
+    event: 'file.uploaded',
     ipAddress: clientIp,
   });
 

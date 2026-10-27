@@ -850,22 +850,8 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
   });
 
   const webhookResult = await dispatchFileWebhook({
-    payload: {
-      event: 'file.uploaded',
-      timestamp: new Date().toISOString(),
-      fileId: fileRow.id,
-      ticketId: fileRow.ticket_id,
-      orgId: fileRow.org_id || null,
-      userId: fileRow.user_id || null,
-      status: 'uploaded',
-      scanStatus: 'not_scanned',
-      visibility: fileRow.visibility,
-      mimeType: fileRow.mime_type || declaredMime,
-      sizeBytes: actualSize,
-      sha256Hash: fileRow.sha256_hash || null,
-      cloudfrontUrl: publicCfUrl,
-      errorMessage: null,
-    },
+    fileId: fileRow.id,
+    event: 'file.uploaded',
     ipAddress,
   });
 
