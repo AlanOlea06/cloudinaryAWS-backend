@@ -337,10 +337,13 @@ export async function generatePresignedUploadUrl(
     signable.add('content-disposition');
   }
 
+  const unhoistable = new Set<string>();
   if (checksumSha256Hex && /^[0-9a-f]{64}$/i.test(checksumSha256Hex.trim())) {
     const base64Sha256 = Buffer.from(checksumSha256Hex.trim(), 'hex').toString('base64');
     putParams.ChecksumSHA256 = base64Sha256;
+    putParams.ChecksumAlgorithm = 'SHA256';
     signable.add('x-amz-checksum-sha256');
+    unhoistable.add('x-amz-checksum-sha256');
   }
 
   const command = new PutObjectCommand(putParams as any);
@@ -348,6 +351,7 @@ export async function generatePresignedUploadUrl(
   return await getSignedUrl(client, command, {
     expiresIn: expiresInSeconds,
     signableHeaders: signable,
+    unhoistableHeaders: unhoistable,
   });
 }
 
