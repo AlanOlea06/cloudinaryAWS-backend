@@ -23,6 +23,13 @@ export function getSupabaseClient(): SupabaseClient {
         persistSession: false,
         autoRefreshToken: false,
       },
+      global: {
+        fetch: (fetchUrl, options = {}) =>
+          fetch(fetchUrl, {
+            ...options,
+            cache: 'no-store',
+          }),
+      },
     });
     cachedUrl = url;
     cachedKey = key;

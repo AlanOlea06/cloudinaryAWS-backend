@@ -174,102 +174,171 @@ export async function addServiceLog(logInput: {
   return newLog;
 }
 
-/**
- * Fetches recent audit logs from Supabase (service_logs table) and correlates with files, users, and organizations
- */
-export async function getServiceLogs(): Promise<ServiceLog[]> {
-  try {
-    // 1. Query service_logs
-    const { data, error } = await supabase
-      .from('service_logs')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(100);
+export interface PaginatedServiceLogs {
+  logs: ServiceLog[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
 
-    // 2. Correlate with files, users, and organizations in parallel
-    const [filesRes, usersRes, orgsRes] = await Promise.all([
-      supabase.from('files').select('*').limit(100),
-      supabase.from('users').select('id, name').limit(100),
-      supabase.from('organizations').select('id, name').limit(100),
+/**
+ * Fetches audit logs from Supabase (service_logs table) with pagination,
+ * sorted strictly from newest to oldest (id DESC, created_at DESC).
+ */
+export async function getServiceLogs(options?: {
+  page?: number;
+  limit?: number;
+}): Promise<PaginatedServiceLogs> {
+  const page = Math.max(1, Number(options?.page) || 1);
+  const limit = Math.max(1, Math.min(100, Number(options?.limit) || 20));
+  const offset = (page - 1) * limit;
+
+  try {
+    // 1. Query service_logs with exact total count and newest first
+    const { data, count, error } = await supabase
+      .from('service_logs')
+      .select('*', { count: 'exact' })
+      .order('id', { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) {
+      console.warn('Error querying service_logs from Supabase:', error.message);
+      throw error;
+    }
+
+    const total = count ?? data?.length ?? 0;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+
+    if (!data || data.length === 0) {
+      return {
+        logs: [],
+        total,
+        page,
+        limit,
+        totalPages,
+      };
+    }
+
+    // 2. Correlate with files, users, and organizations referenced in this page
+    const fileIds = Array.from(new Set(data.map((r: any) => r.file_id).filter(Boolean)));
+    const ticketIds = Array.from(new Set(data.map((r: any) => r.ticket_id).filter(Boolean)));
+    const userIds = Array.from(new Set(data.map((r: any) => r.user_id).filter(Boolean)));
+    const orgIds = Array.from(new Set(data.map((r: any) => r.org_id).filter(Boolean)));
+
+    const [filesByIdRes, filesByTicketRes, usersRes, orgsRes] = await Promise.all([
+      fileIds.length > 0
+        ? supabase.from('files').select('*').in('id', fileIds)
+        : Promise.resolve({ data: [] }),
+      ticketIds.length > 0
+        ? supabase.from('files').select('*').in('ticket_id', ticketIds)
+        : Promise.resolve({ data: [] }),
+      userIds.length > 0
+        ? supabase.from('users').select('id, name').in('id', userIds)
+        : Promise.resolve({ data: [] }),
+      orgIds.length > 0
+        ? supabase.from('organizations').select('id, name').in('id', orgIds)
+        : Promise.resolve({ data: [] }),
     ]);
 
     const filesByTicket: Record<string, any> = {};
     const filesById: Record<string, any> = {};
-    if (filesRes.data) {
-      for (const f of filesRes.data) {
-        if (f.ticket_id) filesByTicket[f.ticket_id] = f;
+    if (filesByIdRes.data) {
+      for (const f of filesByIdRes.data as any[]) {
         if (f.id) filesById[f.id] = f;
+        if (f.ticket_id) filesByTicket[f.ticket_id] = f;
+      }
+    }
+    if (filesByTicketRes.data) {
+      for (const f of filesByTicketRes.data as any[]) {
+        if (f.id) filesById[f.id] = f;
+        if (f.ticket_id) filesByTicket[f.ticket_id] = f;
       }
     }
 
     const usersById: Record<string, string> = {};
     if (usersRes.data) {
-      for (const u of usersRes.data) {
+      for (const u of usersRes.data as any[]) {
         usersById[u.id] = u.name;
       }
     }
 
     const orgsById: Record<string, string> = {};
     if (orgsRes.data) {
-      for (const o of orgsRes.data) {
+      for (const o of orgsRes.data as any[]) {
         orgsById[o.id] = o.name;
       }
     }
 
-    if (!error && data && data.length > 0) {
-      return data.map((row: any) => {
-        const action = row.action || '';
-        const status = row.status || '';
-        const ticketId = row.ticket_id || row.details?.ticketId || null;
-        const fileId = row.file_id || row.details?.fileId || null;
-        const matchedFile = (ticketId ? filesByTicket[ticketId] : null) || (fileId ? filesById[fileId] : null);
+    const logs: ServiceLog[] = data.map((row: any) => {
+      const action = row.action || '';
+      const status = row.status || '';
+      const ticketId = row.ticket_id || row.details?.ticketId || null;
+      const fileId = row.file_id || row.details?.fileId || null;
+      const matchedFile = (ticketId ? filesByTicket[ticketId] : null) || (fileId ? filesById[fileId] : null);
 
-        const userId = row.user_id || matchedFile?.user_id || null;
-        const userName = (userId && usersById[userId]) || row.details?.userName || null;
-        const orgId = row.org_id || matchedFile?.org_id || null;
-        const orgName = (orgId && orgsById[orgId]) || row.details?.orgName || null;
+      const userId = row.user_id || matchedFile?.user_id || null;
+      const userName = (userId && usersById[userId]) || row.details?.userName || null;
+      const orgId = row.org_id || matchedFile?.org_id || null;
+      const orgName = (orgId && orgsById[orgId]) || row.details?.orgName || null;
 
-        const fileName = matchedFile?.original_name || row.file_name || row.details?.fileName || null;
-        const extension = matchedFile?.extension || (fileName && fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : null);
-        const mimeType = matchedFile?.mime_type || row.details?.mimeType || null;
-        const fileSize = matchedFile?.size_bytes ?? row.details?.fileSize ?? null;
-        const resourceType = matchedFile?.resource_type || row.details?.resourceType || null;
-        const visibility = matchedFile?.visibility || row.details?.visibility || null;
-        const method = row.http_method || row.details?.method || (action === 'S3_UPLOAD_CONFIRMED' ? 'PUT' : 'POST');
-        const ipAddress = row.ip_address || row.details?.ip || null;
-        const message = row.message || row.details?.message || row.details?.reason || row.details?.alert || null;
+      const fileName = matchedFile?.original_name || row.file_name || row.details?.fileName || null;
+      const extension = matchedFile?.extension || (fileName && fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')).toLowerCase() : null);
+      const mimeType = matchedFile?.mime_type || row.details?.mimeType || null;
+      const fileSize = matchedFile?.size_bytes ?? row.details?.fileSize ?? null;
+      const resourceType = matchedFile?.resource_type || row.details?.resourceType || null;
+      const visibility = matchedFile?.visibility || row.details?.visibility || null;
+      const method = row.http_method || row.details?.method || (action === 'S3_UPLOAD_CONFIRMED' ? 'PUT' : 'POST');
+      const ipAddress = row.ip_address || row.details?.ip || null;
+      const message = row.message || row.details?.message || row.details?.reason || row.details?.alert || null;
 
-        return {
-          id: row.id,
-          timestamp: row.created_at,
-          method,
-          action,
-          status,
-          ticketId,
-          fileId: fileId || matchedFile?.id || null,
-          userId,
-          userName,
-          orgId,
-          orgName,
-          targetOrgId: null,
-          fileName,
-          extension,
-          mimeType,
-          fileSize,
-          resourceType,
-          visibility,
-          uploadUrl: null,
-          ipAddress,
-          message,
-          details: {},
-        };
-      });
-    }
+      return {
+        id: row.id,
+        timestamp: row.created_at,
+        method,
+        action,
+        status,
+        ticketId,
+        fileId: fileId || matchedFile?.id || null,
+        userId,
+        userName,
+        orgId,
+        orgName,
+        targetOrgId: null,
+        fileName,
+        extension,
+        mimeType,
+        fileSize,
+        resourceType,
+        visibility,
+        uploadUrl: null,
+        ipAddress,
+        message,
+        details: {},
+      };
+    });
+
+    return {
+      logs,
+      total,
+      page,
+      limit,
+      totalPages,
+    };
   } catch (err) {
     console.warn('Fallback to in-memory logs:', err);
+    const inMem = globalForLogs.serviceLogs || [];
+    const total = inMem.length;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const paged = inMem.slice(offset, offset + limit);
+    return {
+      logs: paged,
+      total,
+      page,
+      limit,
+      totalPages,
+    };
   }
-
-  return globalForLogs.serviceLogs || [];
 }
 
 /**

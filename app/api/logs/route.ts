@@ -2,11 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServiceLogs, clearServiceLogs } from '@/lib/service-logs';
 import { verifyAdminSecretHeader } from '@/lib/env';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-secret',
   'X-Content-Type-Options': 'nosniff',
+  'Cache-Control': 'private, no-store, no-cache, max-age=0, must-revalidate',
 };
 
 export async function OPTIONS() {
@@ -32,12 +36,23 @@ export async function GET(req: NextRequest) {
   const authError = enforceAdminAuth(req);
   if (authError) return authError;
 
-  const logs = await getServiceLogs();
+  const url = new URL(req.url);
+  const pageParam = url.searchParams.get('page');
+  const limitParam = url.searchParams.get('limit');
+
+  const page = pageParam ? Math.max(1, parseInt(pageParam, 10) || 1) : 1;
+  const limit = limitParam ? Math.max(1, Math.min(100, parseInt(limitParam, 10) || 20)) : 20;
+
+  const result = await getServiceLogs({ page, limit });
 
   return NextResponse.json(
     {
-      count: logs.length,
-      logs,
+      count: result.total,
+      total: result.total,
+      page: result.page,
+      limit: result.limit,
+      totalPages: result.totalPages,
+      logs: result.logs,
     },
     { status: 200, headers: corsHeaders }
   );
