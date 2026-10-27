@@ -17,16 +17,6 @@ const SEGMENT_RE = /^[a-z_]+$/;
 export const RATE_LIMIT_BUCKET_RETENTION_MS = 24 * 60 * 60 * 1000;
 const OPPORTUNISTIC_CLEANUP_PROBABILITY = 0.01;
 
-import { requireEnv } from '@/lib/env';
-
-/**
- * Returns the salt used for hashing sensitive identifiers (e.g. client IP) in rate limit keys.
- * Reads mandatory `RATE_LIMIT_SALT`. Throws an explicit error immediately if missing. No fallbacks.
- */
-export function getRateLimitSalt(): string {
-  return requireEnv('RATE_LIMIT_SALT');
-}
-
 /**
  * Builds a rate-limit bucket key from a non-secret UUID (api_keys.id, organizations.id).
  * Format: `<scope>:<kind>:<uuid>` — never raw API keys or IP addresses.
@@ -45,7 +35,7 @@ export function buildRateLimitKey(scope: string, kind: string, uuid: string): st
 
 /**
  * Builds a rate-limit bucket key from a sensitive identifier (e.g., client IP address).
- * Format: `<scope>:<kind>:h:<sha256hex>` — HMAC-SHA256 with server salt, never cleartext.
+ * Format: `<scope>:<kind>:h:<sha256hex>` — SHA256 hash, never cleartext.
  * Matches the CHECK constraint `rate_limit_buckets_key_format_check` in the database.
  */
 export function buildHashedRateLimitKey(scope: string, kind: string, rawIdentifier: string): string {
@@ -56,8 +46,7 @@ export function buildHashedRateLimitKey(scope: string, kind: string, rawIdentifi
   if (!id) {
     throw new Error('[RATE_LIMIT_KEY] el identificador no puede estar vacío');
   }
-  const salt = getRateLimitSalt();
-  const hash = crypto.createHmac('sha256', salt).update(id).digest('hex');
+  const hash = crypto.createHash('sha256').update(id).digest('hex');
   return `${scope}:${kind}:h:${hash}`;
 }
 
