@@ -18,7 +18,7 @@ import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/tick
 import { getBaseCloudFrontUrl } from '@/lib/cloudfront';
 import { detectMagicBytesMime } from '@/lib/magic-bytes';
 import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
-import { dispatchFileWebhook } from '@/lib/lambda-fallback/webhook-dispatcher';
+import { dispatchFileWebhook, processPendingWebhookDeliveries } from '@/lib/lambda-fallback/webhook-dispatcher';
 import { checkOrganizationQuotas } from '@/lib/quotas';
 
 const corsHeaders = {
@@ -854,6 +854,11 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
     event: 'file.uploaded',
     ipAddress,
   });
+
+  // Procesamiento oportunista de webhooks pendientes (10% de probabilidad, máx 2 entregas)
+  if (Math.random() < 0.1) {
+    await processPendingWebhookDeliveries(2).catch(() => undefined);
+  }
 
   return NextResponse.json(
     {
