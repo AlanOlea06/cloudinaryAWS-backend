@@ -620,7 +620,25 @@
           ]
         },
         "description": "Valida existencia del objeto en S3, lee los primeros 32 bytes (Range GET) para verificar el magic number real, valida checksum SHA-256 de S3 y marca el estado como 'uploaded'."
-      }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Estado HTTP es 200', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "const json = pm.response.json();",
+              "pm.test('Archivo confirmado con fileStatus = uploaded', function () {",
+              "    pm.expect(json.fileStatus).to.eql('uploaded');",
+              "    pm.expect(json.status).to.eql('success');",
+              "});"
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "3.1 Obtener URL de Entrega (GET /api/files/:id)",
