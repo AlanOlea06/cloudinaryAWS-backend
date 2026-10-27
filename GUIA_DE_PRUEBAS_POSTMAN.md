@@ -2,8 +2,8 @@
 
 > **Servicio:** Cloudinary Clone Backend (Vercel Serverless)  
 > **URL Base:** `https://cloudinary-aws-backend.vercel.app`  
-> **Versión Actual:** Sección 3 Reforzada (Doble Autenticación de Llaves: Raíz + Delegadas, Control Atómico de Cupos con Bloqueo de Fila) y Sección 5 (Subida Directa a S3, Range GET 32b, S3 Checksum SHA-256, Estados `uploaded`/`not_scanned`, y **Cero Archivos por Vercel**)  
-> **Fecha:** 26 de Octubre de 2026
+> **Versión Actual:** 2.0.0 (Hardening Batch - Sincronizado)  
+> **Fecha:** 27 de Octubre de 2026
 
 ---
 
@@ -12,15 +12,16 @@
 | Ruta | Método | Credencial / Cabecera Requerida | Propósito / Quién la usa |
 |---|---|---|---|
 | `/api/keys` | POST, GET, PATCH, DELETE | `x-admin-secret: <ADMIN_API_SECRET>`<br>-- **O** --<br>`x-api-key: sk_live_...` *(con `can_manage_keys=true`)* | **Doble Autenticación:**<br>1. **Administrador de plataforma (`x-admin-secret`):** Control total entre organizaciones, puede otorgar `canManageKeys=true` y convertir llaves existentes vía `PATCH`.<br>2. **Llave Maestra de Organización (`x-api-key` con `can_manage_keys=true`):** Autoservicio para su propia organización (ignora `orgId` del body, siempre crea con `can_manage_keys=false`, anti-escalada y anti-autoeliminación). |
+| `/api/organizations` | GET, PATCH | `x-admin-secret: <ADMIN_API_SECRET>`<br>-- **O** --<br>`x-api-key: sk_live_...` *(con `can_manage_keys=true`)* | **Doble Autenticación:**<br>1. **Administrador (`x-admin-secret`):** Modifica cuotas (`max_storage_bytes`, `max_pending_tickets`, `max_api_keys`), nombres y webhooks de cualquier org.<br>2. **Llave Maestra (`can_manage_keys=true`):** Solo puede consultar y actualizar `webhook_url` y `webhook_secret` de su propia org (intento de tocar cuotas retorna 403 `FORBIDDEN_QUOTA_MODIFICATION`). |
 | `/api/logs` | GET, PATCH, DELETE | `x-admin-secret: <ADMIN_API_SECRET>` | Consulta y limpieza de auditoría global en `service_logs`. |
 | `/api/records` | GET, DELETE | `x-admin-secret: <ADMIN_API_SECRET>` | Consulta y limpieza administrativa de `public.files`. |
 | `/api/users` | GET | `x-admin-secret: <ADMIN_API_SECRET>` | Catálogo de usuarios y organizaciones registradas. |
-| `/api/cron/maintenance` | GET, POST | `Authorization: Bearer <CRON_SECRET>` | Limpieza de tickets expirados y multiparts abortados. |
-| `/api/upload` | POST, PUT | `x-api-key: sk_live_...`<br>`x-user-id: <UUID_usuario>` | Solicitud de ticket prefirmado y confirmación con Range GET 32b. |
-| `/api/upload/multipart` | POST, GET, DELETE | `x-api-key: sk_live_...`<br>`x-user-id: <UUID_usuario>` | Subida multipart para archivos grandes (>25 MB). |
+| `/api/cron/maintenance` | GET, POST | `Authorization: Bearer <CRON_SECRET>` | Limpieza de tickets expirados, multiparts abortados y rate limits. |
+| `/api/upload` | POST, PUT | `x-api-key: sk_live_...`<br>`x-user-id: <UUID_usuario>` | Solicitud de ticket prefirmado y confirmación con Range GET 32b (422 si magic bytes discrepan). |
+| `/api/upload/multipart` | POST, GET, PUT, DELETE | `x-api-key: sk_live_...`<br>`x-user-id: <UUID_usuario>` | Subida multipart para archivos grandes (>25 MB) con Range GET 32b. |
 | `/api/files` | GET, DELETE | `x-api-key: sk_live_...` | Listar archivos de la organización o eliminación. |
 | `/api/files/:id` | GET, DELETE | `x-api-key: sk_live_...`<br>*(+ `x-user-id` si es privado)* | Descargar URL prefirmada de S3 (5 min) o CDN CloudFront. |
-| `/api/files/:id/status`| GET | `x-api-key: sk_live_...` | Consultar estado del archivo en base de datos. |
+| `/api/files/:id/status`| GET, POST | `x-api-key: sk_live_...` | Consultar estado del archivo en base de datos o re-despacho de webhook. |
 
 ---
 
@@ -341,7 +342,19 @@
       "detectedMimeType": "image/png"
     }
   }
+* **Respuesta de Rechazo por Seguridad de Magic Bytes (HTTP 422 Unprocessable Entity):**
+  Si el binario subido a S3 no coincide con los magic bytes del formato declarado (ej. un `.png` con contenido de texto plano o script):
+  ```json
+  {
+    "error": "Unprocessable Entity",
+    "code": "MAGIC_BYTES_MISMATCH",
+    "method": "PUT",
+    "message": "Cabecera binaria inválida: detectado 'desconocido' no coincide con el tipo MIME declarado 'image/png'.",
+    "detectedMime": "desconocido",
+    "declaredMime": "image/png"
+  }
   ```
+  *(El backend purga automáticamente el objeto corrupto de AWS S3 y marca el registro como `failed` en Supabase).*
 
 ---
 

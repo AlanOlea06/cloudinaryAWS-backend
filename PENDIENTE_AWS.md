@@ -1,6 +1,7 @@
 # PENDIENTE_AWS.md: Requerimientos de Infraestructura AWS, Deuda Técnica y Limitaciones
 
-> **Versión:** 1.1.0 (Hardening Batch - Secciones 5 y 3)  
+> **Versión:** 2.0.0  
+> **Fecha:** 27 de Octubre de 2026  
 > **Alcance:** Proyecto Cloudinary Clone (Backend Next.js en Vercel)  
 > **Cuenta AWS:** `418272802078` | **Región:** `us-east-1`  
 > **Bucket S3 Actual:** `practicas-alan-418272802078`  
