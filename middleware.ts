@@ -210,6 +210,11 @@ export async function middleware(request: NextRequest) {
     return applySecurityHeaders(NextResponse.next());
   }
 
+  // 1.b Webhook receiver endpoint (/api/webhooks/test-receiver POST) authenticates via HMAC-SHA256 signature inside the route handler
+  if (pathname === '/api/webhooks/test-receiver' && method === 'POST') {
+    return applySecurityHeaders(NextResponse.next());
+  }
+
   // 2. Disable /api/img in production until the transformations stage
   if (pathname === '/api/img' || pathname.startsWith('/api/img/')) {
     if (isProd) {
