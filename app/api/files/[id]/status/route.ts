@@ -7,7 +7,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { processUpload } from '@/lib/lambda-fallback/process-upload';
+import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
 import { dispatchFileWebhook } from '@/lib/lambda-fallback/webhook-dispatcher';
 
 const corsHeaders = {
@@ -101,7 +101,7 @@ export async function GET(
         sizeBytes: Number(fileRow.size_bytes),
         sha256Hash: fileRow.sha256_hash || null,
         visibility,
-        processingStatus: fileRow.s3_processed_key ? 'processed' : fileRow.status,
+        fileStatus: fileRow.status,
         dbStatus: fileRow.status,
         scanStatus: fileRow.scan_status || 'not_scanned',
         cloudfrontUrl: visibility === 'public' ? fileRow.cloudfront_url : null,
@@ -212,6 +212,21 @@ export async function POST(
           webhook: webhookRes,
         },
         { status: webhookRes.delivered ? 200 : 502, headers: corsHeaders }
+      );
+    }
+
+    if (!ENABLE_SERVER_PROCESSING_FALLBACK) {
+      return NextResponse.json(
+        {
+          error: 'Bad Request',
+          code: 'SERVER_PROCESSING_DISABLED',
+          message:
+            '[TEST-ONLY] El procesamiento completo en Vercel está desactivado por diseño ("Ningún archivo pasa por Vercel"). Las transformaciones profundas y escaneo quedan diferidas a AWS Lambda.',
+          fileId: fileRow.id,
+          fileStatus: fileRow.status,
+          scanStatus: fileRow.scan_status || 'not_scanned',
+        },
+        { status: 400, headers: corsHeaders }
       );
     }
 

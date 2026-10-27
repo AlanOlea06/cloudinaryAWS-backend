@@ -305,6 +305,7 @@ export function getS3Client(): S3Client {
  * @param cacheControl Cache-Control header to sign (defaults to no-store for pending/private)
  * @param contentLength Exact file size in bytes to enforce at S3 level
  * @param contentDisposition Optional Content-Disposition header (e.g. 'attachment' for .pdf)
+ * @param checksumSha256Hex Optional hex-encoded SHA-256 hash to enforce at S3 level via x-amz-checksum-sha256
  */
 export async function generatePresignedUploadUrl(
   key: string,
@@ -312,7 +313,8 @@ export async function generatePresignedUploadUrl(
   expiresInSeconds: number = 300,
   cacheControl: string = PRIVATE_NO_STORE_CACHE_CONTROL,
   contentLength?: number,
-  contentDisposition?: 'inline' | 'attachment'
+  contentDisposition?: 'inline' | 'attachment',
+  checksumSha256Hex?: string
 ): Promise<string | null> {
   const client = getS3Client();
   const bucketName = getS3BucketName();
@@ -335,6 +337,12 @@ export async function generatePresignedUploadUrl(
     signable.add('content-disposition');
   }
 
+  if (checksumSha256Hex && /^[0-9a-f]{64}$/i.test(checksumSha256Hex.trim())) {
+    const base64Sha256 = Buffer.from(checksumSha256Hex.trim(), 'hex').toString('base64');
+    putParams.ChecksumSHA256 = base64Sha256;
+    signable.add('x-amz-checksum-sha256');
+  }
+
   const command = new PutObjectCommand(putParams as any);
 
   return await getSignedUrl(client, command, {
@@ -354,6 +362,7 @@ export interface S3HeadMetadata {
   cacheControl: string | null;
   contentDisposition: string | null;
   eTag: string | null;
+  checksumSHA256: string | null;
 }
 
 export async function headS3Object(key: string): Promise<S3HeadMetadata> {
@@ -365,6 +374,7 @@ export async function headS3Object(key: string): Promise<S3HeadMetadata> {
       cacheControl: null,
       contentDisposition: null,
       eTag: null,
+      checksumSHA256: null,
     };
   }
   const client = getS3Client();
@@ -375,6 +385,7 @@ export async function headS3Object(key: string): Promise<S3HeadMetadata> {
       new HeadObjectCommand({
         Bucket: bucketName,
         Key: key.replace(/^\/+/, ''),
+        ChecksumMode: 'ENABLED',
       })
     );
     return {
@@ -384,6 +395,7 @@ export async function headS3Object(key: string): Promise<S3HeadMetadata> {
       cacheControl: res.CacheControl || null,
       contentDisposition: res.ContentDisposition || null,
       eTag: res.ETag || null,
+      checksumSHA256: res.ChecksumSHA256 || null,
     };
   } catch (err: any) {
     if (
@@ -398,9 +410,41 @@ export async function headS3Object(key: string): Promise<S3HeadMetadata> {
         cacheControl: null,
         contentDisposition: null,
         eTag: null,
+        checksumSHA256: null,
       };
     }
     throw err;
+  }
+}
+
+/**
+ * Reads a small byte range (default 0-31 for the first 32 bytes) from an S3 object using HTTP Range GET.
+ * Reads ONLY the requested bytes without downloading the complete file to the server.
+ */
+export async function getS3ObjectRangeBytes(
+  key: string,
+  start: number = 0,
+  end: number = 31
+): Promise<Buffer | null> {
+  if (!key) return null;
+  const client = getS3Client();
+  const bucketName = getS3BucketName();
+
+  try {
+    const res = await client.send(
+      new GetObjectCommand({
+        Bucket: bucketName,
+        Key: key.replace(/^\/+/, ''),
+        Range: `bytes=${start}-${end}`,
+      })
+    );
+
+    if (!res.Body) return null;
+    const byteArray = await res.Body.transformToByteArray();
+    return Buffer.from(byteArray);
+  } catch (err: any) {
+    console.error('Error fetching S3 object range bytes:', err?.message || err);
+    return null;
   }
 }
 

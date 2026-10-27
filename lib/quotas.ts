@@ -50,7 +50,7 @@ export async function checkOrganizationQuotas(
     .from('files')
     .select('id, status, size_bytes')
     .eq('org_id', orgId)
-    .in('status', ['pending_upload', 'completed', 'processed']);
+    .in('status', ['pending_upload', 'uploaded', 'completed', 'processed']);
 
   const filesList = orgFiles || [];
   const currentPendingTickets = filesList.filter((f) => f.status === 'pending_upload').length;

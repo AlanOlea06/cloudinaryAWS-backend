@@ -1,19 +1,21 @@
 // ============================================================================
-// [TEMPORARY-LAMBDA-FALLBACK: TASK-B6-PROCESS-UPLOAD]
-// UBICACIÓN RÁPIDA PARA MIGRACIÓN O ELIMINACIÓN CUANDO EXISTA AWS LAMBDA:
-// Búsqueda rápida en el proyecto: "TEMPORARY-LAMBDA-FALLBACK"
+// [TEST-ONLY: TASK-B6-PROCESS-UPLOAD]
+// AVISO ARQUITECTÓNICO IMPORTANTE:
+// Este módulo descarga el archivo completo a Vercel para procesarlo con Sharp.
+// Por regla arquitectónica general ("Ningún archivo pasa por Vercel"), este
+// procesamiento está DESACTIVADO POR DEFECTO mediante el interruptor
+// `ENABLE_SERVER_PROCESSING_FALLBACK`.
 //
-// ¿QUÉ HACE ESTE ARCHIVO?
-// Reemplaza temporalmente en Vercel el procesamiento asíncrono que haría la
-// función AWS Lambda (Pasos 1.5.3 y 1.6.3 bloqueados por permisos IAM).
+// EN PRODUCCIÓN:
+// Los archivos van directo de Cliente a S3 / CloudFront sin pasar por Vercel.
 //
-// ¿CÓMO MIGRARLO A AWS LAMBDA CUANDO EL ADMINISTRADOR HABILITE LOS PERMISOS?
-// 1. Copia la función `processUpload(fileId)` y `detectMagicBytesMime(buffer)`
-//    al handler de tu función Lambda (ver plantilla `lambdaHandler` al final
-//    de este archivo).
-// 2. En `servicio/app/api/upload/route.ts` (busca `TEMPORARY-LAMBDA-FALLBACK`),
-//    elimina o comenta la llamada a `processUpload(...)` para que sea S3 Event
-//    Notifications / EventBridge quien dispare la Lambda automáticamente.
+// LIMITACIONES CONOCIDAS AL NO PROCESAR EN VERCEL (Pendientes de AWS Lambda):
+// 1. NO se limpia la metadata EXIF (las imágenes conservan su metadata original).
+// 2. NO se realiza escaneo antivirus/malware profundo (`scan_status = 'not_scanned'`).
+// 3. El archivo permanece en su clave original sin promoción.
+//
+// ¿CÓMO RETIRARLO CUANDO EXISTA AWS LAMBDA?
+// Ver documentación completa en PENDIENTE_AWS.md (Sección B).
 // ============================================================================
 
 import crypto from 'crypto';
@@ -28,10 +30,18 @@ import {
   deleteS3Object,
 } from '@/lib/s3';
 import { getBaseCloudFrontUrl } from '@/lib/cloudfront';
+import { detectMagicBytesMime } from '@/lib/magic-bytes';
 import {
   dispatchFileWebhook,
   WebhookDispatchResult,
 } from '@/lib/lambda-fallback/webhook-dispatcher';
+
+/**
+ * [TEST-ONLY] Interruptor de pruebas locales. Desactivado por defecto.
+ * En producción debe ser 'false' para garantizar que ningún archivo pase por Vercel.
+ */
+export const ENABLE_SERVER_PROCESSING_FALLBACK =
+  process.env.ENABLE_SERVER_PROCESSING_FALLBACK === 'true';
 
 export interface ProcessUploadOptions {
   webhookUrl?: string | null;
@@ -56,77 +66,7 @@ export interface ProcessUploadResult {
   webhook: WebhookDispatchResult | null;
 }
 
-/**
- * Inspects the raw binary header (magic bytes) to determine the true MIME type of the file,
- * independent of the client-declared Content-Type or file extension.
- */
-export function detectMagicBytesMime(buffer: Buffer): string | null {
-  if (!buffer || buffer.length < 4) {
-    return null;
-  }
-
-  // 1. PNG: 89 50 4E 47 0D 0A 1A 0A
-  if (
-    buffer.length >= 8 &&
-    buffer[0] === 0x89 &&
-    buffer[1] === 0x50 &&
-    buffer[2] === 0x4e &&
-    buffer[3] === 0x47 &&
-    buffer[4] === 0x0d &&
-    buffer[5] === 0x0a &&
-    buffer[6] === 0x1a &&
-    buffer[7] === 0x0a
-  ) {
-    return 'image/png';
-  }
-
-  // 2. JPEG: FF D8 FF
-  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
-    return 'image/jpeg';
-  }
-
-  // 3. GIF: "GIF87a" or "GIF89a" (47 49 46 38 37/39 61)
-  if (
-    buffer.length >= 6 &&
-    buffer[0] === 0x47 &&
-    buffer[1] === 0x49 &&
-    buffer[2] === 0x46 &&
-    buffer[3] === 0x38 &&
-    (buffer[4] === 0x37 || buffer[4] === 0x39) &&
-    buffer[5] === 0x61
-  ) {
-    return 'image/gif';
-  }
-
-  // 4. WEBP: "RIFF" (0..3) + "WEBP" (8..11)
-  if (
-    buffer.length >= 12 &&
-    buffer[0] === 0x52 &&
-    buffer[1] === 0x49 &&
-    buffer[2] === 0x46 &&
-    buffer[3] === 0x46 &&
-    buffer[8] === 0x57 &&
-    buffer[9] === 0x45 &&
-    buffer[10] === 0x42 &&
-    buffer[11] === 0x50
-  ) {
-    return 'image/webp';
-  }
-
-  // 5. PDF: "%PDF-" (25 50 44 46 2D)
-  if (
-    buffer.length >= 5 &&
-    buffer[0] === 0x25 &&
-    buffer[1] === 0x50 &&
-    buffer[2] === 0x44 &&
-    buffer[3] === 0x46 &&
-    buffer[4] === 0x2d
-  ) {
-    return 'application/pdf';
-  }
-
-  return null;
-}
+export { detectMagicBytesMime };
 
 /**
  * Task B.6: Trigger-independent file processor (`processUpload(fileId)`).
@@ -144,6 +84,26 @@ export async function processUpload(
 ): Promise<ProcessUploadResult> {
   const ipAddress = options.ipAddress || '127.0.0.1';
   const triggerSource = options.triggerSource || 'put_confirm';
+
+  // [TEST-ONLY] Guard: Prevent execution in production when switch is disabled
+  if (!ENABLE_SERVER_PROCESSING_FALLBACK) {
+    return {
+      success: false,
+      fileId,
+      status: 'failed',
+      scanStatus: 'not_scanned',
+      code: 'SERVER_PROCESSING_DISABLED',
+      message:
+        '[TEST-ONLY] El procesamiento completo en Vercel está desactivado por diseño ("Ningún archivo pasa por Vercel").',
+      cloudfrontUrl: null,
+      originalSizeBytes: null,
+      processedSizeBytes: null,
+      detectedMimeType: null,
+      exifStripped: false,
+      sha256Hash: null,
+      webhook: null,
+    };
+  }
 
   // 1. Fetch file record from Supabase
   const { data: fileRow, error: fetchErr } = await supabase

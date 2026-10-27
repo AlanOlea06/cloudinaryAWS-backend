@@ -12,10 +12,12 @@ import {
   abortS3MultipartUpload,
   headS3Object,
   deleteS3Object,
+  getS3ObjectRangeBytes,
 } from '@/lib/s3';
 import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/ticket-token';
-// [TEMPORARY-LAMBDA-FALLBACK: TASK-B6-IMPORT-MULTIPART]
-import { processUpload } from '@/lib/lambda-fallback/process-upload';
+import { getBaseCloudFrontUrl } from '@/lib/cloudfront';
+import { detectMagicBytesMime } from '@/lib/magic-bytes';
+import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
 import { checkOrganizationQuotas } from '@/lib/quotas';
 
 const corsHeaders = {
@@ -397,7 +399,7 @@ async function handleCreateMultipart(req: NextRequest, body: any) {
   }
 
   const ticketId = crypto.randomUUID();
-  const pendingKey = generateOpaqueS3Key('static/pending', ext);
+  const pendingKey = generateOpaqueS3Key('static/files', ext);
 
   const { uploadId, cacheControl, contentDisposition } = await createS3MultipartUpload({
     key: pendingKey,
@@ -710,40 +712,141 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
     );
   }
 
-  // Clear s3_upload_id and mark completed before processUpload
+  // 3. Verify real binary format with 32-byte Range GET (Zero full file download)
+  const rangeBytes = await getS3ObjectRangeBytes(fileRow.s3_pending_key, 0, 31);
+  if (!rangeBytes || rangeBytes.length < 4) {
+    try {
+      await deleteS3Object(fileRow.s3_pending_key);
+    } catch {}
+    await supabase
+      .from('files')
+      .update({
+        status: 'failed',
+        s3_upload_id: null,
+        error_message: 'No se pudieron leer los primeros bytes del objeto ensamblado para verificar cabecera binaria.',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', fileRow.id);
+
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'INVALID_FILE_HEADER',
+        message: 'No se pudieron leer los primeros bytes del archivo ensamblado en S3.',
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  const declaredMime = String(fileRow.mime_type || '').toLowerCase().trim();
+  const detectedMagicMime = detectMagicBytesMime(rangeBytes);
+  if (!detectedMagicMime || detectedMagicMime !== declaredMime) {
+    try {
+      await deleteS3Object(fileRow.s3_pending_key);
+    } catch {}
+    const magicMismatch = `Cabecera binaria inválida: detectado '${detectedMagicMime || 'desconocido'}' no coincide con declarado '${declaredMime}'.`;
+    await supabase
+      .from('files')
+      .update({
+        status: 'failed',
+        s3_upload_id: null,
+        error_message: magicMismatch,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', fileRow.id);
+
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'INVALID_MAGIC_BYTES',
+        message: magicMismatch,
+        detectedMime: detectedMagicMime,
+        declaredMime,
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  // 4. [TEST-ONLY: TASK-B6-MULTIPART-TRIGGER]
+  if (ENABLE_SERVER_PROCESSING_FALLBACK) {
+    const processResult = await processUpload(fileRow.id, {
+      triggerSource: 'multipart_complete',
+      webhookUrl,
+      webhookSecret,
+      ipAddress,
+    });
+
+    if (!processResult.success) {
+      return NextResponse.json(
+        {
+          error: 'Bad Request',
+          code: processResult.code || 'PROCESS_UPLOAD_FAILED',
+          message: processResult.message,
+          ticketId: fileRow.ticket_id,
+          fileId: fileRow.id,
+          processing: processResult,
+        },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    return NextResponse.json(
+      {
+        status: 'success',
+        action: 'complete',
+        ticketId: fileRow.ticket_id,
+        fileId: fileRow.id,
+        fileStatus: 'uploaded',
+        scanStatus: processResult.scanStatus,
+        visibility: fileRow.visibility,
+        partsCompleted: partsToComplete.length,
+        cloudfrontUrl: fileRow.visibility === 'public' ? processResult.cloudfrontUrl : null,
+        processing: {
+          executed: true,
+          exifStripped: processResult.exifStripped,
+          detectedMime: processResult.detectedMimeType,
+          originalSizeBytes: processResult.originalSizeBytes,
+          processedSizeBytes: processResult.processedSizeBytes,
+          sha256Hash: processResult.sha256Hash,
+        },
+        webhook: processResult.webhook,
+      },
+      { status: 200, headers: corsHeaders }
+    );
+  }
+
+  // 5. PRODUCTION FLOW: Direct storage without server processing
+  const publicCfUrl =
+    fileRow.visibility === 'public'
+      ? getBaseCloudFrontUrl(fileRow.s3_pending_key)
+      : null;
+
   await supabase
     .from('files')
     .update({
       s3_upload_id: null,
       size_bytes: actualSize,
-      status: 'completed',
+      status: 'uploaded',
+      scan_status: 'not_scanned',
       completed_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      cloudfront_url: publicCfUrl,
+      s3_processed_key: fileRow.s3_pending_key,
     })
     .eq('id', fileRow.id);
 
-  // 3. [TEMPORARY-LAMBDA-FALLBACK: TASK-B6-MULTIPART-TRIGGER]
-  // Run processUpload(fileId) to validate magic bytes, strip EXIF, move to static/files/<rand128_B>.<ext>, and delete pending
-  const processResult = await processUpload(fileRow.id, {
-    triggerSource: 'multipart_complete',
-    webhookUrl,
-    webhookSecret,
+  await addServiceLog({
+    method: req.method,
+    action: 'MULTIPART_UPLOAD_CONFIRMED',
+    status: 'UPLOADED',
+    userId: fileRow.user_id,
+    orgId: fileRow.org_id,
+    ticketId: fileRow.ticket_id,
+    fileId: fileRow.id,
+    fileName: fileRow.original_name,
     ipAddress,
+    message: `Multipart upload completado: status='uploaded', scan_status='not_scanned', parts=${partsToComplete.length}, size=${actualSize}, magicBytesVerified=true.`,
   });
-
-  if (!processResult.success) {
-    return NextResponse.json(
-      {
-        error: 'Bad Request',
-        code: processResult.code || 'PROCESS_UPLOAD_FAILED',
-        message: processResult.message,
-        ticketId: fileRow.ticket_id,
-        fileId: fileRow.id,
-        processing: processResult,
-      },
-      { status: 400, headers: corsHeaders }
-    );
-  }
 
   return NextResponse.json(
     {
@@ -751,21 +854,15 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
       action: 'complete',
       ticketId: fileRow.ticket_id,
       fileId: fileRow.id,
-      fileStatus: processResult.status,
-      scanStatus: processResult.scanStatus,
+      fileStatus: 'uploaded',
+      scanStatus: 'not_scanned',
       visibility: fileRow.visibility,
       partsCompleted: partsToComplete.length,
-      storageStatus: 'processed',
-      cloudfrontUrl: fileRow.visibility === 'public' ? processResult.cloudfrontUrl : null,
-      processing: {
-        executed: true,
-        exifStripped: processResult.exifStripped,
-        detectedMime: processResult.detectedMimeType,
-        originalSizeBytes: processResult.originalSizeBytes,
-        processedSizeBytes: processResult.processedSizeBytes,
-        sha256Hash: processResult.sha256Hash,
+      cloudfrontUrl: publicCfUrl,
+      verification: {
+        magicBytesVerified: true,
+        detectedMimeType: detectedMagicMime,
       },
-      webhook: processResult.webhook,
     },
     { status: 200, headers: corsHeaders }
   );

@@ -10,15 +10,15 @@ import {
   validateAllowedFileType,
   headS3Object,
   deleteS3Object,
+  getS3ObjectRangeBytes,
   ALLOWED_FILE_TYPES,
   MAX_SINGLE_UPLOAD_BYTES,
   PRIVATE_NO_STORE_CACHE_CONTROL,
 } from '@/lib/s3';
 import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/ticket-token';
 import { getBaseCloudFrontUrl } from '@/lib/cloudfront';
-// [TEMPORARY-LAMBDA-FALLBACK: TASK-B6-IMPORT]
-// Búsqueda rápida para migrar/eliminar cuando exista AWS Lambda: "TEMPORARY-LAMBDA-FALLBACK"
-import { processUpload } from '@/lib/lambda-fallback/process-upload';
+import { detectMagicBytesMime } from '@/lib/magic-bytes';
+import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
 import { checkOrganizationQuotas } from '@/lib/quotas';
 
 // CORS Headers
@@ -340,8 +340,8 @@ export async function POST(req: NextRequest) {
     const resourceType = typeValidation.resourceType!;
     const contentDisposition = typeValidation.contentDisposition!;
 
-    // Task A.1: Opaque 128-bit random S3 key (distinct from DB fileId & ticketId; no orgSlug, visibility, or fileName)
-    const landingZoneKey = generateOpaqueS3Key('static/pending', extension);
+    // Task A.1 & Section 5: Opaque 128-bit random S3 key in static/files (direct final path without Lambda promotion)
+    const landingZoneKey = generateOpaqueS3Key('static/files', extension);
     // Task A.3: Signed Cache-Control for landing zone is strictly no-store
     const signedUploadCacheControl = PRIVATE_NO_STORE_CACHE_CONTROL;
 
@@ -368,7 +368,8 @@ export async function POST(req: NextRequest) {
         TTL_SECONDS,
         signedUploadCacheControl,
         fileSize,
-        contentDisposition
+        contentDisposition,
+        sha256Hash || undefined
       );
     } catch (s3Err: any) {
       console.error('Error generating AWS S3 Presigned URL:', s3Err.message);
@@ -444,6 +445,9 @@ export async function POST(req: NextRequest) {
     };
     if (contentDisposition === 'attachment') {
       requiredHeaders['Content-Disposition'] = 'attachment';
+    }
+    if (sha256Hash && /^[0-9a-f]{64}$/i.test(sha256Hash)) {
+      requiredHeaders['x-amz-checksum-sha256'] = Buffer.from(sha256Hash, 'hex').toString('base64');
     }
 
     return NextResponse.json(
@@ -635,9 +639,9 @@ export async function PUT(req: NextRequest) {
     );
   }
 
-  // CHECK 2: Ticket Already Completed / Processed (Idempotency / Replay protection)
+  // CHECK 2: Ticket Already Uploaded / Completed (Idempotency / Replay protection)
   const currentStatus = fileRow.status;
-  if (currentStatus === 'completed' || currentStatus === 'processed') {
+  if (currentStatus === 'uploaded' || currentStatus === 'completed' || currentStatus === 'processed') {
     return NextResponse.json(
       {
         error: 'Conflict',
@@ -758,8 +762,7 @@ export async function PUT(req: NextRequest) {
         error: 'Bad Request',
         code: 'FILE_NOT_UPLOADED_TO_S3',
         method: req.method,
-        message: 'El archivo aún no existe en la zona de aterrizaje de S3. Realiza el PUT a uploadUrl antes de confirmar.',
-        s3Key: pendingKey,
+        message: 'El archivo aún no existe en el almacenamiento S3. Realiza el PUT a uploadUrl antes de confirmar.',
       },
       { status: 400, headers: corsHeaders }
     );
@@ -826,146 +829,255 @@ export async function PUT(req: NextRequest) {
     );
   }
 
+  // CHECK 6 (Section 5): Real binary format validation via 32-Byte Range GET (Zero full file download)
+  const rangeBytes = await getS3ObjectRangeBytes(pendingKey, 0, 31);
+  if (!rangeBytes || rangeBytes.length < 4) {
+    try {
+      await deleteS3Object(pendingKey);
+    } catch {}
+    const failNowIso = new Date().toISOString();
+    await supabase
+      .from('files')
+      .update({
+        status: 'failed',
+        error_message: 'No se pudieron leer los primeros bytes del objeto en S3 para verificar la cabecera binaria.',
+        updated_at: failNowIso,
+      })
+      .eq('ticket_id', ticketId);
+
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'INVALID_FILE_HEADER',
+        method: req.method,
+        message: 'No se pudieron leer los primeros bytes del archivo en S3 para validar su cabecera binaria.',
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  const detectedMagicMime = detectMagicBytesMime(rangeBytes);
+  if (!detectedMagicMime || detectedMagicMime !== declaredMime) {
+    try {
+      await deleteS3Object(pendingKey);
+    } catch {}
+    const magicMismatchReason = `Cabecera binaria inválida: detectado '${detectedMagicMime || 'desconocido'}' no coincide con el tipo MIME declarado '${declaredMime}'.`;
+    const failNowIso = new Date().toISOString();
+    await supabase
+      .from('files')
+      .update({
+        status: 'failed',
+        error_message: magicMismatchReason,
+        updated_at: failNowIso,
+      })
+      .eq('ticket_id', ticketId);
+
+    await addServiceLog({
+      method: req.method,
+      action: 'MAGIC_BYTES_VERIFICATION_FAILED',
+      status: 'REJECTED_MAGIC_BYTES',
+      userId: fileRow.user_id,
+      orgId: fileRow.org_id,
+      ticketId,
+      fileId: fileRow.id,
+      fileName: fileRow.original_name,
+      ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+      message: `${magicMismatchReason} Objeto eliminado de S3 y ticket marcado como 'failed'.`,
+    });
+
+    return NextResponse.json(
+      {
+        error: 'Bad Request',
+        code: 'INVALID_MAGIC_BYTES',
+        method: req.method,
+        message: magicMismatchReason,
+        detectedMime: detectedMagicMime,
+        declaredMime,
+      },
+      { status: 400, headers: corsHeaders }
+    );
+  }
+
+  // CHECK 7 (Section 5): SHA-256 S3 Checksum Verification (Single PUT upload)
+  if (fileRow.sha256_hash && headMeta.checksumSHA256) {
+    const expectedBase64 = Buffer.from(fileRow.sha256_hash, 'hex').toString('base64');
+    if (headMeta.checksumSHA256 !== expectedBase64) {
+      try {
+        await deleteS3Object(pendingKey);
+      } catch {}
+      const checksumMismatchReason = `Checksum SHA-256 no coincide: declarado base64='${expectedBase64}' vs S3='${headMeta.checksumSHA256}'.`;
+      const failNowIso = new Date().toISOString();
+      await supabase
+        .from('files')
+        .update({
+          status: 'failed',
+          error_message: checksumMismatchReason,
+          updated_at: failNowIso,
+        })
+        .eq('ticket_id', ticketId);
+
+      await addServiceLog({
+        method: req.method,
+        action: 'CHECKSUM_SHA256_VERIFICATION_FAILED',
+        status: 'REJECTED_CHECKSUM',
+        userId: fileRow.user_id,
+        orgId: fileRow.org_id,
+        ticketId,
+        fileId: fileRow.id,
+        fileName: fileRow.original_name,
+        ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
+        message: `${checksumMismatchReason} Objeto eliminado de S3 y ticket marcado como 'failed'.`,
+      });
+
+      return NextResponse.json(
+        {
+          error: 'Bad Request',
+          code: 'CHECKSUM_MISMATCH',
+          method: req.method,
+          message: checksumMismatchReason,
+        },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+  }
+
   const fileVisibility = String(fileRow?.visibility || 'private').toLowerCase() === 'public' ? 'public' : 'private';
   const expectedDisposition =
     String(fileRow?.extension || '').toLowerCase() === '.pdf' ? 'attachment' : 'inline';
   const nowIso = new Date().toISOString();
   const clientIp = req.headers.get('x-forwarded-for') || '127.0.0.1';
 
-  // Record confirmation audit event in Supabase
+  // [TEST-ONLY: TASK-B6-TRIGGER-FROM-CONFIRM]
+  // Fallback for local testing only (disabled by default in production per "no binary files through Vercel" rule)
+  if (ENABLE_SERVER_PROCESSING_FALLBACK) {
+    const procResult = await processUpload(fileRow.id, {
+      webhookUrl: webhookUrl || null,
+      webhookSecret: webhookSecret || null,
+      ipAddress: clientIp,
+      triggerSource: 'put_confirm',
+    });
+
+    if (!procResult.success) {
+      return NextResponse.json(
+        {
+          error: 'Bad Request',
+          code: procResult.code || 'PROCESS_UPLOAD_FAILED',
+          method: req.method,
+          message: procResult.message,
+          ticketId,
+          fileId: fileRow.id,
+          processing: procResult,
+        },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    return NextResponse.json(
+      {
+        status: 'success',
+        method: req.method,
+        message: `File upload confirmed and processed (test fallback) for ticket ${ticketId}`,
+        ticketId,
+        fileId: fileRow.id,
+        fileStatus: 'uploaded',
+        scanStatus: procResult.scanStatus,
+        visibility: fileVisibility,
+        ownerUserId: fileRow?.user_id || null,
+        cacheControl: getCacheControlForVisibility(fileVisibility, false),
+        cloudfrontUrl: fileVisibility === 'public' ? procResult.cloudfrontUrl : null,
+        tokenVerified: true,
+        headVerification: {
+          verified: true,
+          actualSizeBytes: actualSize,
+          actualContentType: actualMime,
+          eTag: headMeta.eTag,
+        },
+        processing: {
+          exifStripped: procResult.exifStripped,
+          detectedMimeType: procResult.detectedMimeType,
+          originalSizeBytes: procResult.originalSizeBytes,
+          processedSizeBytes: procResult.processedSizeBytes,
+          sha256Hash: procResult.sha256Hash,
+        },
+        webhook: procResult.webhook,
+      },
+      { status: 200, headers: corsHeaders }
+    );
+  }
+
+  // PRODUCTION FLOW: No files pass through Vercel
+  let s3CacheControl: string | null = null;
+  if (fileVisibility === 'public' && fileRow?.s3_pending_key) {
+    try {
+      s3CacheControl = await applyS3CacheControlMetadata(
+        fileRow.s3_pending_key,
+        fileRow.mime_type || 'application/octet-stream',
+        fileVisibility,
+        expectedDisposition
+      );
+    } catch (metaErr: any) {
+      console.warn('Could not apply Cache-Control metadata on S3 object:', metaErr.message);
+    }
+  }
+
+  const publicCfUrl =
+    fileVisibility === 'public' && fileRow?.s3_pending_key
+      ? getBaseCloudFrontUrl(fileRow.s3_pending_key)
+      : null;
+
+  await supabase
+    .from('files')
+    .update({
+      status: 'uploaded',
+      scan_status: 'not_scanned',
+      completed_at: nowIso,
+      updated_at: nowIso,
+      cloudfront_url: publicCfUrl,
+      s3_processed_key: fileRow.s3_pending_key,
+    })
+    .eq('ticket_id', ticketId);
+
   await addServiceLog({
     method: req.method,
     action: 'S3_UPLOAD_CONFIRMED',
-    status: 'UPLOADED_LANDING',
+    status: 'UPLOADED',
     userId: fileRow?.user_id || undefined,
     orgId: fileRow?.org_id || undefined,
     ticketId,
     fileId: fileRow?.id || undefined,
     fileName: fileRow?.original_name || undefined,
     ipAddress: clientIp,
-    message: `File confirmed in S3 landing zone for ticket ${ticketId} (visibility=${fileVisibility}, verifiedSize=${actualSize}, verifiedMime=${actualMime})`,
+    message: `File confirmed in S3: status='uploaded', scan_status='not_scanned', visibility='${fileVisibility}', size=${actualSize}, magicBytesVerified=true`,
   });
-
-  // If skipProcess=true was passed (e.g. to test Cron retry of pending files), keep status='completed' in landing zone
-  if (skipProcess) {
-    let s3CacheControl: string | null = null;
-    if (fileRow?.s3_pending_key) {
-      try {
-        s3CacheControl = await applyS3CacheControlMetadata(
-          fileRow.s3_pending_key,
-          fileRow.mime_type || 'application/octet-stream',
-          fileVisibility,
-          expectedDisposition
-        );
-      } catch (metaErr: any) {
-        console.warn('Could not apply Cache-Control metadata on S3 object:', metaErr.message);
-      }
-    }
-
-    const publicCfUrl =
-      fileVisibility === 'public' && fileRow?.s3_pending_key
-        ? getBaseCloudFrontUrl(fileRow.s3_pending_key)
-        : null;
-
-    await supabase
-      .from('files')
-      .update({
-        status: 'completed',
-        completed_at: nowIso,
-        updated_at: nowIso,
-        cloudfront_url: publicCfUrl,
-      })
-      .eq('ticket_id', ticketId);
-
-    return NextResponse.json(
-      {
-        status: 'success',
-        method: req.method,
-        message: `File upload confirmed in landing zone for ticket ${ticketId} (skipProcess=true)`,
-        ticketId,
-        fileId: fileRow?.id || null,
-        visibility: fileVisibility,
-        ownerUserId: fileRow?.user_id || null,
-        cacheControl: s3CacheControl || getCacheControlForVisibility(fileVisibility, false),
-        storageStatus: 'uploaded_to_landing',
-        cloudfrontUrl: fileVisibility === 'public' ? publicCfUrl : null,
-        tokenVerified: true,
-        headVerification: {
-          verified: true,
-          actualSizeBytes: actualSize,
-          actualContentType: actualMime,
-          actualCacheControl: s3CacheControl || headMeta.cacheControl,
-          actualContentDisposition:
-            expectedDisposition === 'attachment' ? 'attachment' : headMeta.contentDisposition,
-          eTag: headMeta.eTag,
-        },
-      },
-      { status: 200, headers: corsHeaders }
-    );
-  }
-
-  // ============================================================================
-  // [TEMPORARY-LAMBDA-FALLBACK: TASK-B6-TRIGGER-FROM-CONFIRM]
-  // Búsqueda rápida para migrar/eliminar cuando exista AWS Lambda: "TEMPORARY-LAMBDA-FALLBACK"
-  // Ejecuta processUpload(fileId): valida magic bytes, limpia EXIF con sharp(.rotate()),
-  // escribe en static/files/<rand128_B>.<ext>, borra original de static/pending/ y
-  // actualiza status = 'processed' y scan_status = 'not_scanned'.
-  // ============================================================================
-  const procResult = await processUpload(fileRow.id, {
-    webhookUrl: webhookUrl || null,
-    webhookSecret: webhookSecret || null,
-    ipAddress: clientIp,
-    triggerSource: 'put_confirm',
-  });
-
-  if (!procResult.success) {
-    return NextResponse.json(
-      {
-        error: 'Bad Request',
-        code: procResult.code || 'PROCESS_UPLOAD_FAILED',
-        method: req.method,
-        message: procResult.message,
-        ticketId,
-        fileId: fileRow.id,
-        remediation: 'deleted_from_s3_pending_and_marked_failed',
-        processing: procResult,
-      },
-      { status: 400, headers: corsHeaders }
-    );
-  }
 
   return NextResponse.json(
     {
       status: 'success',
       method: req.method,
-      message: `File upload confirmed and processed for ticket ${ticketId}`,
+      message: `File upload confirmed for ticket ${ticketId}`,
       ticketId,
-      fileId: fileRow.id,
-      fileStatus: procResult.status,
-      scanStatus: procResult.scanStatus,
+      fileId: fileRow?.id || null,
+      fileStatus: 'uploaded',
+      scanStatus: 'not_scanned',
       visibility: fileVisibility,
       ownerUserId: fileRow?.user_id || null,
-      cacheControl: getCacheControlForVisibility(fileVisibility, false),
-      storageStatus: 'processed',
-      cloudfrontUrl: fileVisibility === 'public' ? procResult.cloudfrontUrl : null,
+      cacheControl: s3CacheControl || getCacheControlForVisibility(fileVisibility, false),
+      cloudfrontUrl: publicCfUrl,
       tokenVerified: true,
       headVerification: {
         verified: true,
         actualSizeBytes: actualSize,
         actualContentType: actualMime,
-        actualCacheControl: getCacheControlForVisibility(fileVisibility, false),
+        actualCacheControl: s3CacheControl || headMeta.cacheControl,
         actualContentDisposition:
           expectedDisposition === 'attachment' ? 'attachment' : headMeta.contentDisposition,
         eTag: headMeta.eTag,
       },
-      processing: {
-        exifStripped: procResult.exifStripped,
-        detectedMimeType: procResult.detectedMimeType,
-        originalSizeBytes: procResult.originalSizeBytes,
-        processedSizeBytes: procResult.processedSizeBytes,
-        sha256Hash: procResult.sha256Hash,
+      verification: {
+        magicBytesVerified: true,
+        detectedMimeType: detectedMagicMime,
+        checksumVerified: Boolean(fileRow.sha256_hash && headMeta.checksumSHA256),
       },
-      webhook: procResult.webhook,
     },
     { status: 200, headers: corsHeaders }
   );
