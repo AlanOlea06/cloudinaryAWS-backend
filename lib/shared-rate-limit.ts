@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { supabase } from '@/lib/supabase';
 
 export interface SharedRateLimitResult {
@@ -17,6 +18,19 @@ export const RATE_LIMIT_BUCKET_RETENTION_MS = 24 * 60 * 60 * 1000;
 const OPPORTUNISTIC_CLEANUP_PROBABILITY = 0.01;
 
 /**
+ * Returns the salt used for hashing sensitive identifiers (e.g. client IP) in rate limit keys.
+ * Reads `RATE_LIMIT_SALT` if present. If absent, falls back to `TICKET_SIGNING_SECRET` so that
+ * the server does not crash if the variable has not yet been populated in production.
+ */
+export function getRateLimitSalt(): string {
+  const salt = process.env.RATE_LIMIT_SALT?.trim();
+  if (salt) return salt;
+  const fallback = process.env.TICKET_SIGNING_SECRET?.trim();
+  if (fallback) return fallback;
+  return 'default-rate-limit-salt-fallback';
+}
+
+/**
  * Builds a rate-limit bucket key from a non-secret UUID (api_keys.id, organizations.id).
  * Format: `<scope>:<kind>:<uuid>` — never raw API keys or IP addresses.
  * Matches the CHECK constraint `rate_limit_buckets_key_format_check` in the database.
@@ -30,6 +44,24 @@ export function buildRateLimitKey(scope: string, kind: string, uuid: string): st
     throw new Error('[RATE_LIMIT_KEY] el identificador debe ser un UUID (nunca una llave API ni una IP).');
   }
   return `${scope}:${kind}:${id}`;
+}
+
+/**
+ * Builds a rate-limit bucket key from a sensitive identifier (e.g., client IP address).
+ * Format: `<scope>:<kind>:h:<sha256hex>` — HMAC-SHA256 with server salt, never cleartext.
+ * Matches the CHECK constraint `rate_limit_buckets_key_format_check` in the database.
+ */
+export function buildHashedRateLimitKey(scope: string, kind: string, rawIdentifier: string): string {
+  if (!SEGMENT_RE.test(scope) || !SEGMENT_RE.test(kind)) {
+    throw new Error('[RATE_LIMIT_KEY] scope/kind deben ser [a-z_]+');
+  }
+  const id = String(rawIdentifier || '').trim();
+  if (!id) {
+    throw new Error('[RATE_LIMIT_KEY] el identificador no puede estar vacío');
+  }
+  const salt = getRateLimitSalt();
+  const hash = crypto.createHmac('sha256', salt).update(id).digest('hex');
+  return `${scope}:${kind}:h:${hash}`;
 }
 
 /**
