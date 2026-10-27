@@ -103,6 +103,7 @@ export async function GET(
         visibility,
         fileStatus: fileRow.status,
         dbStatus: fileRow.status,
+        sha256Verified: Boolean(fileRow.sha256_verified),
         scanStatus: fileRow.scan_status || 'not_scanned',
         cloudfrontUrl: visibility === 'public' ? fileRow.cloudfront_url : null,
         retryCount: Number(fileRow.retry_count || 0),

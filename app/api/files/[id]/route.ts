@@ -60,7 +60,7 @@ export async function GET(
     // 2. Consultar la tabla files en Supabase para obtener la clave de S3, user_id, org_id y visibility
     const { data: fileRow, error: dbError } = await supabase
       .from('files')
-      .select('id, user_id, org_id, ticket_id, original_name, s3_pending_key, s3_processed_key, cloudfront_url, status, mime_type, visibility')
+      .select('id, user_id, org_id, ticket_id, original_name, s3_pending_key, s3_processed_key, cloudfront_url, status, mime_type, visibility, sha256_verified')
       .eq('id', fileId)
       .maybeSingle();
 
@@ -320,6 +320,9 @@ export async function GET(
           orgId: fileRow.org_id,
           ownerUserId: fileRow.user_id,
           visibility: 'private',
+          fileStatus: fileRow.status,
+          status: fileRow.status,
+          sha256Verified: Boolean(fileRow.sha256_verified),
           cacheControl: PRIVATE_NO_STORE_CACHE_CONTROL,
         },
         {
@@ -396,6 +399,9 @@ export async function GET(
         orgId: fileRow.org_id,
         ownerUserId: fileRow.user_id,
         visibility: 'public',
+        fileStatus: fileRow.status,
+        status: fileRow.status,
+        sha256Verified: Boolean(fileRow.sha256_verified),
         cacheControl: PUBLIC_SHORT_TTL_CACHE_CONTROL,
       },
       {

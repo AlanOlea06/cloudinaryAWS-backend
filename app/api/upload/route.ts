@@ -327,6 +327,45 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // ============================================================================
+    // [TEMPORARY-LAMBDA-FALLBACK: OPPORTUNISTIC-TICKET-CLEANUP]
+    // Reemplaza temporalmente las reglas de ciclo de vida automáticas de AWS S3.
+    // Al emitir un ticket, borra de la organización hasta 3 tickets vencidos (objeto S3 y fila).
+    // NO borra la fila si falla el borrado en S3. El cron queda de respaldo.
+    // ============================================================================
+    try {
+      const nowIso = new Date().toISOString();
+      const { data: expiredBatch } = await supabase
+        .from('files')
+        .select('id, s3_pending_key, expires_at')
+        .eq('org_id', user.orgId)
+        .eq('status', 'pending_upload')
+        .lt('expires_at', nowIso)
+        .limit(3);
+
+      if (expiredBatch && expiredBatch.length > 0) {
+        for (const exp of expiredBatch) {
+          if (exp.s3_pending_key) {
+            let s3Deleted = false;
+            try {
+              await deleteS3Object(exp.s3_pending_key);
+              s3Deleted = true;
+            } catch (err: any) {
+              console.warn('[TEMPORARY-LAMBDA-FALLBACK] Error borrando S3 en limpieza oportunista:', err.message);
+            }
+            if (s3Deleted) {
+              await supabase.from('files').delete().eq('id', exp.id);
+            }
+          }
+        }
+      }
+    } catch (e: any) {
+      console.warn('[TEMPORARY-LAMBDA-FALLBACK] Limpieza oportunista ignorada:', e.message);
+    }
+    // ============================================================================
+    // END [TEMPORARY-LAMBDA-FALLBACK: OPPORTUNISTIC-TICKET-CLEANUP]
+    // ============================================================================
+
     // ALL CHECKS PASSED -> Generate Ticket & Opaque 128-bit S3 Key (Task A.1)
     const fileId = crypto.randomUUID();
     const ticketId = crypto.randomUUID();
@@ -340,8 +379,9 @@ export async function POST(req: NextRequest) {
     const resourceType = typeValidation.resourceType!;
     const contentDisposition = typeValidation.contentDisposition!;
 
-    // Task A.1 & Section 5: Opaque 128-bit random S3 key in static/files (direct final path without Lambda promotion)
-    const landingZoneKey = generateOpaqueS3Key('static/files', extension);
+    // Claves por visibilidad: públicos en static/files/<rand128>.<ext>, privados en static/private/<rand128>.<ext>
+    const s3FolderPrefix = visibility === 'private' ? 'static/private' : 'static/files';
+    const landingZoneKey = generateOpaqueS3Key(s3FolderPrefix, extension);
     // Task A.3: Signed Cache-Control for landing zone is strictly no-store
     const signedUploadCacheControl = PRIVATE_NO_STORE_CACHE_CONTROL;
 
@@ -1025,6 +1065,8 @@ export async function PUT(req: NextRequest) {
       ? getBaseCloudFrontUrl(fileRow.s3_pending_key)
       : null;
 
+  const isChecksumVerified = Boolean(fileRow.sha256_hash && headMeta.checksumSHA256);
+
   await supabase
     .from('files')
     .update({
@@ -1034,6 +1076,7 @@ export async function PUT(req: NextRequest) {
       updated_at: nowIso,
       cloudfront_url: publicCfUrl,
       s3_processed_key: fileRow.s3_pending_key,
+      sha256_verified: isChecksumVerified,
     })
     .eq('ticket_id', ticketId);
 
@@ -1047,7 +1090,7 @@ export async function PUT(req: NextRequest) {
     fileId: fileRow?.id || undefined,
     fileName: fileRow?.original_name || undefined,
     ipAddress: clientIp,
-    message: `File confirmed in S3: status='uploaded', scan_status='not_scanned', visibility='${fileVisibility}', size=${actualSize}, magicBytesVerified=true`,
+    message: `File confirmed in S3: status='uploaded', scan_status='not_scanned', visibility='${fileVisibility}', size=${actualSize}, magicBytesVerified=true, sha256_verified=${isChecksumVerified}`,
   });
 
   return NextResponse.json(
@@ -1058,6 +1101,7 @@ export async function PUT(req: NextRequest) {
       ticketId,
       fileId: fileRow?.id || null,
       fileStatus: 'uploaded',
+      sha256Verified: isChecksumVerified,
       scanStatus: 'not_scanned',
       visibility: fileVisibility,
       ownerUserId: fileRow?.user_id || null,
@@ -1076,7 +1120,7 @@ export async function PUT(req: NextRequest) {
       verification: {
         magicBytesVerified: true,
         detectedMimeType: detectedMagicMime,
-        checksumVerified: Boolean(fileRow.sha256_hash && headMeta.checksumSHA256),
+        checksumVerified: isChecksumVerified,
       },
     },
     { status: 200, headers: corsHeaders }

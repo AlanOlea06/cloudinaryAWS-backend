@@ -249,7 +249,7 @@ export function getCacheControlForVisibility(
  * - Always resides under 'static/' so CloudFront (/static/*) can reach public files when needed.
  */
 export function generateOpaqueS3Key(
-  prefix: 'static/pending' | 'static/files' = 'static/pending',
+  prefix: 'static/pending' | 'static/files' | 'static/private' = 'static/files',
   extension: string = ''
 ): string {
   const random128Hex = crypto.randomBytes(16).toString('hex');

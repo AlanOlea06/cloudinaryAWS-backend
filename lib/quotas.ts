@@ -54,10 +54,10 @@ export async function checkOrganizationQuotas(
 
   const filesList = orgFiles || [];
   const currentPendingTickets = filesList.filter((f) => f.status === 'pending_upload').length;
-  const currentStorageBytes = filesList.reduce(
-    (sum, f) => sum + Number(f.size_bytes || 0),
-    0
-  );
+  // Storage quota only counts confirmed uploaded files (plus legacy completed/processed rows)
+  const currentStorageBytes = filesList
+    .filter((f) => f.status === 'uploaded' || f.status === 'completed' || f.status === 'processed')
+    .reduce((sum, f) => sum + Number(f.size_bytes || 0), 0);
 
   const usage = {
     currentStorageBytes,

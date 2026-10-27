@@ -399,7 +399,8 @@ async function handleCreateMultipart(req: NextRequest, body: any) {
   }
 
   const ticketId = crypto.randomUUID();
-  const pendingKey = generateOpaqueS3Key('static/files', ext);
+  const s3FolderPrefix = normalizedVisibility === 'private' ? 'static/private' : 'static/files';
+  const pendingKey = generateOpaqueS3Key(s3FolderPrefix, ext);
 
   const { uploadId, cacheControl, contentDisposition } = await createS3MultipartUpload({
     key: pendingKey,
@@ -821,6 +822,8 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
       ? getBaseCloudFrontUrl(fileRow.s3_pending_key)
       : null;
 
+  const isChecksumVerified = Boolean(fileRow.sha256_hash && headMeta.checksumSHA256);
+
   await supabase
     .from('files')
     .update({
@@ -832,6 +835,7 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
       updated_at: new Date().toISOString(),
       cloudfront_url: publicCfUrl,
       s3_processed_key: fileRow.s3_pending_key,
+      sha256_verified: isChecksumVerified,
     })
     .eq('id', fileRow.id);
 
@@ -845,7 +849,7 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
     fileId: fileRow.id,
     fileName: fileRow.original_name,
     ipAddress,
-    message: `Multipart upload completado: status='uploaded', scan_status='not_scanned', parts=${partsToComplete.length}, size=${actualSize}, magicBytesVerified=true.`,
+    message: `Multipart upload completado: status='uploaded', scan_status='not_scanned', parts=${partsToComplete.length}, size=${actualSize}, magicBytesVerified=true, sha256_verified=${isChecksumVerified}.`,
   });
 
   return NextResponse.json(
@@ -855,6 +859,7 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
       ticketId: fileRow.ticket_id,
       fileId: fileRow.id,
       fileStatus: 'uploaded',
+      sha256Verified: isChecksumVerified,
       scanStatus: 'not_scanned',
       visibility: fileRow.visibility,
       partsCompleted: partsToComplete.length,

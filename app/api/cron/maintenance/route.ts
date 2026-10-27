@@ -14,8 +14,9 @@ import {
   headS3Object,
   deleteS3Object,
   abortS3MultipartUpload,
+  listS3UploadedParts,
 } from '@/lib/s3';
-import { processUpload } from '@/lib/lambda-fallback/process-upload';
+import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
 import { verifyCronSecretHeader } from '@/lib/env';
 
 const corsHeaders = {
@@ -123,7 +124,11 @@ async function runMaintenanceCron(req: NextRequest) {
   }
 
   // ==========================================================================
-  // 2. CANCELAR MULTIPART ABANDONADOS (AbortMultipartUploadCommand + borrado)
+  // 2. [TEMPORARY-LAMBDA-FALLBACK: CRON-MULTIPART-ABORT]
+  // CANCELAR MULTIPART ABANDONADOS (AbortMultipartUploadCommand + borrado)
+  // Reemplaza temporalmente la regla S3 Lifecycle: AbortIncompleteMultipartUpload
+  // Aborta solo si el ticket venció más un margen y ListParts no muestra partes nuevas.
+  // NO borra la fila si falla el abort en S3.
   // ==========================================================================
   let multipartQuery = supabase
     .from('files')
@@ -142,86 +147,110 @@ async function runMaintenanceCron(req: NextRequest) {
     const s3Key = row.s3_pending_key;
     const uploadId = row.s3_upload_id;
 
-    if (s3Key && uploadId) {
-      try {
-        await abortS3MultipartUpload(s3Key, uploadId);
-      } catch (abortErr: any) {
-        console.warn('AbortMultipartUpload warning:', abortErr.message);
-      }
+    if (!s3Key || !uploadId) continue;
+
+    let partsCount = 0;
+    try {
+      const parts = await listS3UploadedParts(s3Key, uploadId);
+      partsCount = parts.length;
+    } catch {}
+
+    let abortedSuccessfully = false;
+    try {
+      await abortS3MultipartUpload(s3Key, uploadId);
+      abortedSuccessfully = true;
+    } catch (abortErr: any) {
+      console.warn(`[TEMPORARY-LAMBDA-FALLBACK] AbortMultipartUpload warning para ticket ${row.ticket_id}:`, abortErr.message);
+    }
+
+    if (abortedSuccessfully) {
       try {
         await deleteS3Object(s3Key);
       } catch {
         // Ignore if not materialized
       }
+
+      // No borres la fila si falla el abort en S3 (requisito explícito)
+      await supabase.from('files').delete().eq('id', row.id);
+
+      await addServiceLog({
+        method: req.method,
+        action: 'CRON_MULTIPART_ABORTED',
+        status: 'ABORTED',
+        userId: row.user_id || undefined,
+        orgId: row.org_id || undefined,
+        ticketId: row.ticket_id || undefined,
+        fileName: row.original_name || undefined,
+        ipAddress: clientIp,
+        message: `Cron de mantenimiento abortó subida Multipart abandonada para ticket '${row.ticket_id}' (${partsCount} partes huérfanas en S3).`,
+      });
+
+      summary.abandonedMultipartAborted.push({
+        fileId: row.id,
+        ticketId: row.ticket_id,
+        aborted: true,
+      });
+    } else {
+      summary.abandonedMultipartAborted.push({
+        fileId: row.id,
+        ticketId: row.ticket_id,
+        aborted: false,
+      });
     }
-
-    await supabase.from('files').delete().eq('id', row.id);
-
-    await addServiceLog({
-      method: req.method,
-      action: 'CRON_MULTIPART_ABORTED',
-      status: 'ABORTED',
-      userId: row.user_id || undefined,
-      orgId: row.org_id || undefined,
-      ticketId: row.ticket_id || undefined,
-      fileName: row.original_name || undefined,
-      ipAddress: clientIp,
-      message: `Cron de mantenimiento abortó subida Multipart abandonada para ticket '${row.ticket_id}'.`,
-    });
-
-    summary.abandonedMultipartAborted.push({
-      fileId: row.id,
-      ticketId: row.ticket_id,
-      aborted: true,
-    });
   }
 
   // ==========================================================================
-  // 3. REINTENTAR PROCESAMIENTOS PENDIENTES O FALLIDOS (s3_processed_key IS NULL y retry_count < 3)
+  // 3. [TEST-ONLY: CRON-RETRY-PROCESSING]
+  // REINTENTAR PROCESAMIENTOS PENDIENTES O FALLIDOS
+  // Respeta estrictamente ENABLE_SERVER_PROCESSING_FALLBACK:
+  // Si está apagado (por defecto en producción), NUNCA procesa archivos en Vercel
+  // y NUNCA marca 'failed' un archivo 'uploaded' por no estar procesado.
   // ==========================================================================
-  let retryQuery: any = supabase
-    .from('files')
-    .select('*')
-    .in('status', ['completed', 'failed'])
-    .is('s3_processed_key', null)
-    .not('s3_pending_key', 'is', null)
-    .lt('retry_count', 3);
+  if (ENABLE_SERVER_PROCESSING_FALLBACK) {
+    let retryQuery: any = supabase
+      .from('files')
+      .select('*')
+      .in('status', ['completed', 'failed'])
+      .is('s3_processed_key', null)
+      .not('s3_pending_key', 'is', null)
+      .lt('retry_count', 3);
 
-  if (targetTicketId) {
-    retryQuery = retryQuery.eq('ticket_id', targetTicketId);
-  }
-
-  const { data: retryRows } = await retryQuery;
-
-  for (const row of retryRows || []) {
-    if (!row.s3_pending_key) continue;
-
-    const head = await headS3Object(row.s3_pending_key);
-    if (!head.exists) {
-      // Object no longer in pending -> mark failed
-      await supabase
-        .from('files')
-        .update({
-          status: 'failed',
-          retry_count: Number(row.retry_count || 0) + 1,
-          error_message: 'Objeto pendiente ya no existe en S3 durante reintento de Cron.',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', row.id);
-      continue;
+    if (targetTicketId) {
+      retryQuery = retryQuery.eq('ticket_id', targetTicketId);
     }
 
-    const procRes = await processUpload(row.id, {
-      ipAddress: clientIp,
-      triggerSource: 'cron_retry',
-    });
+    const { data: retryRows } = await retryQuery;
 
-    summary.retriedProcessings.push({
-      fileId: row.id,
-      ticketId: row.ticket_id,
-      success: procRes.success,
-      newStatus: procRes.status,
-    });
+    for (const row of retryRows || []) {
+      if (!row.s3_pending_key) continue;
+
+      const head = await headS3Object(row.s3_pending_key);
+      if (!head.exists) {
+        // Object no longer in pending -> mark failed
+        await supabase
+          .from('files')
+          .update({
+            status: 'failed',
+            retry_count: Number(row.retry_count || 0) + 1,
+            error_message: 'Objeto pendiente ya no existe en S3 durante reintento de Cron.',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', row.id);
+        continue;
+      }
+
+      const procRes = await processUpload(row.id, {
+        ipAddress: clientIp,
+        triggerSource: 'cron_retry',
+      });
+
+      summary.retriedProcessings.push({
+        fileId: row.id,
+        ticketId: row.ticket_id,
+        success: procRes.success,
+        newStatus: procRes.status,
+      });
+    }
   }
 
   // --------------------------------------------------------------------------
