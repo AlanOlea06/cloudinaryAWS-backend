@@ -521,7 +521,7 @@ export async function dispatchFileWebhook(params: {
   const isCircuitBreakerOpen =
     Boolean(recentDeliveries &&
     recentDeliveries.length >= CIRCUIT_BREAKER_FAILURES_THRESHOLD &&
-    recentDeliveries.every((d) => d.status === 'failed'));
+    recentDeliveries.every((d) => d.status !== 'delivered'));
 
   if (isCircuitBreakerOpen) {
     const { data: queuedRow } = await supabase
