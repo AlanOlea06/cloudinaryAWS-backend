@@ -15,6 +15,8 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 60 seconds
 const DEFAULT_RATE_LIMIT_MAX_REQUESTS = 100; // 100 requests / minute per API key
 
+const KEYS_RATE_LIMIT_MAX_REQUESTS = 20; // 20 requests / minute for /api/keys management
+
 interface RateLimitBucket {
   timestamps: number[];
 }
@@ -95,6 +97,7 @@ interface ApiKeyRecord {
   can_read: boolean;
   can_upload: boolean;
   can_delete: boolean;
+  can_manage_keys?: boolean;
   is_active: boolean;
 }
 
@@ -138,10 +141,29 @@ function jsonError(
   return res;
 }
 
+/**
+ * Strips any spoofable client-supplied internal headers.
+ * Condition 1: El middleware debe ELIMINAR siempre cualquier x-validated-* y x-can-manage-keys
+ * que traiga la petición antes de inyectar las suyas.
+ */
+function sanitizeClientHeaders(request: NextRequest): Headers {
+  const sanitized = new Headers(request.headers);
+  for (const [key] of request.headers.entries()) {
+    const lower = key.toLowerCase();
+    if (
+      lower.startsWith('x-validated-') ||
+      lower === 'x-can-manage-keys' ||
+      lower.startsWith('x-caller-') ||
+      lower.startsWith('x-api-key-')
+    ) {
+      sanitized.delete(key);
+    }
+  }
+  return sanitized;
+}
+
 function isAdminRoute(pathname: string): boolean {
   return (
-    pathname === '/api/keys' ||
-    pathname.startsWith('/api/keys/') ||
     pathname === '/api/logs' ||
     pathname.startsWith('/api/logs/') ||
     pathname === '/api/records' ||
@@ -214,7 +236,123 @@ export async function middleware(request: NextRequest) {
       return applySecurityHeaders(NextResponse.next());
     }
 
-    // 5. Administrative routes require ADMIN_API_SECRET (with ADMIN_API_SECRET_PREVIOUS support)
+    // 5. Special Dual-Auth Route: /api/keys
+    // Allows ADMIN_API_SECRET (full access) OR an active organization API Key with can_manage_keys=true (user_id IS NULL)
+    if (pathname === '/api/keys' || pathname.startsWith('/api/keys/')) {
+      const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || '127.0.0.1';
+      const rawApiKey = request.headers.get('x-api-key')?.trim();
+      const rateLimitKey = rawApiKey ? `keys:key:${await sha256Hex(rawApiKey)}` : `keys:ip:${clientIp}`;
+
+      const rateStatus = checkRateLimit(rateLimitKey, KEYS_RATE_LIMIT_MAX_REQUESTS);
+      const rateLimitHeaders: Record<string, string> = {
+        'X-RateLimit-Limit': String(rateStatus.limit),
+        'X-RateLimit-Remaining': String(rateStatus.remaining),
+        'X-RateLimit-Reset': String(rateStatus.resetSeconds),
+      };
+
+      if (!rateStatus.allowed) {
+        return jsonError(
+          429,
+          'Too Many Requests',
+          'KEYS_RATE_LIMIT_EXCEEDED',
+          `Límite de peticiones de administración de llaves excedido (${rateStatus.limit} req / 60s). Reintenta en ${rateStatus.retryAfterSeconds} segundos. (Nota: limitador en memoria por instancia).`,
+          {
+            ...rateLimitHeaders,
+            'Retry-After': String(rateStatus.retryAfterSeconds),
+          }
+        );
+      }
+
+      // Check admin secret first
+      const adminCheck = verifyAdminSecretHeader(request.headers);
+      if (adminCheck.valid) {
+        const sanitizedHeaders = sanitizeClientHeaders(request);
+        const response = NextResponse.next({ request: { headers: sanitizedHeaders } });
+        Object.entries(rateLimitHeaders).forEach(([k, v]) => response.headers.set(k, v));
+        return applySecurityHeaders(response);
+      }
+
+      // If no admin secret, requires x-api-key with can_manage_keys=true
+      if (!rawApiKey) {
+        return jsonError(
+          401,
+          'Unauthorized',
+          'AUTHENTICATION_REQUIRED',
+          'Autenticación requerida: debe proporcionar x-admin-secret o una x-api-key con permisos de administración.',
+          rateLimitHeaders
+        );
+      }
+
+      const supabaseUrl = requireEnv('SUPABASE_URL');
+      const supabaseServiceRoleKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
+      const hashedKey = await sha256Hex(rawApiKey);
+
+      const restUrl = `${supabaseUrl}/rest/v1/api_keys?hashed_key=eq.${encodeURIComponent(
+        hashedKey
+      )}&select=id,org_id,user_id,name,can_read,can_upload,can_delete,can_manage_keys,is_active&limit=1`;
+
+      const dbResponse = await fetch(restUrl, {
+        method: 'GET',
+        headers: {
+          apikey: supabaseServiceRoleKey,
+          Authorization: `Bearer ${supabaseServiceRoleKey}`,
+          'Content-Type': 'application/json',
+        },
+        cache: 'no-store',
+      });
+
+      if (!dbResponse.ok) {
+        return jsonError(
+          500,
+          'Internal Server Error',
+          'AUTH_VERIFICATION_ERROR',
+          'Error al verificar la API Key contra el almacén de seguridad.',
+          rateLimitHeaders
+        );
+      }
+
+      const records = (await dbResponse.json()) as (ApiKeyRecord & { can_manage_keys?: boolean })[];
+      const keyRecord = records?.[0];
+
+      if (!keyRecord || !keyRecord.is_active) {
+        return jsonError(
+          403,
+          'Forbidden',
+          'INVALID_OR_INACTIVE_API_KEY',
+          'Acceso denegado: la API Key proporcionada no existe o ha sido revocada.',
+          rateLimitHeaders
+        );
+      }
+
+      // Condition 2: Only organization keys (user_id IS NULL) can manage keys
+      if (keyRecord.user_id) {
+        return jsonError(
+          403,
+          'Forbidden',
+          'USER_KEY_CANNOT_MANAGE_KEYS',
+          'Las API Keys vinculadas a un usuario específico nunca tienen autorización para gestionar llaves.',
+          rateLimitHeaders
+        );
+      }
+
+      if (!keyRecord.can_manage_keys) {
+        return jsonError(
+          403,
+          'Forbidden',
+          'CANNOT_MANAGE_KEYS',
+          `La API Key '${keyRecord.name}' no tiene permisos de administración de llaves (can_manage_keys=false).`,
+          rateLimitHeaders
+        );
+      }
+
+      // Strip all client-supplied spoofable headers
+      const sanitizedHeaders = sanitizeClientHeaders(request);
+      const response = NextResponse.next({ request: { headers: sanitizedHeaders } });
+      Object.entries(rateLimitHeaders).forEach(([k, v]) => response.headers.set(k, v));
+      return applySecurityHeaders(response);
+    }
+
+    // 6. Administrative routes require ADMIN_API_SECRET (with ADMIN_API_SECRET_PREVIOUS support)
     if (isAdminRoute(pathname)) {
       const adminCheck = verifyAdminSecretHeader(request.headers);
       if (!adminCheck.valid) {
@@ -228,7 +366,7 @@ export async function middleware(request: NextRequest) {
       return applySecurityHeaders(NextResponse.next());
     }
 
-    // 6. All remaining /api/* routes require a valid organization API Key (x-api-key)
+    // 7. All remaining /api/* routes require a valid organization API Key (x-api-key)
     const supabaseUrl = requireEnv('SUPABASE_URL');
     const supabaseServiceRoleKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
@@ -425,13 +563,8 @@ export async function middleware(request: NextRequest) {
       validatedUserId = userRecord.id;
     }
 
-    // 10. Strip any client-supplied x-validated-* headers and inject server-verified context
-    const requestHeaders = new Headers(request.headers);
-    requestHeaders.delete('x-validated-org-id');
-    requestHeaders.delete('x-validated-user-id');
-    requestHeaders.delete('x-api-key-id');
-    requestHeaders.delete('x-api-key-name');
-    requestHeaders.delete('x-api-key-bound-user-id');
+    // 10. Strip any client-supplied x-validated-* / x-can-manage-keys headers and inject server-verified context
+    const requestHeaders = sanitizeClientHeaders(request);
 
     requestHeaders.set('x-validated-org-id', keyRecord.org_id);
     if (validatedUserId) {

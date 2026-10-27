@@ -1,52 +1,65 @@
-# Guía Rápida y Completa de Pruebas (Postman y cURL)
+# Guía Completa de Pruebas: Doble Autenticación de API Keys, Delegación Segura y AWS S3 Directo
 
 > **Servicio:** Cloudinary Clone Backend (Vercel Serverless)  
 > **URL Base:** `https://cloudinary-aws-backend.vercel.app`  
-> **Versión Actual:** Sección 5 (Subida Directa a S3, Range GET 32b, S3 Checksum SHA-256, Estados `uploaded`/`not_scanned`, y **Cero Archivos por Vercel**)  
+> **Versión Actual:** Sección 3 Reforzada (Doble Autenticación de Llaves: Raíz + Delegadas, Control Atómico de Cupos con Bloqueo de Fila) y Sección 5 (Subida Directa a S3, Range GET 32b, S3 Checksum SHA-256, Estados `uploaded`/`not_scanned`, y **Cero Archivos por Vercel**)  
 > **Fecha:** 26 de Octubre de 2026
 
 ---
 
 ## 🔑 1. MAPA DE AUTENTICACIÓN (¿Qué credencial va en qué ruta?)
 
-| Ruta | Método | Cabecera Requerida | Propósito / Quién la usa |
+| Ruta | Método | Credencial / Cabecera Requerida | Propósito / Quién la usa |
 |---|---|---|---|
-| `/api/keys` | POST, GET, DELETE | `x-admin-secret: <ADMIN_API_SECRET>` | Creación, listado y revocación de API Keys de organización |
-| `/api/logs` | GET, PATCH, DELETE | `x-admin-secret: <ADMIN_API_SECRET>` | Consulta y limpieza de auditoría |
-| `/api/records` | GET, DELETE | `x-admin-secret: <ADMIN_API_SECRET>` | Consulta y limpieza de base de datos (`files`) |
-| `/api/test/cleanup`| POST, DELETE | `x-admin-secret: <ADMIN_API_SECRET>` | Limpieza de pruebas en S3 y base de datos |
-| `/api/users` | GET | `x-admin-secret: <ADMIN_API_SECRET>` | Catálogo de usuarios y organizaciones |
-| `/api/cron/maintenance` | GET, POST | `Authorization: Bearer <CRON_SECRET>` | Tareas periódicas automatizadas de mantenimiento |
-| `/api/upload` | POST, PUT | `x-api-key: sk_live_...`<br>`x-user-id: <UUID_usuario>` | Solicitud y confirmación de subida directa |
-| `/api/upload/multipart` | POST, GET, DELETE | `x-api-key: sk_live_...`<br>`x-user-id: <UUID_usuario>` | Subida multipart para archivos grandes (>25 MB) |
-| `/api/files` | GET, DELETE | `x-api-key: sk_live_...` | Listar archivos de la organización o borrado |
-| `/api/files/:id` | GET, DELETE | `x-api-key: sk_live_...`<br>*(+ `x-user-id` si es privado)* | Descargar URL de archivo o eliminarlo |
-| `/api/files/:id/status`| GET | `x-api-key: sk_live_...` | Consultar estado del archivo |
+| `/api/keys` | POST, GET, PATCH, DELETE | `x-admin-secret: <ADMIN_API_SECRET>`<br>-- **O** --<br>`x-api-key: sk_live_...` *(con `can_manage_keys=true`)* | **Doble Autenticación:**<br>1. **Administrador de plataforma (`x-admin-secret`):** Control total entre organizaciones, puede otorgar `canManageKeys=true` y convertir llaves existentes vía `PATCH`.<br>2. **Llave Maestra de Organización (`x-api-key` con `can_manage_keys=true`):** Autoservicio para su propia organización (ignora `orgId` del body, siempre crea con `can_manage_keys=false`, anti-escalada y anti-autoeliminación). |
+| `/api/logs` | GET, PATCH, DELETE | `x-admin-secret: <ADMIN_API_SECRET>` | Consulta y limpieza de auditoría global en `service_logs`. |
+| `/api/records` | GET, DELETE | `x-admin-secret: <ADMIN_API_SECRET>` | Consulta y limpieza administrativa de `public.files`. |
+| `/api/users` | GET | `x-admin-secret: <ADMIN_API_SECRET>` | Catálogo de usuarios y organizaciones registradas. |
+| `/api/cron/maintenance` | GET, POST | `Authorization: Bearer <CRON_SECRET>` | Limpieza de tickets expirados y multiparts abortados. |
+| `/api/upload` | POST, PUT | `x-api-key: sk_live_...`<br>`x-user-id: <UUID_usuario>` | Solicitud de ticket prefirmado y confirmación con Range GET 32b. |
+| `/api/upload/multipart` | POST, GET, DELETE | `x-api-key: sk_live_...`<br>`x-user-id: <UUID_usuario>` | Subida multipart para archivos grandes (>25 MB). |
+| `/api/files` | GET, DELETE | `x-api-key: sk_live_...` | Listar archivos de la organización o eliminación. |
+| `/api/files/:id` | GET, DELETE | `x-api-key: sk_live_...`<br>*(+ `x-user-id` si es privado)* | Descargar URL prefirmada de S3 (5 min) o CDN CloudFront. |
+| `/api/files/:id/status`| GET | `x-api-key: sk_live_...` | Consultar estado del archivo en base de datos. |
 
 ---
 
-## 📋 2. DATOS DE PRUEBA LISTOS PARA USAR
+## 🛡️ 2. REGLAS DE SEGURIDAD EN LA GESTIÓN DE LLAVES
+
+1. **Higienización de Cabeceras (Anti-Spoofing):**
+   El middleware elimina incondicionalmente cualquier cabecera interna (`x-validated-*`, `x-can-manage-keys`, `x-caller-*`, `x-api-key-*`) que provenga del cliente antes de inyectar las del servidor. Además, `/api/keys` **no confía en cabeceras inyectadas**: siempre re-consulta Supabase directamente por el hash SHA-256 de la llave llamante.
+2. **Llaves Vinculadas a Usuario:**
+   Una llave atada a un usuario (`user_id IS NOT NULL`) **jamás puede gestionar llaves** (`can_manage_keys` forzado a `false` en la BD por restricción `CHECK`). Solo las llaves de organización (`user_id IS NULL`) pueden ser maestras.
+3. **Cupo Atómico (`max_api_keys`):**
+   Se valida en PostgreSQL mediante un Trigger `BEFORE INSERT OR UPDATE` con bloqueo exclusivo de fila:
+   `SELECT COALESCE(max_api_keys, 3) FROM public.organizations WHERE id = NEW.org_id FOR UPDATE;`
+   Esto serializa transacciones concurrentes y elimina condiciones de carrera (TOCTOU).
+4. **Anti-Escalada de Privilegios:**
+   Una llave delegada solo puede otorgar los permisos que ella misma posee (`can_read`, `can_upload`, `can_delete`). Si solicita permisos adicionales, el servidor responde `403 Forbidden` y registra `PRIVILEGE_ESCALATION_BLOCKED` en `service_logs`.
+5. **Anti-Autoeliminación y Protección de la Última Llave Raíz:**
+   Una llave no puede eliminarse ni revocarse a sí misma (`403 CANNOT_DELETE_SELF`). Tampoco se puede revocar la última llave con `can_manage_keys=true` de la organización sin `x-admin-secret` (`403 CANNOT_DELETE_LAST_MANAGE_KEY`).
+6. **Políticas de Caché y Cero Divulgación:**
+   `/api/keys` responde con `Cache-Control: private, no-store, no-cache, max-age=0, must-revalidate`. Jamás se imprime la llave en texto claro ni su hash completo en logs ni errores.
+7. **Rate Limiting:**
+   Límite estricto de 20 peticiones por minuto por llave/IP en `/api/keys` *(en memoria por instancia serverless de Vercel)*.
+
+---
+
+## 📋 3. DATOS DE PRUEBA LISTOS PARA USAR
 
 * **Organización 1 (ID):** `11111111-1111-1111-1111-111111111111`
-  * **Usuario 1 (Admin con permiso):** `a1111111-0000-0000-0000-000000000001` (Carlos Mendoza)
-  * **Usuario 2 (Editor con permiso):** `a1111111-0000-0000-0000-000000000002` (Ana Beltrán)
-  * **Usuario 3 (Sin permiso de subida):** `a1111111-0000-0000-0000-000000000010` (Valeria Ruiz, `can_upload = false` -> para probar rechazo 403)
+  * **Usuario 1 (Admin org):** `a1111111-0000-0000-0000-000000000001` (Carlos Mendoza)
+  * **Usuario 2 (Editor):** `a1111111-0000-0000-0000-000000000002` (Ana Beltrán)
+  * **Usuario 3 (Sin permiso de subida):** `a1111111-0000-0000-0000-000000000010` (Valeria Ruiz, `can_upload = false`)
 * **Organización 2 (ID):** `22222222-2222-2222-2222-222222222222`
-  * **Usuario Org 2:** `b2222222-0000-0000-0000-000000000001` (Mateo Delgado -> para probar rechazo 403 por cruce de organización)
+  * **Usuario Org 2:** `b2222222-0000-0000-0000-000000000001` (Mateo Delgado)
 
 ---
 
-## 🚀 3. FLUJO COMPLETO PASO A PASO (De 0 a 100)
+## 🚀 4. FLUJO COMPLETO DE PRUEBAS PASO A PASO
 
-```
-[0. Crear API Key] ──> [1. Solicitar Ticket] ──> [2. PUT Binario a S3] ──> [3. Confirmar Subida] ──> [4. Consumir / Descargar]
- (x-admin-secret)       (x-api-key + x-user-id)      (Directo a AWS S3)      (Range GET 32b + SHA-256)   (S3 Presigned vs CloudFront)
-```
-
----
-
-### PASO 0: Crear una API Key de Organización (POST /api/keys)
-> **Objetivo:** Obtener la llave `sk_live_...` que usarás en todas tus peticiones siguientes.
+### PASO 0A: Crear la Primera Llave Maestra de la Organización (POST /api/keys con x-admin-secret)
+> **Objetivo:** El administrador de la plataforma crea la llave raíz de la Organización 1 con `canManageKeys: true`.
 
 * **Método:** `POST`
 * **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys`
@@ -59,10 +72,11 @@
   ```json
   {
     "orgId": "11111111-1111-1111-1111-111111111111",
-    "name": "Llave de Pruebas Postman",
+    "name": "Llave Maestra Org 1",
     "canRead": true,
     "canUpload": true,
-    "canDelete": true
+    "canDelete": true,
+    "canManageKeys": true
   }
   ```
 * **cURL:**
@@ -70,24 +84,154 @@
   curl -X POST https://cloudinary-aws-backend.vercel.app/api/keys \
     -H "Content-Type: application/json" \
     -H "x-admin-secret: <TU_ADMIN_API_SECRET>" \
-    -d "{\"orgId\":\"11111111-1111-1111-1111-111111111111\",\"name\":\"Llave de Pruebas\",\"canRead\":true,\"canUpload\":true,\"canDelete\":true}"
+    -d "{\"orgId\":\"11111111-1111-1111-1111-111111111111\",\"name\":\"Llave Maestra Org 1\",\"canRead\":true,\"canUpload\":true,\"canDelete\":true,\"canManageKeys\":true}"
   ```
 * **Respuesta Esperada (HTTP 201 Created):**
   ```json
   {
-    "status": "success",
-    "apiKey": "sk_live_...",
-    "keyId": "uuid-de-la-llave",
-    "orgId": "11111111-1111-1111-1111-111111111111",
-    "name": "Llave de Pruebas",
-    "permissions": {
-      "canRead": true,
-      "canUpload": true,
-      "canDelete": true
+    "status": "created",
+    "message": "IMPORTANTE: Guarda esta API Key en el backend...",
+    "apiKey": "sk_live_master_...",
+    "keyMetadata": {
+      "id": "uuid-llave-maestra",
+      "org_id": "11111111-1111-1111-1111-111111111111",
+      "user_id": null,
+      "name": "Llave Maestra Org 1",
+      "can_read": true,
+      "can_upload": true,
+      "can_delete": true,
+      "can_manage_keys": true,
+      "is_active": true
     }
   }
   ```
-  *(💡 **Copia la `apiKey` generada (`sk_live_...`)** para los pasos siguientes).*
+
+---
+
+### PASO 0B: Crear Llave Secundaria Delegada SIN Admin Secret (POST /api/keys con x-api-key)
+> **Objetivo:** La organización crea una llave subordinada usando su propia llave maestra, sin requerir intervención de la administración de la plataforma.
+
+* **Método:** `POST`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys`
+* **Headers:**
+  ```http
+  Content-Type: application/json
+  x-api-key: sk_live_master_...
+  ```
+* **Body (raw JSON):**
+  *(Observa que no es necesario enviar `orgId`; el servidor toma el `org_id` de la llave maestra)*:
+  ```json
+  {
+    "name": "Llave Delegada Microservicio Subidas",
+    "canRead": true,
+    "canUpload": true,
+    "canDelete": false
+  }
+  ```
+* **cURL:**
+  ```bash
+  curl -X POST https://cloudinary-aws-backend.vercel.app/api/keys \
+    -H "Content-Type: application/json" \
+    -H "x-api-key: sk_live_master_..." \
+    -d "{\"name\":\"Llave Delegada Microservicio Subidas\",\"canRead\":true,\"canUpload\":true,\"canDelete\":false}"
+  ```
+* **Respuesta Esperada (HTTP 201 Created):**
+  ```json
+  {
+    "status": "created",
+    "apiKey": "sk_live_subordinada_...",
+    "keyMetadata": {
+      "id": "uuid-llave-subordinada",
+      "org_id": "11111111-1111-1111-1111-111111111111",
+      "name": "Llave Delegada Microservicio Subidas",
+      "can_read": true,
+      "can_upload": true,
+      "can_delete": false,
+      "can_manage_keys": false
+    }
+  }
+  ```
+  *(💡 La llave subordinada tiene forzosamente `can_manage_keys: false`).*
+
+---
+
+### PASO 0C: [Seguridad] Rechazo por Intento de Escalada de Privilegios
+> **Objetivo:** Probar que una llave con `can_delete: false` no pueda crear otra llave con `can_delete: true`.
+
+* **Método:** `POST`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys`
+* **Headers:**
+  ```http
+  Content-Type: application/json
+  x-api-key: sk_live_subordinada_...
+  ```
+* **Body:**
+  ```json
+  {
+    "name": "Intento de Escalada",
+    "canDelete": true
+  }
+  ```
+* **Respuesta Esperada (HTTP 403 Forbidden):**
+  ```json
+  {
+    "error": "Forbidden",
+    "code": "CANNOT_MANAGE_KEYS",
+    "message": "La API Key no tiene permisos de administración de llaves (can_manage_keys=false)."
+  }
+  ```
+  *(Y si una llave maestra intenta otorgar permisos que no posee, se rechaza con `403 PRIVILEGE_ESCALATION_BLOCKED` y se audita en `service_logs`).*
+
+---
+
+### PASO 0D: Promover una Llave Existente a Maestra (PATCH /api/keys con x-admin-secret)
+> **Objetivo:** Si una organización ya tenía llaves creadas antes de la migración (todas arrancan con `can_manage_keys=false`), el admin de plataforma puede promoverla a maestra sin tener que crear una llave nueva.
+
+* **Método:** `PATCH`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys`
+* **Headers:**
+  ```http
+  Content-Type: application/json
+  x-admin-secret: <TU_ADMIN_API_SECRET>
+  ```
+* **Body:**
+  ```json
+  {
+    "id": "uuid-de-la-llave-existente",
+    "canManageKeys": true
+  }
+  ```
+* **Respuesta Esperada (HTTP 200 OK):**
+  ```json
+  {
+    "status": "updated",
+    "message": "API Key actualizada exitosamente.",
+    "key": {
+      "id": "uuid-de-la-llave-existente",
+      "can_manage_keys": true
+    }
+  }
+  ```
+
+---
+
+### PASO 0E: [Seguridad] Rechazo de Auto-eliminación (DELETE /api/keys)
+> **Objetivo:** Una llave no puede eliminarse ni revocarse a sí misma.
+
+* **Método:** `DELETE`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/keys?id=<uuid_de_la_llave_maestra>&mode=revoke`
+* **Headers:**
+  ```http
+  x-api-key: sk_live_master_...
+  ```
+* **Respuesta Esperada (HTTP 403 Forbidden):**
+  ```json
+  {
+    "error": "Forbidden",
+    "code": "CANNOT_DELETE_SELF",
+    "message": "Una API Key no puede eliminarse ni revocarse a sí misma. Utiliza otra llave administradora o solicita al administrador con x-admin-secret."
+  }
+  ```
 
 ---
 
@@ -103,7 +247,6 @@
   x-user-id: a1111111-0000-0000-0000-000000000001
   ```
 * **Body (raw JSON):**
-  *(Asegúrate de colocar el tamaño EXACTO en bytes del archivo que vas a subir en `fileSize`)*:
   ```json
   {
     "fileName": "prueba.png",
@@ -112,7 +255,6 @@
     "visibility": "private"
   }
   ```
-  *(Opcional: Si quieres probar la integridad criptográfica de S3, agrega el campo `"sha256Hash": "<hash_hex_64_chars>"`)*.
 * **cURL:**
   ```bash
   curl -X POST https://cloudinary-aws-backend.vercel.app/api/upload \
@@ -136,23 +278,20 @@
     "confirmToken": "ZWQ0OWU5MDEtMWUyOC00M2E3...HMAC"
   }
   ```
-  *(💡 **Copia `uploadUrl`, `ticketId`, `fileId` y `confirmToken`**).*
 
 ---
 
 ### PASO 2: Subir el Binario Directamente a AWS S3 (PUT a la uploadUrl)
-> **Objetivo:** Enviar los bytes directamente desde tu máquina a Amazon S3. **Ningún archivo pasa por Vercel.**
+> **Objetivo:** Enviar los bytes directamente desde el cliente hacia Amazon S3. **Cero bytes por Vercel.**
 
 * **Método:** `PUT`
-* **URL:** *(Pega la `uploadUrl` completa devuelta en el Paso 1)*
-* **Headers:** *(Deben coincidir EXACTAMENTE con las devueltas en `requiredHeaders`)*:
+* **URL:** *(Pega la `uploadUrl` devuelta en el Paso 1)*
+* **Headers:** *(Idénticas a las devueltas en `requiredHeaders`)*:
   ```http
   Content-Type: image/png
   Cache-Control: private, no-store, no-cache, max-age=0, must-revalidate
   ```
-  *(Si subes un PDF, agrega también: `Content-Disposition: attachment`).*  
-  *(Si enviaste `sha256Hash`, agrega la cabecera indicada en requiredHeaders: `x-amz-checksum-sha256: <base64>`).*
-* **Body en Postman:** Selecciona `binary` y adjunta tu archivo local (el tamaño en disco debe ser idéntico al `fileSize` declarado).
+* **Body en Postman:** Selecciona `binary` y adjunta tu archivo local.
 * **cURL:**
   ```bash
   curl -X PUT "<uploadUrl>" \
@@ -160,13 +299,12 @@
     -H "Cache-Control: private, no-store, no-cache, max-age=0, must-revalidate" \
     --data-binary @"./prueba.png"
   ```
-* **Respuesta Esperada:**
-  * **HTTP 200 OK** (Cuerpo vacío, devuelto directamente por los servidores de Amazon S3).
+* **Respuesta Esperada:** **HTTP 200 OK** (Cuerpo vacío devuelto por AWS S3).
 
 ---
 
 ### PASO 3: Confirmar la Subida en el Backend (PUT /api/upload)
-> **Objetivo:** El servidor valida en S3: (1) HeadObject, (2) Range GET de los primeros 32 bytes para certificar los `magic bytes` reales de la imagen sin descargarla a Vercel, y (3) Checksum SHA-256. Actualiza el estado a `uploaded` y `scan_status: not_scanned`.
+> **Objetivo:** El servidor valida en S3: HeadObject, Range GET de 32 bytes para verificar el magic number real, y checksum SHA-256. Actualiza el estado a `uploaded` y `scan_status: not_scanned`.
 
 * **Método:** `PUT`
 * **URL:** `https://cloudinary-aws-backend.vercel.app/api/upload`
@@ -195,38 +333,20 @@
   ```json
   {
     "status": "success",
-    "method": "PUT",
-    "message": "File upload confirmed for ticket ab9ceee4-1bfe-4ed3-a3c0-c026f9aa1e37",
-    "ticketId": "ab9ceee4-1bfe-4ed3-a3c0-c026f9aa1e37",
-    "fileId": "e435ab1d-2c81-4c89-b956-12618e8c7c01",
     "fileStatus": "uploaded",
     "scanStatus": "not_scanned",
     "visibility": "private",
-    "ownerUserId": "a1111111-0000-0000-0000-000000000001",
-    "cacheControl": "private, no-store, no-cache, max-age=0, must-revalidate",
-    "cloudfrontUrl": null,
-    "tokenVerified": true,
-    "headVerification": {
-      "verified": true,
-      "actualSizeBytes": 289159,
-      "actualContentType": "image/png",
-      "actualCacheControl": "private, no-store, no-cache, max-age=0, must-revalidate",
-      "actualContentDisposition": "inline",
-      "eTag": "\"567c52f9e9f0b3317eb83b27900af74e\""
-    },
     "verification": {
       "magicBytesVerified": true,
-      "detectedMimeType": "image/png",
-      "checksumVerified": false
+      "detectedMimeType": "image/png"
     }
   }
   ```
-  *(💡 Observa que `fileStatus` es `uploaded`, `scanStatus` es `not_scanned` y no se filtra ninguna clave interna de S3).*
 
 ---
 
 ### PASO 4: Consumir / Descargar el Archivo (GET /api/files/:id)
-> **Objetivo:** Obtener el enlace de descarga seguro. Para archivos privados, entrega una URL prefirmada de S3 válida por 5 minutos con `no-store`. Para archivos públicos, entrega el enlace CDN de CloudFront.
+> **Objetivo:** Obtener la URL de entrega. Para privados entrega URL prefirmada de S3 de 5 min (`no-store`) verificando propiedad del archivo; para públicos entrega CDN CloudFront.
 
 * **Método:** `GET`
 * **URL:** `https://cloudinary-aws-backend.vercel.app/api/files/<fileId>`
@@ -235,71 +355,14 @@
   x-api-key: sk_live_...
   x-user-id: a1111111-0000-0000-0000-000000000001
   ```
-* **cURL:**
-  ```bash
-  curl -X GET https://cloudinary-aws-backend.vercel.app/api/files/<fileId> \
-    -H "x-api-key: sk_live_..." \
-    -H "x-user-id: a1111111-0000-0000-0000-000000000001"
-  ```
 * **Respuesta Esperada para Archivo Privado (HTTP 200 OK):**
   ```json
   {
-    "url": "https://practicas-alan-418272802078.s3.us-east-1.amazonaws.com/static/files/567c52f9e9f0b3317eb83b27900af74e.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=300&response-cache-control=private%2C%20no-store...",
+    "url": "https://practicas-alan-418272802078.s3.us-east-1.amazonaws.com/static/files/567c52f9e9f0b3317eb83b27900af74e.png?X-Amz-Expires=300...",
     "delivery": "s3_presigned",
     "expiresInSeconds": 300,
-    "cloudfrontUrl": null,
     "visibility": "private",
-    "cacheControl": "private, no-store, no-cache, max-age=0, must-revalidate",
-    "fileId": "e435ab1d-2c81-4c89-b956-12618e8c7c01",
-    "ownerUserId": "a1111111-0000-0000-0000-000000000001",
     "status": "uploaded",
     "scanStatus": "not_scanned"
   }
   ```
-  *(💡 Puedes abrir la propiedad `url` en tu navegador para ver o descargar el archivo directo de S3).*
-
----
-
-## 🛠 4. PRUEBAS DE SEGURIDAD Y RECHAZO (Casos Negativos)
-
-| Caso de Prueba | Qué enviar | Respuesta Esperada | Qué valida el sistema |
-|---|---|---|---|
-| **1. Sin API Key** | Cualquier petición a `/api/upload` sin `x-api-key` | **HTTP 401 Unauthorized**<br>`code: MISSING_API_KEY` | El middleware Edge protege todas las rutas |
-| **2. Suplantación de Tenant** | Enviar `x-api-key` de Org 1 pero `x-user-id` de Mateo Delgado (`b222...` de Org 2) | **HTTP 403 Forbidden**<br>`code: FORBIDDEN_USER_NOT_IN_ORG` | Cierra la suplantación de usuarios entre organizaciones |
-| **3. Usuario sin permiso de subida** | Enviar `x-user-id` de Valeria Ruiz (`a111...10`) que tiene `can_upload=false` | **HTTP 403 Forbidden**<br>`code: UPLOAD_PERMISSION_DENIED` | Valida permisos RBAC del usuario |
-| **4. Tipo de archivo malicioso (XSS)** | Enviar `fileName: "script.html"` o `fileType: "image/svg+xml"` en el ticket | **HTTP 400 Bad Request**<br>`code: XSS_DANGEROUS_FILE_TYPE` | Lista blanca estricta anti-XSS |
-| **5. Falsificación de Magic Bytes** | Declarar `image/png` en el ticket pero subir un archivo de texto o ejecutable en el PUT | **HTTP 400 Bad Request**<br>`code: INVALID_MAGIC_BYTES` | El Range GET de 32 bytes detecta la cabecera real y borra el objeto de S3 |
-| **6. Confirmar dos veces el mismo ticket** | Ejecutar el Paso 3 dos veces con el mismo `ticketId` | **HTTP 409 Conflict**<br>`code: TICKET_ALREADY_COMPLETED` | Idempotencia y protección anti-repetición |
-| **7. Descargar archivo privado de otro usuario** | Consultar `GET /api/files/:id` enviando el `x-user-id` de Ana Beltrán para un archivo de Carlos | **HTTP 403 Forbidden**<br>`code: FORBIDDEN_PRIVATE_NOT_OWNER` | Aislamiento estricto de privacidad |
-
----
-
-## ⚙️ 5. ENDPOINTS ADMINISTRATIVOS Y DE MANTENIMIENTO
-
-### Ejecutar Mantenimiento Manual (POST /api/cron/maintenance)
-* **Método:** `POST`
-* **URL:** `https://cloudinary-aws-backend.vercel.app/api/cron/maintenance`
-* **Headers:**
-  ```http
-  Authorization: Bearer <TU_CRON_SECRET>
-  ```
-* **Respuesta Esperada (HTTP 200 OK):**
-  Devuelve el resumen de tickets vencidos eliminados en S3 y BD, y multiparts abandonados abortados.
-
-### Consultar Registros de Archivos (GET /api/records)
-* **Método:** `GET`
-* **URL:** `https://cloudinary-aws-backend.vercel.app/api/records`
-* **Headers:**
-  ```http
-  x-admin-secret: <TU_ADMIN_API_SECRET>
-  ```
-* **Respuesta:** Lista de todos los registros en `files` con sus estados y tamaños.
-
-### Consultar Bitácora de Auditoría (GET /api/logs)
-* **Método:** `GET`
-* **URL:** `https://cloudinary-aws-backend.vercel.app/api/logs?limit=50`
-* **Headers:**
-  ```http
-  x-admin-secret: <TU_ADMIN_API_SECRET>
-  ```
-* **Respuesta:** Historial de eventos de seguridad (`UPLOAD_CONFIRMED`, `ACCESS_DENIED`, etc.) en Tercera Forma Normal.

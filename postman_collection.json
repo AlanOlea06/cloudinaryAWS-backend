@@ -1,7 +1,7 @@
 {
   "info": {
-    "name": "Cloudinary Clone - API (Hardened Sections 2 & 3)",
-    "description": "Colección Postman actualizada para las Secciones 2 (Cierre de acceso abierto) y 3 (Modelo de llaves por organización - Opción A).\n\nVariables secretas (tipo 'secret'):\n- adminSecret: ADMIN_API_SECRET para rutas administrativas (/api/keys, /api/logs, /api/records, /api/users).\n- cronSecret: CRON_SECRET para /api/cron/maintenance.\n- apiKey: API Key de organización (sk_live_...) para uso exclusivo en backend.",
+    "name": "Cloudinary Clone - API (Hardened Dual Key Model & Direct S3)",
+    "description": "Colección Postman actualizada para el modelo de doble autenticación (Root Key + Delegated Scoped Keys), cupo atómico con bloqueo de fila en BD, subida directa a AWS S3 y entrega privada sin intermediación de Vercel.\n\nVariables secretas:\n- adminSecret: ADMIN_API_SECRET para rutas de administración global de plataforma.\n- apiKey: API Key Maestra de organización (sk_live_...) con can_manage_keys=true.\n- secondaryApiKey: API Key secundaria/delegada (can_manage_keys=false).\n- cronSecret: CRON_SECRET para /api/cron/maintenance.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -27,7 +27,17 @@
     },
     {
       "key": "keyId",
-      "value": "f987452a-8a73-4c0e-b955-24c203e3070f",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "secondaryApiKey",
+      "value": "",
+      "type": "secret"
+    },
+    {
+      "key": "secondaryKeyId",
+      "value": "",
       "type": "string"
     },
     {
@@ -112,11 +122,11 @@
             "health"
           ]
         },
-        "description": "Única ruta pública bajo /api/*. Devuelve 200 OK sin exponer nombre del bucket ni datos sensibles."
+        "description": "Única ruta pública bajo /api/*. Devuelve 200 OK con estado del servicio sin exponer secretos."
       }
     },
     {
-      "name": "0.1 Crear API Key de Organización (POST /api/keys)",
+      "name": "0.1A Crear API Key Maestra de Organización (POST /api/keys con x-admin-secret)",
       "event": [
         {
           "listen": "test",
@@ -149,7 +159,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"org_id\": \"{{orgId}}\",\n  \"user_id\": null,\n  \"name\": \"Backend Organization Key\",\n  \"can_read\": true,\n  \"can_upload\": true,\n  \"can_delete\": true\n}",
+          "raw": "{\n  \"orgId\": \"{{orgId}}\",\n  \"userId\": null,\n  \"name\": \"Llave Maestra Organización 1\",\n  \"canRead\": true,\n  \"canUpload\": true,\n  \"canDelete\": true,\n  \"canManageKeys\": true\n}",
           "options": {
             "raw": {
               "language": "json"
@@ -166,18 +176,144 @@
             "keys"
           ]
         },
-        "description": "Crea una API Key de organización (user_id: null) para uso en el backend del cliente. Exige x-admin-secret."
+        "description": "Crea la API Key Raíz/Maestra de la organización con canManageKeys=true usando x-admin-secret."
       }
     },
     {
-      "name": "0.2 Listar API Keys de Organización (GET /api/keys)",
+      "name": "0.1B Delegación: Crear API Key Secundaria (POST /api/keys con x-api-key maestra)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.apiKey) {",
+              "    pm.collectionVariables.set('secondaryApiKey', json.apiKey);",
+              "}",
+              "if (json.keyMetadata && json.keyMetadata.id) {",
+              "    pm.collectionVariables.set('secondaryKeyId', json.keyMetadata.id);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "description": "Llave maestra con can_manage_keys=true"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Llave Secundaria de Subida\",\n  \"canRead\": true,\n  \"canUpload\": true,\n  \"canDelete\": false\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/keys",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "keys"
+          ]
+        },
+        "description": "Crea una llave delegada subordinada para su propia organización sin intervención del administrador. La llave se crea forzosamente con can_manage_keys=false."
+      }
+    },
+    {
+      "name": "0.1C [Seguridad] Intento de Escalada de Privilegios (403 PRIVILEGE_ESCALATION_BLOCKED)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{secondaryApiKey}}",
+            "description": "Llave secundaria que intenta crear otra llave o escalar permisos"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Intento Escalada\",\n  \"canRead\": true,\n  \"canUpload\": true,\n  \"canDelete\": true\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/keys",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "keys"
+          ]
+        },
+        "description": "Verifica que el servidor rechace con 403 Forbidden y registre PRIVILEGE_ESCALATION_BLOCKED en service_logs si se intentan crear permisos superiores a los propios."
+      }
+    },
+    {
+      "name": "0.1D Promover o Modificar Llave Existente (PATCH /api/keys con x-admin-secret)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-admin-secret",
+            "value": "{{adminSecret}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"id\": \"{{keyId}}\",\n  \"canManageKeys\": true\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/keys",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "keys"
+          ]
+        },
+        "description": "Permite al administrador de la plataforma promover una llave de organización existente a llave maestra (can_manage_keys=true)."
+      }
+    },
+    {
+      "name": "0.2A Listar API Keys como Administrador (GET /api/keys con x-admin-secret)",
       "request": {
         "method": "GET",
         "header": [
           {
             "key": "x-admin-secret",
-            "value": "{{adminSecret}}",
-            "description": "Obligatorio (ADMIN_API_SECRET)"
+            "value": "{{adminSecret}}"
           }
         ],
         "url": {
@@ -196,22 +332,44 @@
             }
           ]
         },
-        "description": "Lista las API Keys de la organización sin exponer hashes ni secretos. Exige x-admin-secret."
+        "description": "Lista las llaves de cualquier organización sin exponer claves en texto claro ni hashes completos."
       }
     },
     {
-      "name": "0.3 Eliminar o Revocar API Key (DELETE /api/keys)",
+      "name": "0.2B Listar API Keys como Organización (GET /api/keys con x-api-key)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/keys",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "keys"
+          ]
+        },
+        "description": "Lista exclusivamente las llaves pertenecientes a la propia organización con aislamiento multi-inquilino estricto."
+      }
+    },
+    {
+      "name": "0.3A [Seguridad] Auto-eliminación Bloqueada (DELETE /api/keys -> 403 CANNOT_DELETE_SELF)",
       "request": {
         "method": "DELETE",
         "header": [
           {
-            "key": "x-admin-secret",
-            "value": "{{adminSecret}}",
-            "description": "Obligatorio (ADMIN_API_SECRET)"
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
           }
         ],
         "url": {
-          "raw": "{{baseUrl}}/api/keys?id={{keyId}}&mode=delete",
+          "raw": "{{baseUrl}}/api/keys?id={{keyId}}&mode=revoke",
           "host": [
             "{{baseUrl}}"
           ],
@@ -226,11 +384,44 @@
             },
             {
               "key": "mode",
-              "value": "delete"
+              "value": "revoke"
             }
           ]
         },
-        "description": "Elimina o revoca una API Key por ID. Exige x-admin-secret."
+        "description": "Verifica que una llave no pueda revocarse ni eliminarse a sí misma (403 CANNOT_DELETE_SELF)."
+      }
+    },
+    {
+      "name": "0.3B Revocar o Eliminar Llave Secundaria (DELETE /api/keys con x-api-key)",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/keys?id={{secondaryKeyId}}&mode=revoke",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "keys"
+          ],
+          "query": [
+            {
+              "key": "id",
+              "value": "{{secondaryKeyId}}"
+            },
+            {
+              "key": "mode",
+              "value": "revoke"
+            }
+          ]
+        },
+        "description": "Revoca una llave subordinada de la organización usando la llave maestra."
       }
     },
     {
@@ -288,7 +479,7 @@
             "upload"
           ]
         },
-        "description": "Sección 3: Toma orgId y userId exclusivamente del contexto validado (x-api-key + x-user-id) e ignora userId/orgId del body."
+        "description": "Genera ticket prefirmado de S3 directo hacia static/files/<rand128>.<ext>. Cero bytes por Vercel."
       }
     },
     {
@@ -306,8 +497,7 @@
           },
           {
             "key": "x-user-id",
-            "value": "{{otherOrgUserId}}",
-            "description": "Usuario de Organización 2 usando llave de Organización 1"
+            "value": "{{otherOrgUserId}}"
           }
         ],
         "body": {
@@ -392,11 +582,11 @@
             "{{uploadUrl}}"
           ]
         },
-        "description": "Sube el binario directamente a S3 con las cabeceras firmadas en X-Amz-SignedHeaders."
+        "description": "Sube el binario directamente desde el cliente hacia AWS S3 sin pasar por el servidor."
       }
     },
     {
-      "name": "3. Confirmar Subida y Procesar (PUT /api/upload)",
+      "name": "3. Confirmar Subida (PUT /api/upload)",
       "request": {
         "method": "PUT",
         "header": [
@@ -429,11 +619,11 @@
             }
           ]
         },
-        "description": "Verifica firma HMAC del ticket, comprueba objeto en S3 (HeadObject) y procesa el archivo hacia static/files/."
+        "description": "Valida existencia del objeto en S3, lee los primeros 32 bytes (Range GET) para verificar el magic number real, valida checksum SHA-256 de S3 y marca el estado como 'uploaded'."
       }
     },
     {
-      "name": "3.1. Obtener URL de Entrega (GET /api/files/:id)",
+      "name": "3.1 Obtener URL de Entrega (GET /api/files/:id)",
       "event": [
         {
           "listen": "test",
@@ -471,11 +661,11 @@
             "{{fileId}}"
           ]
         },
-        "description": "Para archivos privados valida que x-user-id sea el propietario y devuelve URL prefirmada de S3 (5 min). Para públicos devuelve URL de CloudFront."
+        "description": "Para archivos privados devuelve URL prefirmada de S3 (5 minutos, no-store) validando que el usuario sea el dueño. Para públicos devuelve URL de CloudFront."
       }
     },
     {
-      "name": "3.2. Descargar Archivo (GET downloadUrl)",
+      "name": "3.2 Descargar Archivo (GET downloadUrl)",
       "request": {
         "method": "GET",
         "header": [],
@@ -485,7 +675,7 @@
             "{{downloadUrl}}"
           ]
         },
-        "description": "Descarga el archivo directamente desde S3 (privado) o CloudFront (público)."
+        "description": "Descarga directa de los bytes desde S3 o CloudFront hacia el cliente."
       }
     },
     {
@@ -495,8 +685,7 @@
         "header": [
           {
             "key": "x-admin-secret",
-            "value": "{{adminSecret}}",
-            "description": "Obligatorio (ADMIN_API_SECRET)"
+            "value": "{{adminSecret}}"
           }
         ],
         "url": {
@@ -519,8 +708,7 @@
         "header": [
           {
             "key": "x-admin-secret",
-            "value": "{{adminSecret}}",
-            "description": "Obligatorio (ADMIN_API_SECRET)"
+            "value": "{{adminSecret}}"
           }
         ],
         "url": {
@@ -543,8 +731,7 @@
         "header": [
           {
             "key": "x-admin-secret",
-            "value": "{{adminSecret}}",
-            "description": "Obligatorio (ADMIN_API_SECRET)"
+            "value": "{{adminSecret}}"
           }
         ],
         "url": {
@@ -567,8 +754,7 @@
         "header": [
           {
             "key": "Authorization",
-            "value": "Bearer {{cronSecret}}",
-            "description": "Obligatorio (Bearer CRON_SECRET)"
+            "value": "Bearer {{cronSecret}}"
           }
         ],
         "url": {
@@ -582,7 +768,7 @@
             "maintenance"
           ]
         },
-        "description": "Ejecuta limpieza de tickets vencidos, aborto de multiparts abandonados y reintentos. Exige Authorization: Bearer <CRON_SECRET>."
+        "description": "Ejecuta limpieza de tickets expirados y mantenimiento. Exige Authorization: Bearer <CRON_SECRET>."
       }
     }
   ]
