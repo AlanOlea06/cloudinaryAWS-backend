@@ -132,9 +132,6 @@ export async function PUT(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const authError = enforceAdminAuth(req);
-  if (authError) return authError;
-
   try {
     const rawBody = await req.text();
     const timestampHeader = req.headers.get('x-webhook-timestamp') || '';
@@ -143,16 +140,8 @@ export async function POST(req: NextRequest) {
       req.headers.get('x-webhook-signature-256') ||
       '';
     const eventHeader = req.headers.get('x-webhook-event');
-    const eventIdHeader = req.headers.get('x-webhook-id');
+    const eventIdHeader = req.headers.get('x-webhook-id') || req.headers.get('x-webhook-delivery-id');
     const attemptHeader = req.headers.get('x-webhook-attempt');
-    const secretToVerify = req.headers.get('x-webhook-secret-test')?.trim() || '';
-
-    const isValidSig = verifyWebhookSignature(
-      rawBody,
-      timestampHeader,
-      signatureHeader,
-      secretToVerify
-    );
 
     let parsedPayload: any = null;
     try {
@@ -161,12 +150,44 @@ export async function POST(req: NextRequest) {
       parsedPayload = rawBody;
     }
 
+    let secretToVerify = req.headers.get('x-webhook-secret-test')?.trim() || '';
+    const adminCheck = verifyAdminSecretHeader(req.headers);
+
+    // If no manual secret header provided, look up the organization's webhook_secret from DB
+    if (!secretToVerify && parsedPayload?.orgId) {
+      const { data: org } = await supabase
+        .from('organizations')
+        .select('webhook_secret')
+        .eq('id', parsedPayload.orgId)
+        .maybeSingle();
+      if (org?.webhook_secret) {
+        secretToVerify = org.webhook_secret;
+      }
+    }
+
+    const isValidSig =
+      Boolean(secretToVerify &&
+      signatureHeader &&
+      timestampHeader &&
+      verifyWebhookSignature(rawBody, timestampHeader, signatureHeader, secretToVerify));
+
+    // Must either be a valid signed webhook or have valid admin credentials
+    if (!isValidSig && !adminCheck.valid) {
+      return NextResponse.json(
+        {
+          error: 'Unauthorized',
+          code: 'INVALID_WEBHOOK_SIGNATURE_OR_AUTH',
+          message: 'Firma HMAC-SHA256 del webhook inválida o falta autenticación administrativa.',
+        },
+        { status: 401, headers: corsHeaders }
+      );
+    }
+
     const entry: ReceivedWebhookEntry = {
       receivedAt: new Date().toISOString(),
-      validSignature: isValidSig,
-      reason: isValidSig ? undefined : 'Firma HMAC-SHA256 inválida o falta x-webhook-secret-test.',
+      validSignature: isValidSig || adminCheck.valid,
       event: eventHeader || parsedPayload?.event || null,
-      eventId: eventIdHeader || parsedPayload?.eventId || null,
+      eventId: eventIdHeader || parsedPayload?.eventId || parsedPayload?.deliveryId || null,
       timestampHeader,
       signatureHeader,
       attemptHeader,
@@ -178,31 +199,19 @@ export async function POST(req: NextRequest) {
       receivedWebhooksStore.pop();
     }
 
-    if (!isValidSig) {
-      return NextResponse.json(
-        {
-          status: 'rejected',
-          code: 'INVALID_WEBHOOK_SIGNATURE',
-          message: entry.reason,
-        },
-        { status: 401, headers: corsHeaders }
-      );
-    }
-
     return NextResponse.json(
       {
-        status: 'verified',
-        code: 'WEBHOOK_SIGNATURE_VALID',
-        message: 'Firma HMAC-SHA256 (X-Webhook-Signature-256) y timestamp anti-replay verificados correctamente.',
-        event: entry.event,
-        eventId: entry.eventId,
+        status: 'success',
+        message: 'Webhook recibido y validado exitosamente por test-receiver.',
+        validSignature: isValidSig,
+        receivedEvent: entry.event,
+        deliveryId: entry.eventId,
       },
       { status: 200, headers: corsHeaders }
     );
   } catch (err: any) {
-    return NextResponse.json(
-      { error: 'Internal Server Error', message: err.message },
-      { status: 500, headers: corsHeaders }
-    );
+    return NextResponse.json({ error: 'Internal Error', message: err.message }, { status: 500, headers: corsHeaders });
   }
 }
+
+
