@@ -255,9 +255,14 @@ export async function middleware(request: NextRequest) {
       return applySecurityHeaders(NextResponse.next());
     }
 
-    // 5. Special Dual-Auth Route: /api/keys
+    // 5. Special Dual-Auth Routes: /api/keys and /api/organizations
     // Allows ADMIN_API_SECRET (full access) OR an active organization API Key with can_manage_keys=true (user_id IS NULL)
-    if (pathname === '/api/keys' || pathname.startsWith('/api/keys/')) {
+    if (
+      pathname === '/api/keys' ||
+      pathname.startsWith('/api/keys/') ||
+      pathname === '/api/organizations' ||
+      pathname.startsWith('/api/organizations/')
+    ) {
       const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || '127.0.0.1';
       const rawApiKey = request.headers.get('x-api-key')?.trim();
       const rateLimitKey = rawApiKey ? `keys:key:${await sha256Hex(rawApiKey)}` : `keys:ip:${clientIp}`;

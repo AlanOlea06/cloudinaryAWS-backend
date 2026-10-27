@@ -36,7 +36,7 @@ async function resolveCallerAuth(req: NextRequest): Promise<AuthResult> {
     const { data: keyRecord } = await supabase
       .from('api_keys')
       .select('id, org_id, user_id, can_manage_keys, is_active')
-      .eq('key_hash', keyHash)
+      .eq('hashed_key', keyHash)
       .eq('is_active', true)
       .maybeSingle();
 
