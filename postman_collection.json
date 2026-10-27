@@ -1,7 +1,7 @@
 {
   "info": {
-    "name": "Cloudinary Clone - API (Hardened Dual Key Model & Direct S3)",
-    "description": "Colección Postman actualizada para el modelo de doble autenticación (Root Key + Delegated Scoped Keys), cupo atómico con bloqueo de fila en BD, subida directa a AWS S3 y entrega privada sin intermediación de Vercel.\n\nVariables secretas:\n- adminSecret: ADMIN_API_SECRET para rutas de administración global de plataforma.\n- apiKey: API Key Maestra de organización (sk_live_...) con can_manage_keys=true.\n- secondaryApiKey: API Key secundaria/delegada (can_manage_keys=false).\n- cronSecret: CRON_SECRET para /api/cron/maintenance.",
+    "name": "Cloudinary Clone - API v2.0 (Hardened Dual-Auth, Direct S3, Multipart & Webhooks)",
+    "description": "Colección Postman completa y verificada en producción para Cloudinary Clone Backend (https://cloudinary-aws-backend.vercel.app).\n\nIncluye:\n1. Salud y Gestión de Organizaciones / Webhooks con Doble Autenticación (/api/health, /api/organizations) y pruebas anti-SSRF.\n2. Gestión de API Keys con Doble Autenticación, Cupo Atómico en PostgreSQL y Anti-Escalada (/api/keys).\n3. Subida Directa a S3 con Checksum SHA-256 Criptográfico, Validación Range GET de 32 bytes (422 MAGIC_BYTES_MISMATCH) y Entrega Privada S3 vs Pública CloudFront (/api/upload, /api/files).\n4. Subida Multipart para archivos grandes (create, presign_part, PUT a S3, list parts, complete y abort en /api/upload/multipart).\n5. Receptor de Webhooks firmados con HMAC-SHA256 (/api/webhooks/test-receiver), Auditoría (/api/logs, /api/records, /api/users) y Cron (/api/cron/maintenance).\n\nVariables secretas a configurar antes de ejecutar:\n- adminSecret: ADMIN_API_SECRET para rutas de administración de plataforma.\n- apiKey: API Key Maestra de organización (sk_live_...) con can_manage_keys=true.\n- secondaryApiKey: API Key secundaria/delegada (can_manage_keys=false).\n- cronSecret: CRON_SECRET para /api/cron/maintenance.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -51,33 +51,53 @@
       "type": "string"
     },
     {
+      "key": "otherSameOrgUserId",
+      "value": "a1111111-0000-0000-0000-000000000002",
+      "type": "string"
+    },
+    {
       "key": "otherOrgUserId",
       "value": "b2222222-0000-0000-0000-000000000001",
       "type": "string"
     },
     {
+      "key": "otherOrgKeyId",
+      "value": "00000000-0000-4000-8000-000000000099",
+      "type": "string"
+    },
+    {
+      "key": "webhookSecret",
+      "value": "whsec_test_secret_123456",
+      "type": "string"
+    },
+    {
       "key": "fileName",
-      "value": "imagen de prueba 1.jpg",
+      "value": "prueba.png",
       "type": "string"
     },
     {
       "key": "extension",
-      "value": ".jpg",
+      "value": ".png",
       "type": "string"
     },
     {
       "key": "fileType",
-      "value": "image/jpeg",
+      "value": "image/png",
       "type": "string"
     },
     {
       "key": "fileSize",
-      "value": "1024",
+      "value": "68",
       "type": "string"
     },
     {
       "key": "visibility",
       "value": "private",
+      "type": "string"
+    },
+    {
+      "key": "sha256Base64",
+      "value": "r8b2eb9f79a5cf26d2a4943e8a0cd6ed4c65fb949956c3b6f6a5646f0e49e13d",
       "type": "string"
     },
     {
@@ -104,11 +124,68 @@
       "key": "downloadUrl",
       "value": "",
       "type": "string"
+    },
+    {
+      "key": "multipartTicketId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "multipartFileId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "multipartUploadId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "multipartConfirmToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "part1UploadUrl",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "part2UploadUrl",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "part1ETag",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "part2ETag",
+      "value": "",
+      "type": "string"
     }
   ],
   "item": [
     {
       "name": "0.0 Healthcheck Público (GET /api/health)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Estado HTTP es 200 OK', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "const json = pm.response.json();",
+              "pm.test('Servicio saludable sin exponer secretos', function () {",
+              "    pm.expect(json.status).to.eql('ok');",
+              "});"
+            ]
+          }
+        }
+      ],
       "request": {
         "method": "GET",
         "header": [],
@@ -123,6 +200,233 @@
           ]
         },
         "description": "Única ruta pública bajo /api/*. Devuelve 200 OK con estado del servicio sin exponer secretos."
+      }
+    },
+    {
+      "name": "0.0A Consultar Mi Organización (GET /api/organizations con x-api-key maestra)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Estado HTTP es 200 OK', function () {",
+              "    pm.response.to.have.status(200);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "description": "Llave maestra con can_manage_keys=true (o usar x-admin-secret)"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/organizations",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "organizations"
+          ]
+        },
+        "description": "Consulta la configuración, límites de cuota y estado de webhook de la propia organización usando la llave maestra (o de todas las organizaciones si se usa x-admin-secret)."
+      }
+    },
+    {
+      "name": "0.0B Configurar Webhook de Organización (PATCH /api/organizations con x-api-key maestra)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Estado HTTP es 200 OK', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "const json = pm.response.json();",
+              "pm.test('Webhook configurado exitosamente', function () {",
+              "    pm.expect(json.status).to.eql('updated');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}",
+            "description": "Llave maestra con can_manage_keys=true"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"webhookUrl\": \"{{baseUrl}}/api/webhooks/test-receiver\",\n  \"webhookSecret\": \"{{webhookSecret}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/organizations",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "organizations"
+          ]
+        },
+        "description": "Permite a la llave maestra configurar en autoservicio el webhookUrl (validado contra SSRF) y webhookSecret de su propia organización."
+      }
+    },
+    {
+      "name": "0.0C [Seguridad] Intento de Modificar Cuotas con Llave Maestra (PATCH /api/organizations -> 403 FORBIDDEN_QUOTA_MODIFICATION)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Rechazado con 403 Forbidden', function () {",
+              "    pm.response.to.have.status(403);",
+              "    pm.expect(pm.response.json().code).to.eql('FORBIDDEN_QUOTA_MODIFICATION');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"maxStorageBytes\": 999999999999,\n  \"maxApiKeys\": 50\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/organizations",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "organizations"
+          ]
+        },
+        "description": "Verifica que ni siquiera la llave maestra de una organización pueda alterar sus propios límites de cuota (solo permitido con x-admin-secret)."
+      }
+    },
+    {
+      "name": "0.0D [Seguridad SSRF] Bloqueo de Webhook hacia IP Interna/Loopback (PATCH /api/organizations -> 400 INVALID_WEBHOOK_URL)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Bloqueado por protección anti-SSRF (400)', function () {",
+              "    pm.response.to.have.status(400);",
+              "    pm.expect(pm.response.json().code).to.eql('INVALID_WEBHOOK_URL');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"webhookUrl\": \"https://[::ffff:127.0.0.1]/internal\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/organizations",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "organizations"
+          ]
+        },
+        "description": "Verifica que validateWebhookUrlSSRF e isIpBlocked bloqueen IPs privadas, loopback, IPv4-mapped IPv6 (::ffff:127.0.0.1), notación octal/hexadecimal/decimal y dominios que resuelvan a redes internas."
+      }
+    },
+    {
+      "name": "0.0E Modificar Cuotas o Restaurar Webhook como Admin (PATCH /api/organizations con x-admin-secret)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-admin-secret",
+            "value": "{{adminSecret}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"id\": \"{{orgId}}\",\n  \"maxApiKeys\": 3,\n  \"maxPendingTickets\": 20,\n  \"maxStorageBytes\": 5368709120,\n  \"webhookUrl\": null\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/organizations",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "organizations"
+          ]
+        },
+        "description": "El administrador de plataforma (x-admin-secret) puede ajustar cuotas (maxStorageBytes, maxPendingTickets, maxApiKeys) y limpiar webhookUrl de cualquier organización."
       }
     },
     {
@@ -267,7 +571,7 @@
             "keys"
           ]
         },
-        "description": "Verifica que el servidor rechace con 403 Forbidden y registre PRIVILEGE_ESCALATION_BLOCKED en service_logs si se intentan crear permisos superiores a los propios."
+        "description": "Verifica que el servidor rechace con 403 Forbidden (CANNOT_MANAGE_KEYS o PRIVILEGE_ESCALATION_BLOCKED) si una llave sin permisos intenta gestionar o escalar privilegios."
       }
     },
     {
@@ -392,7 +696,54 @@
       }
     },
     {
-      "name": "0.3B Revocar o Eliminar Llave Secundaria (DELETE /api/keys con x-api-key)",
+      "name": "0.3B [Seguridad] Revocar Llave de Otra Organización Bloqueado (DELETE /api/keys -> 404 API_KEY_NOT_FOUND)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Aislamiento multi-tenant devuelve 404', function () {",
+              "    pm.response.to.have.status(404);",
+              "    pm.expect(pm.response.json().code).to.eql('API_KEY_NOT_FOUND');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/keys?id={{otherOrgKeyId}}&mode=revoke",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "keys"
+          ],
+          "query": [
+            {
+              "key": "id",
+              "value": "{{otherOrgKeyId}}"
+            },
+            {
+              "key": "mode",
+              "value": "revoke"
+            }
+          ]
+        },
+        "description": "Verifica que una llave maestra no pueda revocar ni eliminar una llave perteneciente a otra organización (retorna 404 API_KEY_NOT_FOUND filtrando por org_id)."
+      }
+    },
+    {
+      "name": "0.3C Revocar o Eliminar Llave Secundaria (DELETE /api/keys con x-api-key)",
       "request": {
         "method": "DELETE",
         "header": [
@@ -425,7 +776,7 @@
       }
     },
     {
-      "name": "1. Solicitar Ticket de Subida (POST /api/upload)",
+      "name": "1. Solicitar Ticket de Subida Simple (POST /api/upload)",
       "event": [
         {
           "listen": "test",
@@ -479,7 +830,63 @@
             "upload"
           ]
         },
-        "description": "Genera ticket prefirmado de S3 directo hacia static/files/<rand128>.<ext>. Cero bytes por Vercel."
+        "description": "Ejecuta limpieza oportunista de tickets vencidos antes de validar cupo y genera ticket prefirmado de S3 directo hacia static/private/<rand128>.<ext> (si privado) o static/files/<rand128>.<ext> (si público). Cero bytes por Vercel."
+      }
+    },
+    {
+      "name": "1.0B Solicitar Ticket con Checksum SHA-256 Criptográfico (POST /api/upload con sha256Hash)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "const t = json.ticket || json;",
+              "if (t.ticketId) pm.collectionVariables.set('ticketId', t.ticketId);",
+              "if (t.fileId) pm.collectionVariables.set('fileId', t.fileId);",
+              "if (t.confirmToken) pm.collectionVariables.set('confirmToken', t.confirmToken);",
+              "if (t.uploadUrl) pm.collectionVariables.set('uploadUrl', t.uploadUrl);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"fileName\": \"{{fileName}}\",\n  \"extension\": \"{{extension}}\",\n  \"fileType\": \"{{fileType}}\",\n  \"fileSize\": {{fileSize}},\n  \"visibility\": \"{{visibility}}\",\n  \"sha256Hash\": \"{{sha256Base64}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/upload",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "upload"
+          ]
+        },
+        "description": "Solicita un ticket prefirmado incluyendo sha256Hash (Hex de 64 chars o Base64 de 44 chars). S3 exigirá que el header x-amz-checksum-sha256 coincida exactamente al hacer el PUT."
       }
     },
     {
@@ -569,7 +976,8 @@
           },
           {
             "key": "Cache-Control",
-            "value": "private, no-store, no-cache, max-age=0, must-revalidate"
+            "value": "private, no-store, no-cache, max-age=0, must-revalidate",
+            "description": "Usar el valor exacto devuelto en requiredHeaders.Cache-Control del Paso 1"
           }
         ],
         "body": {
@@ -582,45 +990,11 @@
             "{{uploadUrl}}"
           ]
         },
-        "description": "Sube el binario directamente desde el cliente hacia AWS S3 sin pasar por el servidor."
+        "description": "Sube el binario directamente desde el cliente hacia AWS S3 sin pasar por el servidor Vercel. Si se incluyó sha256Hash en el Paso 1.0B, añadir también la cabecera x-amz-checksum-sha256."
       }
     },
     {
-      "name": "3. Confirmar Subida (PUT /api/upload)",
-      "request": {
-        "method": "PUT",
-        "header": [
-          {
-            "key": "x-api-key",
-            "value": "{{apiKey}}"
-          },
-          {
-            "key": "x-user-id",
-            "value": "{{userId}}"
-          }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/upload?ticketId={{ticketId}}&token={{confirmToken}}",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "api",
-            "upload"
-          ],
-          "query": [
-            {
-              "key": "ticketId",
-              "value": "{{ticketId}}"
-            },
-            {
-              "key": "token",
-              "value": "{{confirmToken}}"
-            }
-          ]
-        },
-        "description": "Valida existencia del objeto en S3, lee los primeros 32 bytes (Range GET) para verificar el magic number real, valida checksum SHA-256 de S3 y marca el estado como 'uploaded'."
-      },
+      "name": "3. Confirmar Subida y Verificar Magic Bytes + Webhook (PUT /api/upload)",
       "event": [
         {
           "listen": "test",
@@ -638,10 +1012,84 @@
             ]
           }
         }
-      ]
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"ticketId\": \"{{ticketId}}\",\n  \"confirmToken\": \"{{confirmToken}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/upload",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "upload"
+          ]
+        },
+        "description": "Valida existencia del objeto en S3 (HeadObject), lee los primeros 32 bytes (Range GET) para verificar los magic bytes reales (retorna 422 MAGIC_BYTES_MISMATCH si el binario fue falsificado), valida checksum SHA-256 (sha256Verified), marca fileStatus='uploaded' y despacha el webhook file.uploaded con conexión fijada a la IP."
+      }
     },
     {
-      "name": "3.1 Obtener URL de Entrega (GET /api/files/:id)",
+      "name": "3.1 Listar Archivos de la Organización (GET /api/files)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/files?limit=20&offset=0",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "files"
+          ],
+          "query": [
+            {
+              "key": "limit",
+              "value": "20"
+            },
+            {
+              "key": "offset",
+              "value": "0"
+            }
+          ]
+        },
+        "description": "Lista los archivos de la organización con fileStatus='uploaded' y sha256Verified. Los archivos privados siempre reportan cloudfront_url: null."
+      }
+    },
+    {
+      "name": "3.2 Obtener URL de Entrega como Propietario (GET /api/files/:id)",
       "event": [
         {
           "listen": "test",
@@ -679,11 +1127,54 @@
             "{{fileId}}"
           ]
         },
-        "description": "Para archivos privados devuelve URL prefirmada de S3 (5 minutos, no-store) validando que el usuario sea el dueño. Para públicos devuelve URL de CloudFront."
+        "description": "Para archivos privados devuelve URL prefirmada de S3 (5 minutos, delivery='s3_presigned', cloudfrontUrl=null) validando que el usuario sea el dueño. Para públicos devuelve URL de CloudFront (delivery='cloudfront')."
       }
     },
     {
-      "name": "3.2 Descargar Archivo (GET downloadUrl)",
+      "name": "3.2B [Seguridad] Acceso Denegado a Archivo Privado por Otro Usuario (GET /api/files/:id -> 403 FORBIDDEN_PRIVATE_NOT_OWNER)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Rechazado con 403 FORBIDDEN_PRIVATE_NOT_OWNER', function () {",
+              "    pm.response.to.have.status(403);",
+              "    pm.expect(pm.response.json().code).to.eql('FORBIDDEN_PRIVATE_NOT_OWNER');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{otherSameOrgUserId}}",
+            "description": "Otro usuario válido de la misma organización pero que NO es el dueño del archivo privado"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/files/{{fileId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "files",
+            "{{fileId}}"
+          ]
+        },
+        "description": "Verifica que otro usuario (incluso de la misma organización) reciba 403 FORBIDDEN_PRIVATE_NOT_OWNER al intentar leer un archivo privado ajeno."
+      }
+    },
+    {
+      "name": "3.3 Descargar Archivo Directo de S3 / CloudFront (GET downloadUrl)",
       "request": {
         "method": "GET",
         "header": [],
@@ -693,11 +1184,479 @@
             "{{downloadUrl}}"
           ]
         },
-        "description": "Descarga directa de los bytes desde S3 o CloudFront hacia el cliente."
+        "description": "Descarga directa de los bytes desde S3 (URL prefirmada privada) o CloudFront (URL pública) hacia el cliente sin pasar por Vercel."
       }
     },
     {
-      "name": "4. Consultar Logs de Auditoría (GET /api/logs)",
+      "name": "3.4 Consultar Estado Transaccional del Archivo (GET /api/files/:id/status)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/files/{{fileId}}/status",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "files",
+            "{{fileId}}",
+            "status"
+          ]
+        },
+        "description": "Fuente de verdad del estado del archivo (fileStatus: 'uploaded', scanStatus: 'not_scanned', sha256Verified: true/false)."
+      }
+    },
+    {
+      "name": "3.5 Re-despachar Webhook Manualmente (POST /api/files/:id/status)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/files/{{fileId}}/status",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "files",
+            "{{fileId}}",
+            "status"
+          ]
+        },
+        "description": "Re-envía el webhook del archivo hacia la URL configurada en la organización (ignorando cualquier URL enviada en el body por seguridad anti-SSRF)."
+      }
+    },
+    {
+      "name": "3.6 Eliminar Archivo de S3 y Base de Datos (DELETE /api/files/:id)",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/files/{{fileId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "files",
+            "{{fileId}}"
+          ]
+        },
+        "description": "Elimina físicamente el objeto en S3 (deduplicando s3_pending_key y s3_processed_key) y borra la fila en public.files."
+      }
+    },
+    {
+      "name": "4.1 Iniciar Subida Multipart (POST /api/upload/multipart action=create)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.ticketId) pm.collectionVariables.set('multipartTicketId', json.ticketId);",
+              "if (json.fileId) pm.collectionVariables.set('multipartFileId', json.fileId);",
+              "if (json.uploadId) pm.collectionVariables.set('multipartUploadId', json.uploadId);",
+              "if (json.confirmToken) pm.collectionVariables.set('multipartConfirmToken', json.confirmToken);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"create\",\n  \"fileName\": \"archivo-grande.png\",\n  \"fileType\": \"image/png\",\n  \"fileSize\": 10485760,\n  \"visibility\": \"private\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/upload/multipart",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "upload",
+            "multipart"
+          ]
+        },
+        "description": "Inicia una subida multipart en AWS S3 (ej. 10 MB en 2 partes de 5 MB) y guarda ticketId, uploadId y confirmToken."
+      }
+    },
+    {
+      "name": "4.2 Firmar URL para Parte 1 (POST /api/upload/multipart action=presign_part)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.uploadUrl) pm.collectionVariables.set('part1UploadUrl', json.uploadUrl);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"presign_part\",\n  \"ticketId\": \"{{multipartTicketId}}\",\n  \"partNumber\": 1\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/upload/multipart",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "upload",
+            "multipart"
+          ]
+        },
+        "description": "Genera la URL prefirmada de S3 para subir la Parte 1 (mínimo 5 MB salvo la última parte)."
+      }
+    },
+    {
+      "name": "4.3 Firmar URL para Parte 2 (POST /api/upload/multipart action=presign_part)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.uploadUrl) pm.collectionVariables.set('part2UploadUrl', json.uploadUrl);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"presign_part\",\n  \"ticketId\": \"{{multipartTicketId}}\",\n  \"partNumber\": 2\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/upload/multipart",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "upload",
+            "multipart"
+          ]
+        },
+        "description": "Genera la URL prefirmada de S3 para subir la Parte 2."
+      }
+    },
+    {
+      "name": "4.4 Subir Binario de Parte 1 Directo a S3 (PUT part1UploadUrl)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const etag = pm.response.headers.get('ETag');",
+              "if (etag) pm.collectionVariables.set('part1ETag', etag.replace(/\"/g, ''));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [],
+        "body": {
+          "mode": "file",
+          "file": {}
+        },
+        "url": {
+          "raw": "{{part1UploadUrl}}",
+          "host": [
+            "{{part1UploadUrl}}"
+          ]
+        },
+        "description": "Sube los bytes de la Parte 1 (>= 5 MB, iniciando con la cabecera PNG/JPEG real) directo a S3 y guarda automáticamente el ETag devuelto por S3."
+      }
+    },
+    {
+      "name": "4.5 Subir Binario de Parte 2 Directo a S3 (PUT part2UploadUrl)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const etag = pm.response.headers.get('ETag');",
+              "if (etag) pm.collectionVariables.set('part2ETag', etag.replace(/\"/g, ''));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [],
+        "body": {
+          "mode": "file",
+          "file": {}
+        },
+        "url": {
+          "raw": "{{part2UploadUrl}}",
+          "host": [
+            "{{part2UploadUrl}}"
+          ]
+        },
+        "description": "Sube los bytes de la Parte 2 directo a S3 y guarda automáticamente el ETag devuelto por S3."
+      }
+    },
+    {
+      "name": "4.6 Consultar Partes Subidas en S3 (GET /api/upload/multipart?ticketId=...)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/upload/multipart?ticketId={{multipartTicketId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "upload",
+            "multipart"
+          ],
+          "query": [
+            {
+              "key": "ticketId",
+              "value": "{{multipartTicketId}}"
+            }
+          ]
+        },
+        "description": "Lista las partes actualmente registradas en S3 (ListPartsCommand) para verificar progreso o reanudar subidas interrumpidas."
+      }
+    },
+    {
+      "name": "4.7 Completar Subida Multipart y Validar Magic Bytes (PUT /api/upload/multipart)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Multipart completado con 200 OK', function () {",
+              "    pm.response.to.have.status(200);",
+              "    pm.expect(pm.response.json().fileStatus).to.eql('uploaded');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"ticketId\": \"{{multipartTicketId}}\",\n  \"confirmToken\": \"{{multipartConfirmToken}}\",\n  \"parts\": [\n    {\n      \"PartNumber\": 1,\n      \"ETag\": \"{{part1ETag}}\"\n    },\n    {\n      \"PartNumber\": 2,\n      \"ETag\": \"{{part2ETag}}\"\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/upload/multipart",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "upload",
+            "multipart"
+          ]
+        },
+        "description": "Ejecuta CompleteMultipartUploadCommand en S3, verifica los primeros 32 bytes con Range GET (422 MAGIC_BYTES_MISMATCH si no coinciden) y actualiza fileStatus='uploaded'."
+      }
+    },
+    {
+      "name": "4.8 Abortar Subida Multipart en Curso (DELETE /api/upload/multipart)",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "x-api-key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "x-user-id",
+            "value": "{{userId}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/upload/multipart?ticketId={{multipartTicketId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "upload",
+            "multipart"
+          ],
+          "query": [
+            {
+              "key": "ticketId",
+              "value": "{{multipartTicketId}}"
+            }
+          ]
+        },
+        "description": "Aborta una subida multipart no completada en S3 (AbortMultipartUploadCommand) liberando las partes temporales."
+      }
+    },
+    {
+      "name": "5. Inspeccionar Webhooks Recibidos y Firma HMAC (GET /api/webhooks/test-receiver)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "x-admin-secret",
+            "value": "{{adminSecret}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/webhooks/test-receiver",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "webhooks",
+            "test-receiver"
+          ]
+        },
+        "description": "Permite inspeccionar las entregas recibidas en el receptor de pruebas y confirmar signatureValid: true."
+      }
+    },
+    {
+      "name": "6. Consultar Logs de Auditoría (GET /api/logs)",
       "request": {
         "method": "GET",
         "header": [
@@ -720,7 +1679,7 @@
       }
     },
     {
-      "name": "5. Consultar Registros de Archivos (GET /api/records)",
+      "name": "7. Consultar Registros de Archivos (GET /api/records)",
       "request": {
         "method": "GET",
         "header": [
@@ -743,7 +1702,7 @@
       }
     },
     {
-      "name": "6. Consultar Organizaciones y Usuarios (GET /api/users)",
+      "name": "8. Consultar Organizaciones y Usuarios (GET /api/users)",
       "request": {
         "method": "GET",
         "header": [
@@ -766,7 +1725,7 @@
       }
     },
     {
-      "name": "7. Ejecutar Cron de Mantenimiento (GET /api/cron/maintenance)",
+      "name": "9. Ejecutar Cron de Mantenimiento (GET /api/cron/maintenance)",
       "request": {
         "method": "GET",
         "header": [
@@ -786,7 +1745,7 @@
             "maintenance"
           ]
         },
-        "description": "Ejecuta limpieza de tickets expirados y mantenimiento. Exige Authorization: Bearer <CRON_SECRET>."
+        "description": "Ejecuta las 5 tareas de mantenimiento: limpieza de tickets expirados, aborto de multiparts huérfanos, reintento de webhooks pendientes, limpieza de rate_limit_buckets (>1 día) y anonimización de IPs en service_logs (>30 días). Exige Authorization: Bearer <CRON_SECRET>."
       }
     }
   ]

@@ -1,7 +1,8 @@
-# Guía de Migraciones Pendientes de Base de Datos (Supabase)
+# Guía de Migraciones de Base de Datos (Supabase) — APLICADAS EN PRODUCCIÓN
 
-> **Instrucciones de Ejecución**:
-> 1. Aplicar en Supabase SQL Editor en el **orden estricto** indicado a continuación (1 a 4).
+> **Estado**: ✅ Las 4 migraciones han sido ejecutadas y verificadas en producción (27 de Octubre de 2026).
+> **Instrucciones de Referencia**:
+> 1. Aplicadas en Supabase SQL Editor en el **orden estricto** indicado a continuación (1 a 4).
 > 2. Cada migración incluye su código `UP`, su código de reversión `DOWN`, y consultas SQL de verificación.
 > 3. Ninguna de estas migraciones altera datos destructivamente (todas son aditivas y reversibles).
 
@@ -292,7 +293,7 @@ WHERE routine_schema = 'public' AND routine_name = 'claim_webhook_deliveries';
 - **Archivo**: `database/migration_sectionC_shared_rate_limiting.sql`
 - **Objetivo**:
   1. Crear la tabla `public.rate_limit_buckets` con RLS habilitado sin políticas y privilegios revocados para `PUBLIC`, `anon` y `authenticated`.
-  2. Restricción CHECK de formato en la columna `key`: solo acepta claves estructuradas basadas en UUIDs (`<ámbito>:<tipo>:<uuid>`) o hashes HMAC con sal (`<ámbito>:<tipo>:h:<sha256>`). Prohíbe llaves API o direcciones IP en claro.
+  2. Restricción CHECK de formato en la columna `key`: solo acepta claves estructuradas basadas en UUIDs (`<ámbito>:<tipo>:<uuid>`) o hashes SHA-256 directos (`<ámbito>:<tipo>:h:<sha256>`). Prohíbe llaves API o direcciones IP en claro.
   3. Función atómica `check_rate_limit_atomic(...)` con `SET search_path = public, pg_temp`, validación de parámetros de entrada, y permisos exclusivos para `service_role`.
   4. La limpieza de buckets inactivos (> 1 día) se realiza de forma oportunista en la aplicación y periódicamente desde el Cron de mantenimiento.
 
