@@ -215,6 +215,11 @@ export async function middleware(request: NextRequest) {
     return applySecurityHeaders(NextResponse.next());
   }
 
+  // 1.c Public read access to /api/logs for the index dashboard (per user request)
+  if ((pathname === '/api/logs' || pathname.startsWith('/api/logs/')) && method === 'GET') {
+    return applySecurityHeaders(NextResponse.next());
+  }
+
   // 2. Disable /api/img in production until the transformations stage
   if (pathname === '/api/img' || pathname.startsWith('/api/img/')) {
     if (isProd) {

@@ -106,9 +106,8 @@ function getStatusBadgeStyle(status: string): React.CSSProperties {
 
 export default function ServiceLogsPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [adminSecret, setAdminSecret] = useState<string>('');
-  const [authMessage, setAuthMessage] = useState<string>('Ingresa ADMIN_API_SECRET para consultar /api/logs.');
+  const [loading, setLoading] = useState<boolean>(true);
+  const [statusMessage, setStatusMessage] = useState<string>('Cargando registros...');
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState<number>(1);
@@ -116,47 +115,15 @@ export default function ServiceLogsPage() {
   const [totalPages, setTotalPages] = useState<number>(1);
   const [totalCount, setTotalCount] = useState<number>(0);
 
-  // Load adminSecret from sessionStorage on mount
-  useEffect(() => {
-    try {
-      const savedSecret = sessionStorage.getItem('admin_api_secret');
-      if (savedSecret) {
-        setAdminSecret(savedSecret);
-      }
-    } catch {
-      // Ignore storage access errors
-    }
-  }, []);
-
   const fetchLogs = useCallback(
     async (pageToFetch: number = currentPage, sizeToFetch: number = pageSize) => {
-      const trimmed = adminSecret.trim();
-      if (!trimmed) {
-        setLogs([]);
-        setAuthMessage('Autenticación requerida: ingresa x-admin-secret para consultar /api/logs.');
-        return;
-      }
-
       try {
         setLoading(true);
-        try {
-          sessionStorage.setItem('admin_api_secret', trimmed);
-        } catch {
-          // Ignore storage write errors
-        }
+        setStatusMessage('Actualizando eventos desde Supabase...');
 
         const res = await fetch(`/api/logs?page=${pageToFetch}&limit=${sizeToFetch}&_t=${Date.now()}`, {
           cache: 'no-store',
-          headers: {
-            'x-admin-secret': trimmed,
-          },
         });
-
-        if (res.status === 401 || res.status === 403) {
-          setLogs([]);
-          setAuthMessage(`Acceso denegado (HTTP ${res.status}): ADMIN_API_SECRET inválido.`);
-          return;
-        }
 
         if (res.ok) {
           const data = await res.json();
@@ -169,19 +136,24 @@ export default function ServiceLogsPage() {
           setTotalCount(total);
           setTotalPages(pages);
           setCurrentPage(actualPage);
-          setAuthMessage(`Conectado en tiempo real. Mostrando ${returnedLogs.length} de ${total} eventos.`);
+          setStatusMessage(`Conectado en tiempo real. Mostrando ${returnedLogs.length} de ${total} eventos.`);
         } else {
-          setAuthMessage(`Error al consultar logs: HTTP ${res.status}`);
+          setStatusMessage(`Error al consultar logs: HTTP ${res.status}`);
         }
       } catch (err: any) {
         console.error('Error fetching logs:', err);
-        setAuthMessage(`Error de red: ${err?.message || 'Fallo de conexión'}`);
+        setStatusMessage(`Error de red: ${err?.message || 'Fallo de conexión'}`);
       } finally {
         setLoading(false);
       }
     },
-    [adminSecret, currentPage, pageSize]
+    [currentPage, pageSize]
   );
+
+  // Auto-fetch on component mount
+  useEffect(() => {
+    fetchLogs(1, pageSize);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Page navigation helper
   const goToPage = (page: number) => {
@@ -230,7 +202,7 @@ export default function ServiceLogsPage() {
 
   return (
     <div style={{ padding: '16px', fontFamily: 'system-ui, -apple-system, sans-serif', color: '#24292f' }}>
-      {/* Top Header & Secret Input Bar */}
+      {/* Top Header & Refresh Bar */}
       <div
         style={{
           marginBottom: '14px',
@@ -258,55 +230,51 @@ export default function ServiceLogsPage() {
               fontWeight: 600,
             }}
           >
-            {totalCount} eventos en total
+            {totalCount} eventos registrados
           </span>
         </div>
 
-        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-          <input
-            type="password"
-            placeholder="ADMIN_API_SECRET..."
-            value={adminSecret}
-            onChange={(e) => setAdminSecret(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                setCurrentPage(1);
-                fetchLogs(1, pageSize);
-              }
-            }}
-            style={{
-              padding: '6px 10px',
-              borderRadius: '6px',
-              border: '1px solid #d0d7de',
-              fontSize: '12px',
-              minWidth: '220px',
-            }}
-          />
-          <button
-            onClick={() => {
-              setCurrentPage(1);
-              fetchLogs(1, pageSize);
-            }}
-            disabled={loading || !adminSecret.trim()}
-            style={{ ...btnStyle, backgroundColor: '#1f883d', color: '#fff', borderColor: '#1f883d', fontWeight: 600 }}
-          >
-            {loading ? 'Cargando...' : 'Consultar / Refrescar'}
-          </button>
-        </div>
+        <button
+          onClick={() => fetchLogs(currentPage, pageSize)}
+          disabled={loading}
+          style={{ ...btnStyle, backgroundColor: '#0969da', color: '#fff', borderColor: '#0969da', fontWeight: 600 }}
+        >
+          {loading ? 'Cargando...' : '↻ Refrescar'}
+        </button>
       </div>
 
-      {/* Auth message / status bar */}
-      <div style={{ marginBottom: '12px', fontSize: '12px', color: '#57606a', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
-        <span>{authMessage}</span>
+      {/* Status message & range info */}
+      <div
+        style={{
+          marginBottom: '12px',
+          fontSize: '12px',
+          color: '#57606a',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '8px',
+        }}
+      >
+        <span>{statusMessage}</span>
         {totalCount > 0 && (
           <span>
-            Mostrando registros <strong>{startRecordIndex}</strong> - <strong>{endRecordIndex}</strong> de <strong>{totalCount}</strong> (ordenados del más reciente al más antiguo)
+            Mostrando registros <strong>{startRecordIndex}</strong> - <strong>{endRecordIndex}</strong> de{' '}
+            <strong>{totalCount}</strong> (del más reciente al más antiguo)
           </span>
         )}
       </div>
 
       {/* Main Table */}
-      <div style={{ overflowX: 'auto', border: '1px solid #d0d7de', borderRadius: '6px', backgroundColor: '#ffffff', maxHeight: '72vh' }}>
+      <div
+        style={{
+          overflowX: 'auto',
+          border: '1px solid #d0d7de',
+          borderRadius: '6px',
+          backgroundColor: '#ffffff',
+          maxHeight: '72vh',
+        }}
+      >
         <table
           style={{
             width: '100%',
@@ -338,7 +306,7 @@ export default function ServiceLogsPage() {
             {logs.length === 0 ? (
               <tr>
                 <td colSpan={15} style={{ ...cellStyle, textAlign: 'center', padding: '36px', color: '#57606a' }}>
-                  {loading ? 'Cargando registros desde Supabase...' : 'No hay registros cargados. Ingresa tu ADMIN_API_SECRET y haz clic en "Consultar / Refrescar".'}
+                  {loading ? 'Cargando registros desde Supabase...' : 'No hay registros en service_logs.'}
                 </td>
               </tr>
             ) : (

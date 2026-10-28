@@ -33,9 +33,6 @@ function enforceAdminAuth(req: NextRequest): NextResponse | null {
 }
 
 export async function GET(req: NextRequest) {
-  const authError = enforceAdminAuth(req);
-  if (authError) return authError;
-
   const url = new URL(req.url);
   const pageParam = url.searchParams.get('page');
   const limitParam = url.searchParams.get('limit');
