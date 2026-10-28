@@ -49,7 +49,7 @@ Aquí tienes **exactamente qué cabeceras (`Key` y `Value`) debes poner en la pe
 | **4.7** | `PUT /api/upload/multipart` *(Completar)* | `Content-Type: application/json`<br>`x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
 | **4.8** | `DELETE /api/upload/multipart?ticketId=...` | `x-api-key: <TU_API_KEY>`<br>`x-user-id: a1111111-0000-0000-0000-000000000001` |
 | **5** | `GET /api/webhooks/test-receiver` | `x-admin-secret: <TU_ADMIN_API_SECRET>` |
-| **6** | `GET /api/logs` | `x-admin-secret: <TU_ADMIN_API_SECRET>` |
+| **6** | `GET /api/logs` | *(Ninguna cabecera — Consulta pública con paginación `?page=1&limit=20`)* |
 | **7** | `GET /api/records` | `x-admin-secret: <TU_ADMIN_API_SECRET>` |
 | **8** | `GET /api/users` | `x-admin-secret: <TU_ADMIN_API_SECRET>` |
 | **9** | `GET /api/cron/maintenance` | `Authorization: Bearer <TU_CRON_SECRET>` |
@@ -353,11 +353,12 @@ Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cl
     "fileType": "image/png",
     "fileSize": 68,
     "visibility": "private",
+    "folder": "documentos/legales",
     "sha256Hash": "r8b2eb9f79a5cf26d2a4943e8a0cd6ed4c65fb949956c3b6f6a5646f0e49e13d"
   }
   ```
-  *(Nota: `sha256Hash` es opcional. Si lo envías, la respuesta incluirá `x-amz-checksum-sha256` dentro de `requiredHeaders`).*
-* **Respuesta Esperada (`200 OK`):** Devuelve `ticketId`, `fileId`, `uploadUrl`, `requiredHeaders` y `confirmToken`.
+  *(Nota: `folder` es opcional; permite organizar archivos en subcarpetas lógicas dentro del espacio de la organización `{org_id}` sin riesgo de colisión entre empresas. `sha256Hash` es opcional; si lo envías, la respuesta incluirá `x-amz-checksum-sha256` dentro de `requiredHeaders`).*
+* **Respuesta Esperada (`200 OK`):** Devuelve `ticketId`, `fileId`, `uploadUrl` (apuntando a `private/{org_id}/[custom_folder]/<rand128>.<ext>` o `public/{org_id}/...`), `requiredHeaders` y `confirmToken`.
 
 ---
 
@@ -447,8 +448,8 @@ Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cl
   | `x-api-key` | `{{apiKey}}` |
   | `x-user-id` | `a1111111-0000-0000-0000-000000000001` *(Propietario del archivo)* |
 * **Respuesta Esperada (`200 OK`):**
-  * Si es `private`: `delivery: "s3_presigned"`, `cloudfrontUrl: null`, `expiresInSeconds: 300`.
-  * Si es `public`: `delivery: "cloudfront"`, `cloudfrontUrl: "https://d1nuawu3owad6c.cloudfront.net/static/files/..."`.
+  * Si es `private`: `delivery: "s3_presigned"`, `cloudfrontUrl: null`, `expiresInSeconds: 300`, `url: "https://practicas-alan-418272802078.s3.us-east-1.amazonaws.com/private/{org_id}/[custom_folder]/<rand128>.<ext>?X-Amz-Algorithm=..."`.
+  * Si es `public`: `delivery: "cloudfront"`, `cloudfrontUrl: "https://d1nuawu3owad6c.cloudfront.net/public/{org_id}/[custom_folder]/<rand128>.<ext>"`.
 
 ---
 
@@ -618,9 +619,35 @@ Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cl
 
 ---
 
-#### 6, 7 y 8 Consultas Administrativas (`GET /api/logs`, `GET /api/records`, `GET /api/users`)
+#### 6 Consulta Pública y Paginada de Bitácora (`GET /api/logs`)
 * **Método:** `GET`
-* **URL:** `https://cloudinary-aws-backend.vercel.app/api/logs` *(o `/api/records`, `/api/users`)*
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/logs?page=1&limit=20`
+* **Cabeceras (Headers en Postman):**
+  *(Ninguna cabecera requerida — Endpoint público de auditoría en tiempo real)*
+* **Parámetros Opcionales de Consulta (Query Params):**
+  | Parámetro | Tipo | Descripción |
+  | :--- | :--- | :--- |
+  | `page` | `number` | Número de página (ej. `1`). |
+  | `limit` | `number` | Registros por página (ej. `20`, por defecto 20, máximo 100). |
+  | `org_id` | `UUID` | Filtrar eventos por organización. |
+  | `status` | `string` | Filtrar por estado (`success`, `error`). |
+* **Respuesta Esperada (`200 OK`):**
+  ```json
+  {
+    "status": "success",
+    "page": 1,
+    "limit": 20,
+    "total": 270,
+    "totalPages": 14,
+    "logs": [ ... ]
+  }
+  ```
+
+---
+
+#### 7 y 8 Consultas Administrativas de Registros y Usuarios (`GET /api/records`, `GET /api/users`)
+* **Método:** `GET`
+* **URL:** `https://cloudinary-aws-backend.vercel.app/api/records` *(o `/api/users`)*
 * **Cabeceras (Headers en Postman):**
   | Key | Value |
   | :--- | :--- |
@@ -646,9 +673,10 @@ Al importar [`postman_collection.json`](file:///C:/Users/alano/Desktop/github/cl
 | **1B** | **Circuit Breaker de Webhooks** | 3 entregas fallidas (`500`) + 4ta subida | **`200 OK`** | La 4ta subida no esperó en línea: `webhook: { delivered: false, attempts: 0, error: "CIRCUIT_BREAKER_QUEUED", deliveryId: "916bf3f9-12cf-4e30-8e75-6b12245bcfcd" }`. `webhook_url` restaurado a `null`. |
 | **1C** | **Bloqueo SSRF Completo (9 Vectores)** | `PATCH /api/organizations` con IPs internas/octales/hex/DNS | **`400 Bad Request`** | Bloqueados los 9 vectores (`[::1]`, `[::ffff:127.0.0.1]`, `[::ffff:7f00:1]`, `[fd00::1]`, `127.1`, `0x7f.1`, `2130706433`, `0177.0.0.1` y `localtest.me`) con `INVALID_WEBHOOK_URL`. |
 | **2** | **Checksum SHA-256 en S3 (Incorrecto vs Correcto)** | `PUT uploadUrl` con `x-amz-checksum-sha256` | **`403`** / **`200 OK`** | Checksum alterado rechazado por S3 con `403 SignatureDoesNotMatch`. Checksum real aceptado por S3 (`200 OK`) y confirmado en backend con `sha256Verified: true`. |
-| **3** | **Visibilidad Privada vs Pública** | `GET /api/files/:id` (Dueño, Otro Usuario y Público) | **`200`** / **`403`** / **`200`** | Privado al dueño: `200 OK` (`delivery: "s3_presigned"`, `cloudfrontUrl: null`). Privado a otro usuario: `403 FORBIDDEN_PRIVATE_NOT_OWNER`. Público: `200 OK` (`delivery: "cloudfront"`, URL en `d1nuawu3owad6c.cloudfront.net/static/files/...`). |
+| **3** | **Visibilidad Privada vs Pública** | `GET /api/files/:id` (Dueño, Otro Usuario y Público) | **`200`** / **`403`** / **`200`** | Privado al dueño: `200 OK` (`delivery: "s3_presigned"`, `cloudfrontUrl: null`, S3 Presigned GET 5 min). Privado a otro usuario: `403 FORBIDDEN_PRIVATE_NOT_OWNER`. Público: `200 OK` (`delivery: "cloudfront"`, URL en `d1nuawu3owad6c.cloudfront.net/public/...`). |
 | **4** | **Multipart Completo (2 partes x 5 MB = 10 MB) y Limpieza Oportunista** | `POST/PUT /api/upload/multipart` + S3 `PUT` | **`200 OK`** | 2 partes de `5,242,880` bytes ensambladas en S3 (`10,485,760` bytes), `fileStatus: "uploaded"`, `magicBytesVerified: true`. Tickets vencidos limpiados oportunamente. |
 | **5** | **Rate Limit Compartido en PostgreSQL** | 21 peticiones a `GET /api/keys` | **`429 Too Many Requests`** | Peticiones 1–20: `200 OK`. Petición 21: `429 KEYS_RATE_LIMIT_EXCEEDED` (`Retry-After: 43`). |
 | **6** | **Cuotas de Tickets Pendientes y Almacenamiento** | `POST /api/upload` con límites bajos temporales | **`429`** y **`413`** | Límite `maxPendingTickets=1`: 2da solicitud rechazada con `429 PENDING_TICKETS_QUOTA_EXCEEDED`. Límite `maxStorageBytes=100`: solicitud rechazada con `413 STORAGE_QUOTA_EXCEEDED`. Cuotas restauradas. |
 | **7** | **Seguridad de Llaves y Concurrencia (`Promise.all`)** | `DELETE /api/keys` (otra org) y `POST /api/keys` concurrente | **`404`**, **`201`** y **`409`** | `DELETE` de llave ajena: `404 API_KEY_NOT_FOUND`. Dos `POST /api/keys` simultáneos con 2 llaves activas y cupo 3: una `201 Created` y una `409 MAX_API_KEYS_LIMIT_REACHED`. |
 | **8** | **Rechazo de Magic Bytes Corruptos** | `PUT /api/upload` tras subir texto como `image/png` | **`422 Unprocessable Entity`** | Rechazado con `422 MAGIC_BYTES_MISMATCH`, objeto purgado de S3 y fila marcada como `failed`. |
+| **9** | **Bitácora Pública Paginada y Sin Congelamiento** | `GET /api/logs?page=1&limit=20` y panel frontend | **`200 OK`** | 270 eventos devueltos en tiempo real, orden descendente (más nuevo a más viejo), paginación de 20 por página, sin `x-admin-secret` y corrección de Data Cache en Supabase client (`cache: 'no-store'`). |

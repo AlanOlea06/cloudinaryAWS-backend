@@ -156,16 +156,16 @@ sequenceDiagram
 ## 4. Políticas de Visibilidad y Entrega
 
 ### 4.1. Archivos Públicos (`visibility: 'public'`)
-* **Landing Zone y Destino:** `static/files/<rand128>.<ext>`
-* **Entrega:** Exclusivamente vía Amazon CloudFront CDN (`https://d1nuawu3owad6c.cloudfront.net/static/files/...`).
-* **Cache-Control:** `public, max-age=31536000, immutable`.
+* **Landing Zone y Destino:** `public/{org_id}/[custom_folder]/<rand128>.<ext>`
+* **Entrega:** Exclusivamente vía Amazon CloudFront CDN (`https://d1nuawu3owad6c.cloudfront.net/public/{org_id}/...`).
+* **Cache-Control:** `public, max-age=31536000, immutable` (o `max-age=300`).
 * **Seguridad:** El backend persiste `cloudfront_url` en la base de datos para consumo directo de clientes.
 
 ### 4.2. Archivos Privados (`visibility: 'private'`)
-* **Landing Zone y Destino:** `static/private/<rand128>.<ext>`
+* **Landing Zone y Destino:** `private/{org_id}/[custom_folder]/<rand128>.<ext>`
 * **Entrega:** URL prefirmada directa de S3 con TTL corto de **5 minutos (300 segundos)** emitida únicamente al propietario verificado (`ownerUserId`).
 * **Cache-Control:** `private, no-store, no-cache, max-age=0, must-revalidate`.
-* **Seguridad:** En la base de datos y en todas las respuestas JSON, `cloudfront_url` es estrictamente `null`. Terceros que solicitan el archivo reciben `403 Forbidden` (`FORBIDDEN_PRIVATE_NOT_OWNER`).
+* **Seguridad:** En la base de datos y en todas las respuestas JSON, `cloudfront_url` es estrictamente `null`. La CDN de CloudFront no tiene acceso al prefijo `/private/*`. Terceros que solicitan el archivo reciben `403 Forbidden` (`FORBIDDEN_PRIVATE_NOT_OWNER`).
 
 ---
 
