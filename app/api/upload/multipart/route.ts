@@ -413,12 +413,7 @@ async function handleCreateMultipart(req: NextRequest, body: any) {
   }
 
   // Task B.13: Check organization quotas before initiating multipart upload
-  const quotaCheck = await checkOrganizationQuotas(orgId, numericSize, {
-    overrideMaxStorageBytes:
-      body.testMaxStorageBytes !== undefined ? Number(body.testMaxStorageBytes) : undefined,
-    overrideMaxPendingTickets:
-      body.testMaxPendingTickets !== undefined ? Number(body.testMaxPendingTickets) : undefined,
-  });
+  const quotaCheck = await checkOrganizationQuotas(orgId, numericSize);
 
   if (!quotaCheck.allowed) {
     return NextResponse.json(

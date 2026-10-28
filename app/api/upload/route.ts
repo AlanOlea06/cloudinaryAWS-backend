@@ -335,12 +335,7 @@ export async function POST(req: NextRequest) {
     // ============================================================================
 
     // CHECK 6 (Task B.13): Organization Quotas (max_storage_bytes & max_pending_tickets)
-    const quotaCheck = await checkOrganizationQuotas(orgId, fileSize, {
-      overrideMaxStorageBytes:
-        body.testMaxStorageBytes !== undefined ? Number(body.testMaxStorageBytes) : undefined,
-      overrideMaxPendingTickets:
-        body.testMaxPendingTickets !== undefined ? Number(body.testMaxPendingTickets) : undefined,
-    });
+    const quotaCheck = await checkOrganizationQuotas(orgId, fileSize);
 
     if (!quotaCheck.allowed) {
       await addServiceLog({

@@ -16,17 +16,11 @@ export interface QuotaCheckResult {
 
 /**
  * Task B.13: Validates organization-level quotas (`max_storage_bytes` and `max_pending_tickets`)
- * before issuing a new upload ticket.
- * Also supports optional test overrides (`overrideMaxStorageBytes`, `overrideMaxPendingTickets`)
- * so automated tests can deterministically verify 413/429 quota enforcement without altering production org settings.
+ * before issuing a new upload ticket. Strictly reads limits from public.organizations table.
  */
 export async function checkOrganizationQuotas(
   orgId: string,
-  incomingFileSizeBytes: number,
-  options?: {
-    overrideMaxStorageBytes?: number;
-    overrideMaxPendingTickets?: number;
-  }
+  incomingFileSizeBytes: number
 ): Promise<QuotaCheckResult> {
   // 1. Fetch organization quota limits from public.organizations
   const { data: orgRow } = await supabase
@@ -35,15 +29,8 @@ export async function checkOrganizationQuotas(
     .eq('id', orgId)
     .maybeSingle();
 
-  const maxStorageBytes =
-    options?.overrideMaxStorageBytes !== undefined
-      ? Number(options.overrideMaxStorageBytes)
-      : Number(orgRow?.max_storage_bytes ?? 1073741824); // Default 1 GB
-
-  const maxPendingTickets =
-    options?.overrideMaxPendingTickets !== undefined
-      ? Number(options.overrideMaxPendingTickets)
-      : Number(orgRow?.max_pending_tickets ?? 20); // Default 20 pending tickets
+  const maxStorageBytes = Number(orgRow?.max_storage_bytes ?? 1073741824); // Default 1 GB
+  const maxPendingTickets = Number(orgRow?.max_pending_tickets ?? 20); // Default 20 pending tickets
 
   // 2. Fetch active files for this organization
   const { data: orgFiles } = await supabase
