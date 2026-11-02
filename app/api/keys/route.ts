@@ -1,3 +1,4 @@
+import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { supabase } from '@/lib/supabase';
@@ -8,17 +9,8 @@ import { checkSharedRateLimit, buildRateLimitKey } from '@/lib/shared-rate-limit
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_MAX_KEYS_PER_ORG = 3;
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-secret, x-api-key',
-  'X-Content-Type-Options': 'nosniff',
-  'Cache-Control': 'private, no-store, no-cache, max-age=0, must-revalidate',
-  'Pragma': 'no-cache',
-};
-
 export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: corsHeaders });
+  return handleCorsOptions();
 }
 
 function hashApiKey(rawKey: string): string {

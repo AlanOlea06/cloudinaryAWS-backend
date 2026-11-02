@@ -1,3 +1,4 @@
+import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
 import { getServiceLogs, clearServiceLogs } from '@/lib/service-logs';
 import { verifyAdminSecretHeader } from '@/lib/env';
@@ -5,16 +6,8 @@ import { verifyAdminSecretHeader } from '@/lib/env';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-secret',
-  'X-Content-Type-Options': 'nosniff',
-  'Cache-Control': 'private, no-store, no-cache, max-age=0, must-revalidate',
-};
-
 export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: corsHeaders });
+  return handleCorsOptions();
 }
 
 function enforceAdminAuth(req: NextRequest): NextResponse | null {

@@ -1,18 +1,12 @@
+import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { addServiceLog } from '@/lib/service-logs';
 import { deleteS3ObjectsByKeys } from '@/lib/s3';
 import { verifyAdminSecretHeader } from '@/lib/env';
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-admin-secret',
-  'X-Content-Type-Options': 'nosniff',
-};
-
 export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: corsHeaders });
+  return handleCorsOptions();
 }
 
 function enforceAdminAuth(req: NextRequest): NextResponse | null {

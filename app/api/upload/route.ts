@@ -1,3 +1,4 @@
+import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
 import { addServiceLog } from '@/lib/service-logs';
 import { supabase } from '@/lib/supabase';
@@ -22,19 +23,8 @@ import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-f
 import { dispatchFileWebhook, processPendingWebhookDeliveries } from '@/lib/lambda-fallback/webhook-dispatcher';
 import { checkOrganizationQuotas } from '@/lib/quotas';
 
-// CORS Headers
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, x-user-id',
-};
-
-// 1. Preflight OPTIONS handler
 export async function OPTIONS() {
-  return new NextResponse(null, {
-    status: 204,
-    headers: corsHeaders,
-  });
+  return handleCorsOptions();
 }
 
 // 2. Primary Endpoint: Issue Upload Ticket & Generate S3 Presigned URL

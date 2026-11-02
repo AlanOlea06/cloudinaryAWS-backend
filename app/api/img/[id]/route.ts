@@ -1,3 +1,4 @@
+import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 // ============================================================================
 // [TEMPORARY-LAMBDA-FALLBACK: TASK-B12-IMG-ENDPOINT]
 // Búsqueda rápida: "TEMPORARY-LAMBDA-FALLBACK"
@@ -28,15 +29,8 @@ import {
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, x-user-id',
-  'X-Content-Type-Options': 'nosniff',
-};
-
 export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: corsHeaders });
+  return handleCorsOptions();
 }
 
 /**

@@ -1,3 +1,4 @@
+import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Client, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { supabase } from '@/lib/supabase';
@@ -15,22 +16,13 @@ import {
   PUBLIC_SHORT_TTL_CACHE_CONTROL,
 } from '@/lib/s3';
 
-// Cabeceras CORS para permitir consumo desde Postman o clientes web
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, x-user-id',
-};
 
 // Validador de formato UUID v4
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // 1. Manejador Preflight OPTIONS
 export async function OPTIONS() {
-  return new NextResponse(null, {
-    status: 204,
-    headers: corsHeaders,
-  });
+  return handleCorsOptions();
 }
 
 // 2. GET /api/files/[id]:

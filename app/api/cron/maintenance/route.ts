@@ -1,3 +1,4 @@
+import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 // ============================================================================
 // [TEMPORARY-LAMBDA-FALLBACK: TASK-B8-CRON-MAINTENANCE]
 // Búsqueda rápida: "TEMPORARY-LAMBDA-FALLBACK"
@@ -24,15 +25,8 @@ import {
 import { purgeStaleRateLimitBuckets } from '@/lib/shared-rate-limit';
 import { verifyCronSecretHeader } from '@/lib/env';
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-  'X-Content-Type-Options': 'nosniff',
-};
-
 export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: corsHeaders });
+  return handleCorsOptions();
 }
 
 async function runMaintenanceCron(req: NextRequest) {

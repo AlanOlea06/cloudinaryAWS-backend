@@ -1,15 +1,8 @@
+import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextResponse } from 'next/server';
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-  'Cache-Control': 'no-store, no-cache, must-revalidate',
-  'X-Content-Type-Options': 'nosniff',
-};
-
 export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: corsHeaders });
+  return handleCorsOptions();
 }
 
 export async function HEAD() {

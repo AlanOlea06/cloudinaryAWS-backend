@@ -1,3 +1,4 @@
+import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 // ============================================================================
 // [TEMPORARY-LAMBDA-FALLBACK: TASK-B11-WEBHOOK-TEST-RECEIVER]
 // Búsqueda rápida: "TEMPORARY-LAMBDA-FALLBACK"
@@ -27,16 +28,8 @@ const receivedWebhooksStore: ReceivedWebhookEntry[] =
   (globalThis as any).__antigravityReceivedWebhooks || [];
 (globalThis as any).__antigravityReceivedWebhooks = receivedWebhooksStore;
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
-  'Access-Control-Allow-Headers':
-    'Content-Type, Authorization, x-admin-secret, X-Webhook-Event, X-Webhook-Id, X-Webhook-Timestamp, X-Webhook-Signature-256, X-Webhook-Attempt, x-webhook-secret-test',
-  'X-Content-Type-Options': 'nosniff',
-};
-
 export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: corsHeaders });
+  return handleCorsOptions();
 }
 
 function enforceAdminAuth(req: NextRequest): NextResponse | null {

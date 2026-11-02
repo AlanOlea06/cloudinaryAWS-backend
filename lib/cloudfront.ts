@@ -54,11 +54,6 @@ export function getBaseCloudFrontUrl(s3Key: string): string | null {
   return `https://${domain}/${encodedKey}`;
 }
 
-export function getCloudFrontUrl(s3Key: string): string {
-  const domain = getCloudFrontDomain();
-  const encodedKey = encodeS3KeyForUrl(s3Key);
-  return `https://${domain}/${encodedKey}`;
-}
 
 export interface CloudFrontUrlResult {
   url: string;

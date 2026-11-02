@@ -1,3 +1,4 @@
+import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 // ============================================================================
 // [TEMPORARY-LAMBDA-FALLBACK: TASK-B7-STATUS-ENDPOINT]
 // Búsqueda rápida: "TEMPORARY-LAMBDA-FALLBACK"
@@ -10,16 +11,11 @@ import { supabase } from '@/lib/supabase';
 import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
 import { dispatchFileWebhook } from '@/lib/lambda-fallback/webhook-dispatcher';
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, x-user-id',
-};
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: corsHeaders });
+  return handleCorsOptions();
 }
 
 /**

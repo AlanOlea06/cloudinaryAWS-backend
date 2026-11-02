@@ -1,3 +1,4 @@
+import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { supabase } from '@/lib/supabase';
@@ -5,18 +6,11 @@ import { verifyAdminSecretHeader } from '@/lib/env';
 import { addServiceLog } from '@/lib/service-logs';
 import { validateWebhookUrlSSRF } from '@/lib/lambda-fallback/webhook-dispatcher';
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, PATCH, OPTIONS',
-  'Access-Control-Allow-Headers':
-    'Content-Type, Authorization, x-api-key, x-admin-secret, x-user-id',
-  'X-Content-Type-Options': 'nosniff',
-};
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function OPTIONS() {
-  return new NextResponse(null, { status: 204, headers: corsHeaders });
+  return handleCorsOptions();
 }
 
 type AuthResult =

@@ -2,7 +2,7 @@
  * Central environment variable validation and zero-downtime secret rotation helpers.
  * Compatible with both Node.js Serverless Runtime and Next.js Edge Runtime (Middleware).
  *
- * Security Rules (Section 1 & Section 2):
+ * Security Rules:
  * - Zero fallback secrets or default URLs in code.
  * - Every runtime read throws an explicit error if the mandatory variable is missing.
  * - Supports zero-downtime rotation for TICKET_SIGNING_SECRET and ADMIN_API_SECRET
@@ -25,26 +25,6 @@ export const MANDATORY_ENV_VARS = [
 export type MandatoryEnvVarName = (typeof MANDATORY_ENV_VARS)[number];
 
 /**
- * Checks all 10 mandatory environment variables at once and throws an error
- * listing every missing variable name if one or more are unset/empty.
- */
-export function validateAllMandatoryEnvVars(): void {
-  const missing: string[] = [];
-  for (const key of MANDATORY_ENV_VARS) {
-    const val = process.env[key];
-    if (typeof val !== 'string' || val.trim().length === 0) {
-      missing.push(key);
-    }
-  }
-
-  if (missing.length > 0) {
-    throw new Error(
-      `[ENV_VALIDATION_FAILED] Faltan variables de entorno obligatorias (${missing.length}): ${missing.join(', ')}. Configúralas antes de compilar o ejecutar el servidor.`
-    );
-  }
-}
-
-/**
  * Reads a mandatory environment variable at runtime.
  * Throws a clear error immediately if the variable is undefined or empty.
  */
@@ -61,7 +41,7 @@ export function requireEnv(name: MandatoryEnvVarName | string): string {
 /**
  * Reads an optional environment variable (e.g., *_PREVIOUS rotation secrets).
  */
-export function getOptionalEnv(name: string): string | null {
+function getOptionalEnv(name: string): string | null {
   const val = process.env[name];
   if (typeof val !== 'string' || val.trim().length === 0) {
     return null;
@@ -109,7 +89,7 @@ export function getTicketSigningSecrets(): {
 /**
  * Returns the active admin API secret and optional previous secret for rotation.
  */
-export function getAdminApiSecrets(): {
+function getAdminApiSecrets(): {
   current: string;
   previous: string | null;
   all: string[];

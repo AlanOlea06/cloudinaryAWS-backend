@@ -17,7 +17,7 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { requireEnv } from '@/lib/env';
 
-export function getS3BucketName(): string {
+function getS3BucketName(): string {
   return requireEnv('AWS_S3_BUCKET_NAME');
 }
 
@@ -279,7 +279,7 @@ export function isAwsConfigured(): boolean {
  * Throws a clear error if any of AWS_REGION, AWS_S3_BUCKET_NAME, AWS_ACCESS_KEY_ID,
  * or AWS_SECRET_ACCESS_KEY is missing.
  */
-export function getS3Client(): S3Client {
+function getS3Client(): S3Client {
   const awsRegion = requireEnv('AWS_REGION');
   requireEnv('AWS_S3_BUCKET_NAME');
   const accessKeyId = requireEnv('AWS_ACCESS_KEY_ID');
