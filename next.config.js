@@ -24,6 +24,9 @@ if (missingEnvVars.length > 0) {
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  experimental: {
+    serverComponentsExternalPackages: ['postgres', 'sharp'],
+  },
   async headers() {
     return [
       {

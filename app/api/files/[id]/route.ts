@@ -521,9 +521,10 @@ export async function DELETE(
       userId: fileRow.user_id,
       orgId: fileRow.org_id,
       ticketId: fileRow.ticket_id,
+      fileId: fileId,
       fileName: fileRow.original_name,
       ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-      message: `File '${fileRow.original_name}' permanently deleted from S3 (${deletedS3Keys.length} objects removed) and Supabase.`,
+      message: `File '${fileRow.original_name}' permanently deleted from S3 (${deletedS3Keys.length} objects removed) and Supabase. [fileId: ${fileId}]`,
     });
 
     return NextResponse.json(

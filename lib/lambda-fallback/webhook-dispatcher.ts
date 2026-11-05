@@ -20,6 +20,8 @@ import https from 'https';
 import net from 'net';
 import { supabase } from '@/lib/supabase';
 import { addServiceLog } from '@/lib/service-logs';
+import { db, isDirectDatabaseConfigured, webhookDeliveries } from '@/lib/db';
+import { sql, and, eq, lt } from 'drizzle-orm';
 
 export type WebhookEventName = 'file.uploaded' | 'file.processed' | 'file.failed';
 
@@ -594,6 +596,51 @@ export async function processPendingWebhookDeliveries(limit = 20): Promise<{
   error?: string;
 }> {
   const summary = { claimed: 0, delivered: 0, rescheduled: 0, failed: 0 };
+
+  // 1. Direct SQL Atomic Claim (Portable without proprietary RPC)
+  if (isDirectDatabaseConfigured()) {
+    try {
+      await db.execute(sql`
+        UPDATE webhook_deliveries
+        SET status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'pending' END,
+            locked_until = NULL,
+            last_error = 'LOCK_EXPIRED',
+            updated_at = NOW()
+        WHERE status = 'sending' AND locked_until < NOW()
+      `);
+
+      const lockInterval = Math.max(10, Math.min(SENDING_LOCK_SECONDS, 600));
+      const claimedRows = await db.execute(sql`
+        UPDATE webhook_deliveries d
+        SET status = 'sending',
+            locked_until = NOW() + (${lockInterval} * INTERVAL '1 second'),
+            attempts = d.attempts + 1,
+            updated_at = NOW()
+        WHERE d.id IN (
+          SELECT w.id
+          FROM webhook_deliveries w
+          WHERE w.status = 'pending' AND w.next_retry_at <= NOW()
+          ORDER BY w.next_retry_at
+          LIMIT ${Math.max(1, Math.min(limit, 100))}
+          FOR UPDATE SKIP LOCKED
+        )
+        RETURNING d.*
+      `);
+
+      for (const d of (claimedRows || []) as any[]) {
+        summary.claimed++;
+        const res = await sendClaimedDelivery(d as ClaimedDelivery, 'cron');
+        if (res.delivered) summary.delivered++;
+        else if (d.attempts >= d.max_attempts || (res.error || '').startsWith('SSRF_') || res.error?.startsWith('WEBHOOK_') || res.error === 'FILE_NOT_FOUND') summary.failed++;
+        else summary.rescheduled++;
+      }
+      return summary;
+    } catch (err: any) {
+      console.warn('[WEBHOOK_DIRECT_CLAIM_FALLBACK] Direct claim failed, falling back to RPC:', err.message);
+    }
+  }
+
+  // 2. Legacy Supabase RPC Fallback
   const { data, error } = await supabase.rpc('claim_webhook_deliveries', {
     p_limit: limit,
     p_lock_seconds: SENDING_LOCK_SECONDS,
@@ -612,6 +659,18 @@ export async function processPendingWebhookDeliveries(limit = 20): Promise<{
 
 /** Retention: delivered > 30 days and failed > 90 days are deleted. Called from the cron. */
 export async function purgeOldWebhookDeliveries(): Promise<{ ok: boolean; error?: string }> {
+  if (isDirectDatabaseConfigured()) {
+    try {
+      const deliveredCutoff = new Date(Date.now() - DELIVERED_RETENTION_DAYS * 86400000);
+      const failedCutoff = new Date(Date.now() - FAILED_RETENTION_DAYS * 86400000);
+      await db.delete(webhookDeliveries).where(and(eq(webhookDeliveries.status, 'delivered'), lt(webhookDeliveries.updated_at, deliveredCutoff)));
+      await db.delete(webhookDeliveries).where(and(eq(webhookDeliveries.status, 'failed'), lt(webhookDeliveries.updated_at, failedCutoff)));
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message || 'DELETE_FAILED' };
+    }
+  }
+
   const now = Date.now();
   const deliveredCutoff = new Date(now - DELIVERED_RETENTION_DAYS * 86400000).toISOString();
   const failedCutoff = new Date(now - FAILED_RETENTION_DAYS * 86400000).toISOString();

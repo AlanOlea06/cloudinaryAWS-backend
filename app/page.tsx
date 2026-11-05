@@ -291,6 +291,7 @@ export default function ServiceLogsPage() {
               <th style={headerCellStyle}>Acción</th>
               <th style={headerCellStyle}>Estado</th>
               <th style={headerCellStyle}>Ticket ID</th>
+              <th style={headerCellStyle}>Doc / File ID</th>
               <th style={headerCellStyle}>Archivo</th>
               <th style={headerCellStyle}>Ext</th>
               <th style={headerCellStyle}>MIME</th>
@@ -305,7 +306,7 @@ export default function ServiceLogsPage() {
           <tbody>
             {logs.length === 0 ? (
               <tr>
-                <td colSpan={15} style={{ ...cellStyle, textAlign: 'center', padding: '36px', color: '#57606a' }}>
+                <td colSpan={16} style={{ ...cellStyle, textAlign: 'center', padding: '36px', color: '#57606a' }}>
                   {loading ? 'Cargando registros desde Supabase...' : 'No hay registros en service_logs.'}
                 </td>
               </tr>
@@ -314,6 +315,7 @@ export default function ServiceLogsPage() {
                 const details = log.details || {};
                 const method = log.method || details.method || '-';
                 const ticketId = log.ticketId || details.ticketId || '-';
+                const fileId = log.fileId || details.fileId || '-';
                 const userId = log.userId || details.userId || '';
                 const userName = log.userName || details.userName || (userId ? `User: ${userId.slice(0, 8)}...` : '-');
                 const orgId = log.orgId || details.orgId || '';
@@ -347,8 +349,11 @@ export default function ServiceLogsPage() {
                     <td style={cellStyle}>
                       <span style={getStatusBadgeStyle(log.status)}>{log.status}</span>
                     </td>
-                    <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '11px' }}>
+                    <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '11px' }} title={ticketId !== '-' ? ticketId : ''}>
                       {ticketId !== '-' ? `${ticketId.slice(0, 8)}...` : '-'}
+                    </td>
+                    <td style={{ ...cellStyle, fontFamily: 'monospace', fontSize: '11px' }} title={fileId !== '-' ? fileId : ''}>
+                      {fileId !== '-' ? `${fileId.slice(0, 8)}...` : '-'}
                     </td>
                     <td style={{ ...cellStyle, maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={String(fileName)}>
                       {fileName}

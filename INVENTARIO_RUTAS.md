@@ -36,7 +36,7 @@
 | **GET** | `/api/records` | **Exclusivo Admin** (`x-admin-secret`) | Solo administrador de plataforma. | Métricas agregadas y analíticas. | Monitoreo administrativo de uso de almacenamiento y estadísticas globales. |
 | **GET, POST, PATCH** | `/api/users` | **Exclusivo Admin** (`x-admin-secret`) | Solo administrador de plataforma. | Validaciones de esquema de usuario, aislamiento de organización y flag `can_upload`. | Gestión administrativa de usuarios internos de las organizaciones cliente. |
 | **GET, POST** | `/api/webhooks/test-receiver` | Firma Webhook HMAC (`x-webhook-signature`) O Admin (`x-admin-secret`) | Permitido en producción para validación de entregas; `PUT` deshabilitado en producción. | Verificación de firma HMAC-SHA256 (`x-webhook-signature`) con búsqueda de `webhook_secret` en base de datos y timestamp anti-replay. | Receptor de pruebas para inspeccionar payloads y validar firmas de webhooks emitidos. |
-| **POST** | `/api/test/cleanup` | **Deshabilitado en Producción** (dev: `x-admin-secret`) | Bloqueado en producción con HTTP 403 `ENDPOINT_DISABLED_IN_PRODUCTION`. | Solo entorno de desarrollo. | Limpieza de organizaciones y registros de prueba creados en suites automatizadas. |
+| **GET** | `/api/img/[id]` | API Key de Organización (`x-api-key`) | `can_read = true`. Multi-tenant y titularidad si es privado. | UUID v4 válido, verificación de estado `uploaded` y políticas de visibilidad. | Redirección segura hacia URL de CloudFront (públicos) o URL prefirmada temporal de S3 (privados). |
 
 ---
 

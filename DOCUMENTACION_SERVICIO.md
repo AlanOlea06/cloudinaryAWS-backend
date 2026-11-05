@@ -1,8 +1,8 @@
 # Documentación Técnica del Servidor (`servicio`) — Arquitectura y Referencia
 
-> **Versión:** 2.0.0  
-> **Fecha:** 27 de Octubre de 2026  
-> **Arquitectura:** Next.js 14 Serverless en Vercel + AWS S3 / CloudFront + Supabase PostgreSQL  
+> **Versión:** 2.1.0 (Universal SQL / Drizzle ORM)  
+> **Fecha:** 5 de Noviembre de 2026  
+> **Arquitectura:** Next.js 14 Serverless en Vercel + AWS S3 / CloudFront + Base de Datos SQL Universal (Drizzle ORM + PostgreSQL Directo)  
 > **Regla de Arquitectura Fundamental:** *Ningún archivo binario pasa por Vercel*. Los bytes viajan exclusivamente entre Cliente y AWS S3 / CloudFront CDN. El backend opera exclusivamente en control plane (emisión de tickets, firmas criptográficas, verificación Range GET de 32 bytes, control de cuotas y webhooks).
 
 ---
@@ -14,21 +14,31 @@ servicio/
 ├── middleware.ts            # Interceptor perimetral Edge: Autenticación dual (Admin / API Keys), RBAC y Rate Limiting
 ├── next.config.js           # Configuración Next.js y validación estricta de variables obligatorias en arranque
 ├── database/                # Scripts DDL y esquemas SQL versionados
-│   ├── api_keys_schema.sql  # Tabla api_keys, índices, columna can_manage_keys y trigger atómico
-│   ├── rate_limit_buckets.sql # Tabla rate_limit_buckets y función RPC check_rate_limit_atomic
-│   └── webhook_deliveries_schema.sql # Tabla webhook_deliveries y función RPC claim_webhook_deliveries
+│   ├── schema.sql           # Esquema base original 3NF
+│   ├── migration_section3_api_keys_can_manage_keys.sql
+│   ├── migration_section5_sha256_verified.sql
+│   ├── migration_sectionC_shared_rate_limiting.sql
+│   ├── migration_sectionC_webhooks_persistent_retries.sql
+│   └── universal/           # Esquemas SQL portables agnósticos de proveedor
+│       ├── schema.postgresql.sql # Esquema estándar PostgreSQL 15+ (AWS RDS, Neon, Docker, Supabase)
+│       ├── schema.mysql.sql      # Esquema estándar MySQL 8+ / PlanetScale
+│       └── schema.sqlite.sql     # Esquema estándar SQLite 3 / Turso
 ├── lib/
-│   ├── env.ts               # Validador centralizado de 10 variables obligatorias y verificación de secretos
-│   ├── supabase.ts          # Cliente administrativo Supabase PostgreSQL (service_role)
+│   ├── db/                  # Capa de Datos Universal (Drizzle ORM + PostgreSQL Directo)
+│   │   ├── schema.ts        # Definición tipada de las 7 tablas relacionales e índices
+│   │   ├── index.ts         # Singleton de conexión directa postgres.js + Drizzle ORM (DATABASE_URL)
+│   │   └── dal.ts           # Data Access Layer (Repositorios: filesDal, organizationsDal, usersDal, apiKeysDal)
+│   ├── env.ts               # Validador centralizado de variables obligatorias y verificación de secretos
+│   ├── supabase.ts          # Cliente de compatibilidad HTTP Supabase (fallback cuando no hay DATABASE_URL)
 │   ├── s3.ts                # AWS SDK v3: firma presigned PUT/GET, multipart, HeadObject y Range GET 32b
 │   ├── cloudfront.ts        # Generación de URLs públicas de CDN (d1nuawu3owad6c.cloudfront.net)
 │   ├── magic-bytes.ts       # Detección e inspección de firmas binarias reales (PNG, JPEG, PDF, etc.)
 │   ├── quotas.ts            # Control transaccional de cuotas (max_storage_bytes y max_pending_tickets)
-│   ├── service-logs.ts      # Registro y consulta de pistas de auditoría (public.service_logs)
+│   ├── service-logs.ts      # Registro y consulta de pistas de auditoría vía Drizzle SQL directo (public.service_logs)
 │   ├── ticket-token.ts      # HMAC-SHA256 de tokens de confirmación criptográficos (confirmToken)
-│   ├── shared-rate-limit.ts # Rate limiting atómico en BD (hash SHA-256 de IP o UUID de llave, fail-open)
+│   ├── shared-rate-limit.ts # Rate limiting atómico SQL directo (UPSERT ON CONFLICT DO UPDATE, fail-open)
 │   └── lambda-fallback/
-│       ├── webhook-dispatcher.ts # Despacho HTTPS con socket fijado a IP (anti-SSRF/TOCTOU) y Circuit Breaker
+│       ├── webhook-dispatcher.ts # Despacho HTTPS fijado a IP (anti-SSRF/TOCTOU), reclamo SQL FOR UPDATE SKIP LOCKED y Circuit Breaker
 │       └── process-upload.ts    # Pipeline de procesamiento [TEST-ONLY: apagado por defecto en prod]
 └── app/
     ├── api/
@@ -40,6 +50,7 @@ servicio/
     │   ├── files/route.ts       # Listado de archivos por organización
     │   ├── files/[id]/route.ts  # Entrega directa (CloudFront público vs S3 prefirmado privado) y DELETE
     │   ├── files/[id]/status/route.ts # Estado transaccional y re-notificación manual de webhook
+    │   ├── img/[id]/route.ts    # Redirección/entrega de recursos de imagen
     │   ├── cron/maintenance/route.ts # Mantenimiento: limpieza de tickets, multiparts, webhooks y rate limits
     │   ├── webhooks/test-receiver/route.ts # Receptor y validador de firmas HMAC de webhooks de prueba
     │   ├── logs/route.ts        # Auditoría de logs administrativos
@@ -51,19 +62,20 @@ servicio/
 
 ---
 
-## 1. Variables de Entorno Obligatorias (10)
+## 1. Variables de Entorno
 
-El archivo [`lib/env.ts`](file:///C:/Users/alano/Desktop/github/cloudinary-project/servicio/lib/env.ts) y [`next.config.js`](file:///C:/Users/alano/Desktop/github/cloudinary-project/servicio/next.config.js) exigen la presencia estricta de exactamente 10 variables de entorno al arrancar el servicio. Si falta alguna, el arranque se aborta de forma inmediata sin permitir valores por defecto:
+El archivo [`lib/env.ts`](file:///C:/Users/alano/Desktop/github/cloudinary-project/servicio/lib/env.ts) y [`lib/db/index.ts`](file:///C:/Users/alano/Desktop/github/cloudinary-project/servicio/lib/db/index.ts) gestionan las variables de entorno del servicio:
 
 | Variable | Tipo / Alcance | Propósito |
 | :--- | :--- | :--- |
+| `DATABASE_URL` | PostgreSQL Direct URI | Conexión SQL directa nativa vía `postgres.js` y `drizzle-orm` (puerto 5432). Desacopla las consultas de SDKs propietarios. |
 | `AWS_ACCESS_KEY_ID` | IAM Credential | Identificador de credenciales de AWS para S3 y CloudFront. |
 | `AWS_SECRET_ACCESS_KEY` | IAM Secret | Clave secreta para firmar peticiones de S3 (`PutObject`, `GetObject`, `Range GET`). |
 | `AWS_REGION` | AWS Config | Región del bucket (fijada en `us-east-1`). |
 | `AWS_S3_BUCKET_NAME` | S3 Config | Nombre del bucket (`practicas-alan-418272802078`). |
 | `AWS_CLOUDFRONT_DOMAIN` | CDN Config | Dominio de CloudFront para entrega pública (`d1nuawu3owad6c.cloudfront.net`). |
-| `SUPABASE_URL` | PostgreSQL URL | Endpoint REST / GraphQL de la base de datos Supabase. |
-| `SUPABASE_SERVICE_ROLE_KEY` | DB Secret | Llave maestra `service_role` de Supabase para acceso administrativo con bypass de RLS. |
+| `SUPABASE_URL` | PostgreSQL URL | Endpoint REST de compatibilidad / validación perimetral Edge. |
+| `SUPABASE_SERVICE_ROLE_KEY` | DB Secret | Llave `service_role` de compatibilidad HTTP. |
 | `TICKET_SIGNING_SECRET` | Criptografía | Secreto HMAC-SHA256 para firmar y validar tokens de confirmación (`confirmToken`). |
 | `ADMIN_API_SECRET` | Autenticación | Secreto maestro para rutas administrativas y creación de llaves de organización. |
 | `CRON_SECRET` | Autenticación | Secreto Bearer para autorizar ejecuciones del cron de mantenimiento (`/api/cron/maintenance`). |
@@ -106,11 +118,12 @@ Maneja la cola transaccional y el historial de despachos de webhooks:
 ### 2.3. Tabla `public.rate_limit_buckets`
 Almacena los contadores atómicos del limitador distribuido:
 * `key` (`TEXT PRIMARY KEY`): Identificador del bucket con formato estricto `<scope>:<kind>:<id>`. Para llaves API usa el UUID `api_keys.id`; para peticiones por IP usa el hash SHA-256 (`h:<sha256hex>`), garantizando privacidad y cumplimiento GDPR.
-* `tokens` (`INT NOT NULL`): Peticiones consumidas en la ventana actual.
+* `count` (`INT NOT NULL`): Peticiones consumidas en la ventana actual.
 * `window_start` (`TIMESTAMPTZ NOT NULL`): Inicio de la ventana deslizante.
 * `last_request_at` (`TIMESTAMPTZ NOT NULL`): Última petición registrada.
+* **Ejecución SQL Directa:** Cuando `DATABASE_URL` está configurado, `checkSharedRateLimit` ejecuta una instrucción SQL portable atómica (`INSERT ... ON CONFLICT (key) DO UPDATE ... RETURNING`) vía Drizzle ORM sin depender de procedimientos almacenados propietarios.
 * **Limpieza:** Registros con `last_request_at > 1 día` son eliminados por el cron diario y de forma oportunista.
-* **Comportamiento ante fallos:** La función `check_rate_limit_atomic` opera en modo **Fail-Open** (`allowed: true`) para evitar caídas de servicio ante fallos de conectividad con la base de datos, mientras que el limitador en memoria del Edge absorbe los picos abusivos.
+* **Comportamiento ante fallos:** Opera en modo **Fail-Open** (`allowed: true`) para evitar caídas de servicio ante fallos de conectividad con la base de datos, mientras que el limitador en memoria del Edge absorbe los picos abusivos.
 
 ---
 

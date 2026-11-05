@@ -1,5 +1,7 @@
 import crypto from 'crypto';
 import { supabase } from '@/lib/supabase';
+import { db, isDirectDatabaseConfigured, rateLimitBuckets } from '@/lib/db';
+import { sql, lt } from 'drizzle-orm';
 
 export interface SharedRateLimitResult {
   allowed: boolean;
@@ -55,6 +57,16 @@ export function buildHashedRateLimitKey(scope: string, kind: string, rawIdentifi
  * Called from the maintenance cron and opportunistically from checkSharedRateLimit.
  */
 export async function purgeStaleRateLimitBuckets(): Promise<{ ok: boolean; error?: string }> {
+  if (isDirectDatabaseConfigured()) {
+    try {
+      const cutoffDate = new Date(Date.now() - RATE_LIMIT_BUCKET_RETENTION_MS);
+      await db.delete(rateLimitBuckets).where(lt(rateLimitBuckets.last_request_at, cutoffDate));
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, error: err.message || 'DELETE_FAILED' };
+    }
+  }
+
   const cutoffIso = new Date(Date.now() - RATE_LIMIT_BUCKET_RETENTION_MS).toISOString();
   const { error } = await supabase
     .from('rate_limit_buckets')
@@ -64,11 +76,9 @@ export async function purgeStaleRateLimitBuckets(): Promise<{ ok: boolean; error
 }
 
 /**
- * Checks rate limit against PostgreSQL atomic function `check_rate_limit_atomic`.
- * Shared across serverless instances without new external services.
- * Latency: one extra Supabase roundtrip (~40-120 ms). Applied only to /api/keys mutations.
- *
- * `key` must come from buildRateLimitKey().
+ * Checks rate limit against database sliding window table `rate_limit_buckets`.
+ * - If DATABASE_URL is configured: executes atomic portable SQL UPSERT directly.
+ * - Otherwise: falls back to Supabase client RPC `check_rate_limit_atomic`.
  */
 export async function checkSharedRateLimit(
   key: string,
@@ -84,6 +94,47 @@ export async function checkSharedRateLimit(
     isShared: false,
   };
 
+  // 1. Direct PostgreSQL Execution (Portable SQL without proprietary RPC)
+  if (isDirectDatabaseConfigured()) {
+    try {
+      const queryResult: any = await db.execute(sql`
+        INSERT INTO rate_limit_buckets AS b (key, count, window_start, last_request_at)
+        VALUES (${key}, 1, clock_timestamp(), clock_timestamp())
+        ON CONFLICT (key) DO UPDATE
+        SET count = CASE WHEN b.window_start + (${windowSeconds} * INTERVAL '1 second') <= clock_timestamp() THEN 1 ELSE b.count + 1 END,
+            window_start = CASE WHEN b.window_start + (${windowSeconds} * INTERVAL '1 second') <= clock_timestamp() THEN clock_timestamp() ELSE b.window_start END,
+            last_request_at = clock_timestamp()
+        RETURNING b.count, b.window_start
+      `);
+
+      if (Math.random() < OPPORTUNISTIC_CLEANUP_PROBABILITY) {
+        await purgeStaleRateLimitBuckets().catch(() => undefined);
+      }
+
+      const row = queryResult?.[0];
+      if (!row) return failOpen;
+
+      const currentCount = Number(row.count);
+      const windowStartTime = new Date(row.window_start).getTime();
+      const now = Date.now();
+      const elapsedSeconds = Math.max(0, Math.floor((now - windowStartTime) / 1000));
+      const resetSeconds = Math.max(1, windowSeconds - elapsedSeconds);
+
+      return {
+        allowed: currentCount <= maxRequests,
+        currentCount,
+        limit: maxRequests,
+        remaining: Math.max(0, maxRequests - currentCount),
+        resetSeconds,
+        isShared: true,
+      };
+    } catch (err: any) {
+      console.warn('[RATE_LIMIT_DIRECT_SQL_FALLBACK] Direct query failed, falling back to fail-open:', err.message, err.cause);
+      return failOpen;
+    }
+  }
+
+  // 2. Legacy Supabase PostgREST RPC Fallback
   try {
     const { data, error } = await supabase.rpc('check_rate_limit_atomic', {
       p_key: key,
@@ -91,14 +142,11 @@ export async function checkSharedRateLimit(
       p_window_seconds: windowSeconds,
     });
 
-    // Opportunistic cleanup (≈1% of calls). Failures are ignored; the cron is the backstop.
     if (Math.random() < OPPORTUNISTIC_CLEANUP_PROBABILITY) {
       await purgeStaleRateLimitBuckets().catch(() => undefined);
     }
 
     if (error || !Array.isArray(data) || data.length === 0) {
-      // Fail-open: if the function is not migrated yet or the DB fails, the
-      // in-memory Edge limiter in middleware.ts still applies.
       return failOpen;
     }
 
