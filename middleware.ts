@@ -165,6 +165,59 @@ async function fetchWithTimeout(
   }
 }
 
+async function resolveAuthFromDatabase(
+  request: NextRequest,
+  hashedKey: string,
+  candidateUserId: string = ''
+): Promise<{
+  ok: boolean;
+  keyRecord: (ApiKeyRecord & { can_manage_keys?: boolean }) | null;
+  userRecord: UserRecord | null;
+  error?: string;
+}> {
+  const internalSecret = requireEnv('TICKET_SIGNING_SECRET');
+  const payload = JSON.stringify({ hashedKey, candidateUserId });
+  const headers = {
+    'Content-Type': 'application/json',
+    'x-internal-secret': internalSecret,
+  };
+
+  // Try local loopback first (for EC2 / Node server), then fallback to request.nextUrl.origin (for Vercel / custom ports)
+  const candidateUrls = [
+    `http://127.0.0.1:${process.env.PORT || 80}/api/internal/auth`,
+    `${request.nextUrl.origin}/api/internal/auth`,
+  ];
+
+  let lastErr = 'AUTH_VERIFICATION_ERROR';
+  for (const url of candidateUrls) {
+    try {
+      const resp = await fetchWithTimeout(
+        url,
+        {
+          method: 'POST',
+          headers,
+          body: payload,
+          cache: 'no-store',
+        },
+        4500
+      );
+      if (resp.ok) {
+        const data = await resp.json();
+        return {
+          ok: Boolean(data.ok),
+          keyRecord: data.keyRecord || null,
+          userRecord: data.userRecord || null,
+        };
+      }
+      lastErr = `HTTP_${resp.status}`;
+    } catch (e: any) {
+      lastErr = e?.message || 'FETCH_FAILED';
+    }
+  }
+
+  return { ok: false, keyRecord: null, userRecord: null, error: lastErr };
+}
+
 /**
  * Strips any spoofable client-supplied internal headers.
  * Condition 1: El middleware debe ELIMINAR siempre cualquier x-validated-* y x-can-manage-keys
@@ -208,8 +261,8 @@ export async function middleware(request: NextRequest) {
   const method = request.method.toUpperCase();
   const isProd = process.env.NODE_ENV === 'production';
 
-  // 1. Public healthcheck endpoint (/api/health) — no sensitive data
-  if (pathname === '/api/health') {
+  // 1. Public healthcheck endpoint (/api/health) and internal auth resolver (/api/internal/auth)
+  if (pathname === '/api/health' || pathname === '/api/internal/auth') {
     return applySecurityHeaders(NextResponse.next());
   }
 
@@ -328,25 +381,10 @@ export async function middleware(request: NextRequest) {
         );
       }
 
-      const supabaseUrl = requireEnv('SUPABASE_URL');
-      const supabaseServiceRoleKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
       const hashedKey = await sha256Hex(rawApiKey);
+      const authRes = await resolveAuthFromDatabase(request, hashedKey);
 
-      const restUrl = `${supabaseUrl}/rest/v1/api_keys?hashed_key=eq.${encodeURIComponent(
-        hashedKey
-      )}&select=id,org_id,user_id,name,can_read,can_upload,can_delete,can_manage_keys,is_active&limit=1`;
-
-      const dbResponse = await fetchWithTimeout(restUrl, {
-        method: 'GET',
-        headers: {
-          apikey: supabaseServiceRoleKey,
-          Authorization: `Bearer ${supabaseServiceRoleKey}`,
-          'Content-Type': 'application/json',
-        },
-        cache: 'no-store',
-      });
-
-      if (!dbResponse.ok) {
+      if (!authRes.ok) {
         return jsonError(
           500,
           'Internal Server Error',
@@ -356,8 +394,7 @@ export async function middleware(request: NextRequest) {
         );
       }
 
-      const records = (await dbResponse.json()) as (ApiKeyRecord & { can_manage_keys?: boolean })[];
-      const keyRecord = records?.[0];
+      const keyRecord = authRes.keyRecord;
 
       if (!keyRecord || !keyRecord.is_active) {
         return jsonError(
@@ -421,9 +458,6 @@ export async function middleware(request: NextRequest) {
     }
 
     // 7. All remaining /api/* routes require a valid organization API Key (x-api-key)
-    const supabaseUrl = requireEnv('SUPABASE_URL');
-    const supabaseServiceRoleKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
-
     const rawApiKey = request.headers.get('x-api-key')?.trim();
     if (!rawApiKey) {
       return jsonError(
@@ -434,22 +468,25 @@ export async function middleware(request: NextRequest) {
       );
     }
 
+    const headerUserId = (
+      request.headers.get('x-user-id') ||
+      request.headers.get('x-end-user-id') ||
+      ''
+    ).trim();
+
+    if (headerUserId && !isValidExternalUserId(headerUserId)) {
+      return jsonError(
+        400,
+        'Bad Request',
+        'INVALID_END_USER_ID',
+        'El identificador de usuario final en la cabecera x-user-id debe tener entre 1 y 128 caracteres válidos.'
+      );
+    }
+
     const hashedKey = await sha256Hex(rawApiKey);
-    const restUrl = `${supabaseUrl}/rest/v1/api_keys?hashed_key=eq.${encodeURIComponent(
-      hashedKey
-    )}&select=id,org_id,user_id,name,can_read,can_upload,can_delete,is_active&limit=1`;
+    const authRes = await resolveAuthFromDatabase(request, hashedKey, headerUserId);
 
-    const dbResponse = await fetchWithTimeout(restUrl, {
-      method: 'GET',
-      headers: {
-        apikey: supabaseServiceRoleKey,
-        Authorization: `Bearer ${supabaseServiceRoleKey}`,
-        'Content-Type': 'application/json',
-      },
-      cache: 'no-store',
-    });
-
-    if (!dbResponse.ok) {
+    if (!authRes.ok) {
       return jsonError(
         500,
         'Internal Server Error',
@@ -458,8 +495,7 @@ export async function middleware(request: NextRequest) {
       );
     }
 
-    const records = (await dbResponse.json()) as ApiKeyRecord[];
-    const keyRecord = records?.[0];
+    const keyRecord = authRes.keyRecord;
 
     if (!keyRecord || !keyRecord.is_active) {
       return jsonError(
@@ -518,12 +554,6 @@ export async function middleware(request: NextRequest) {
     }
 
     // 9. Section 3 (Option A): Organization-bound API Key + End-User validation
-    const headerUserId = (
-      request.headers.get('x-user-id') ||
-      request.headers.get('x-end-user-id') ||
-      ''
-    ).trim();
-
     const boundUserId = keyRecord.user_id ? String(keyRecord.user_id).trim() : '';
 
     // If the key is bound to a specific user_id, prevent impersonating any other user via header
@@ -559,127 +589,12 @@ export async function middleware(request: NextRequest) {
 
     let validatedUserId = '';
 
-    if (candidateUserId) {
-      if (!isValidExternalUserId(candidateUserId)) {
-        return jsonError(
-          400,
-          'Bad Request',
-          'INVALID_END_USER_ID',
-          'El identificador de usuario final en la cabecera x-user-id debe tener entre 1 y 128 caracteres válidos.',
-          rateLimitHeaders
-        );
-      }
-
-      let resolvedUserRecord: UserRecord | undefined;
-
-      // 1) Backward compatibility: if candidateUserId is already a UUID v4 registered under THIS organization, use it directly
-      if (UUID_REGEX.test(candidateUserId)) {
-        const directUserUrl = `${supabaseUrl}/rest/v1/users?id=eq.${encodeURIComponent(
-          candidateUserId
-        )}&org_id=eq.${encodeURIComponent(
-          keyRecord.org_id
-        )}&select=id,org_id,name,email,role,can_upload&limit=1`;
-
-        const directResp = await fetchWithTimeout(directUserUrl, {
-          method: 'GET',
-          headers: {
-            apikey: supabaseServiceRoleKey,
-            Authorization: `Bearer ${supabaseServiceRoleKey}`,
-            'Content-Type': 'application/json',
-          },
-          cache: 'no-store',
-        });
-
-        if (!directResp.ok) {
-          return jsonError(
-            500,
-            'Internal Server Error',
-            'USER_VERIFICATION_ERROR',
-            'Error al verificar la pertenencia del usuario final en la base de datos.',
-            rateLimitHeaders
-          );
-        }
-
-        const directRows = (await directResp.json()) as UserRecord[];
-        if (directRows?.[0]) {
-          resolvedUserRecord = directRows[0];
-        }
-      }
-
-      // 2) If not found directly in this org (e.g. normal ID "1", "42", or external UUID),
-      //    compute the deterministic org-scoped UUID = Hash(org_id + ":" + candidateUserId)
-      //    so users across different organizations NEVER collide, and auto-provision if needed.
-      if (!resolvedUserRecord) {
-        const derivedUserId = await deriveOrgScopedUserUuid(
-          keyRecord.org_id,
-          candidateUserId
-        );
-
-        const derivedUserUrl = `${supabaseUrl}/rest/v1/users?id=eq.${encodeURIComponent(
-          derivedUserId
-        )}&org_id=eq.${encodeURIComponent(
-          keyRecord.org_id
-        )}&select=id,org_id,name,email,role,can_upload&limit=1`;
-
-        const derivedResp = await fetchWithTimeout(derivedUserUrl, {
-          method: 'GET',
-          headers: {
-            apikey: supabaseServiceRoleKey,
-            Authorization: `Bearer ${supabaseServiceRoleKey}`,
-            'Content-Type': 'application/json',
-          },
-          cache: 'no-store',
-        });
-
-        if (!derivedResp.ok) {
-          return jsonError(
-            500,
-            'Internal Server Error',
-            'USER_VERIFICATION_ERROR',
-            'Error al consultar el usuario derivado de la organización.',
-            rateLimitHeaders
-          );
-        }
-
-        const derivedRows = (await derivedResp.json()) as UserRecord[];
-        if (derivedRows?.[0]) {
-          resolvedUserRecord = derivedRows[0];
-        } else {
-          // Auto-provision the user inside keyRecord.org_id
-          const newUserMeta = buildAutoProvisionedUserMetadata(
-            keyRecord.org_id,
-            candidateUserId,
-            derivedUserId
-          );
-
-          const createResp = await fetchWithTimeout(`${supabaseUrl}/rest/v1/users`, {
-            method: 'POST',
-            headers: {
-              apikey: supabaseServiceRoleKey,
-              Authorization: `Bearer ${supabaseServiceRoleKey}`,
-              'Content-Type': 'application/json',
-              Prefer: 'resolution=merge-duplicates,return=representation',
-            },
-            body: JSON.stringify(newUserMeta),
-            cache: 'no-store',
-          });
-
-          if (!createResp.ok) {
-            return jsonError(
-              500,
-              'Internal Server Error',
-              'USER_AUTO_PROVISION_ERROR',
-              'No se pudo auto-registrar el usuario en la organización.',
-              rateLimitHeaders
-            );
-          }
-
-          const createdRows = (await createResp.json()) as UserRecord[];
-          resolvedUserRecord = createdRows?.[0] || newUserMeta;
-        }
-      }
-
-      validatedUserId = resolvedUserRecord.id;
+    if (boundUserId) {
+      validatedUserId = boundUserId;
+    } else if (authRes.userRecord?.id) {
+      validatedUserId = authRes.userRecord.id;
+    } else if (candidateUserId) {
+      validatedUserId = await deriveOrgScopedUserUuid(keyRecord.org_id, candidateUserId);
     }
 
     // 10. Strip any client-supplied x-validated-* / x-can-manage-keys headers and inject server-verified context
