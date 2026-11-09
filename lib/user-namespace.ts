@@ -92,7 +92,7 @@ export function buildAutoProvisionedUserMetadata(
     org_id: orgId,
     name: `User ${cleanExternal || uuidPrefix.slice(0, 8)}`,
     email: `u-${uuidPrefix}@${orgPrefix}.tenant.local`,
-    role: 'client',
+    role: 'editor',
     can_upload: true,
   };
 }

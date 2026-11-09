@@ -198,6 +198,14 @@ export async function POST(req: NextRequest) {
     const customName = body?.name ? String(body.name).trim().slice(0, 80) : defaultMeta.name;
     const canUpload = body?.canUpload !== undefined ? Boolean(body.canUpload) : true;
 
+    const rawRole = String(body?.role || 'editor').toLowerCase().trim();
+    const validRole =
+      rawRole === 'admin'
+        ? 'admin'
+        : rawRole === 'viewer' || rawRole === 'readonly'
+        ? 'viewer'
+        : 'editor';
+
     const { data: createdUser, error: insertErr } = await supabase
       .from('users')
       .insert({
@@ -205,7 +213,7 @@ export async function POST(req: NextRequest) {
         org_id: targetOrgId,
         name: customName,
         email: defaultMeta.email,
-        role: body?.role === 'readonly' ? 'readonly' : 'client',
+        role: validRole,
         can_upload: canUpload,
       })
       .select('id, org_id, name, role, can_upload, created_at')
