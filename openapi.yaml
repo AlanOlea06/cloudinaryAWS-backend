@@ -113,10 +113,10 @@ components:
       required: true
       schema:
         type: string
-        format: uuid
-        example: a1111111-0000-0000-0000-000000000001
+        example: "1"
       description: |
-        UUID v4 del usuario final registrado en la organización.
+        Identificador del usuario final de tu plataforma (puede ser un ID numérico como `"1"`, un string como `"user_42"` o un UUID).
+        - Nuestro backend deriva automáticamente un UUID aislado por organización (`UUID_SHA256(org_id + ":" + x-user-id)`) y lo auto-registra si aún no existe, garantizando **cero colisiones** entre organizaciones distintas.
         - **Obligatorio** al crear tickets de subida (`POST /api/upload`, `POST /api/upload/multipart`) si la API Key es de organización (`user_id: null`).
         - **Obligatorio** para leer archivos con `visibility: "private"` (`GET /api/files/{id}`), debiendo coincidir con el propietario que subió el archivo.
     OptionalEndUserIdHeader:
@@ -125,9 +125,8 @@ components:
       required: false
       schema:
         type: string
-        format: uuid
-        example: a1111111-0000-0000-0000-000000000001
-      description: UUID v4 del usuario final (opcional en rutas de listado o borrado a nivel organización, obligatorio para verificar titularidad de archivos privados).
+        example: "1"
+      description: Identificador del usuario final de tu plataforma (opcional en rutas de listado o borrado a nivel organización, obligatorio para verificar titularidad de archivos privados).
 
   headers:
     X-RateLimit-Limit:
@@ -2057,6 +2056,95 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "429":
           description: "`KEYS_RATE_LIMIT_EXCEEDED` (20 req / 60s)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    post:
+      operationId: createOrganization
+      tags: [Organizations & Webhooks]
+      summary: Registrar automáticamente una nueva organización, usuario inicial y API Key Maestra (Onboarding con inviteCode)
+      description: |
+        Permite a cualquier plataforma o desarrollador autorizado dar de alta su propia organización enviando el código de invitación (`inviteCode` en el body o en la cabecera `x-invite-code`).
+        En un solo paso crea:
+        1. La organización con sus cuotas iniciales (`1 GB` de almacenamiento, `20` tickets pendientes, `3` API Keys).
+        2. Un usuario inicial aislado a la organización.
+        3. Su **API Key Maestra (`can_manage_keys = true`)**, mostrada por única vez en la respuesta (`201 Created`).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - inviteCode
+              properties:
+                name:
+                  type: string
+                  minLength: 2
+                  maxLength: 80
+                  example: Mi Plataforma E-Commerce
+                slug:
+                  type: string
+                  example: mi-plataforma-ecommerce
+                inviteCode:
+                  type: string
+                  description: Código de invitación proporcionado para registrar una nueva organización en el servicio.
+                  example: TU_CODIGO_DE_INVITACION
+                webhookUrl:
+                  type: string
+                  format: uri
+                  nullable: true
+                  example: https://api.mi-plataforma.com/webhooks/storage
+                webhookSecret:
+                  type: string
+                  nullable: true
+                  example: TU_WEBHOOK_SECRET
+      responses:
+        "201":
+          description: Organización, usuario inicial y API Key Maestra creados exitosamente.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: created
+                  message:
+                    type: string
+                  apiKey:
+                    type: string
+                    example: TU_API_KEY_GENERADA
+                  organization:
+                    type: object
+                  defaultUser:
+                    type: object
+                  keyMetadata:
+                    type: object
+        "400":
+          description: "`INVALID_ORG_NAME` o error de validación SSRF en `webhookUrl`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "`MISSING_INVITE_CODE`: No se envió `inviteCode` ni cabecera `x-invite-code`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "`INVALID_INVITE_CODE`: El código de invitación no es válido."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: "`KEYS_RATE_LIMIT_EXCEEDED`."
           content:
             application/json:
               schema:

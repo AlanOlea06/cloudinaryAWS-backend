@@ -4,6 +4,22 @@ import { supabase } from '@/lib/supabase';
 import { addServiceLog } from '@/lib/service-logs';
 import { abortS3MultipartUpload, deleteS3Object } from '@/lib/s3';
 import { invalidateCloudFrontPaths } from '@/lib/cloudfront';
+import { deriveOrgScopedUserUuid, UUID_V4_OR_NAMESPACE_REGEX } from '@/lib/user-namespace';
+
+async function resolveQueryUserIdForOrg(orgId: string, rawUserId: string): Promise<string> {
+  const clean = (rawUserId || '').trim();
+  if (!clean) return '';
+  if (UUID_V4_OR_NAMESPACE_REGEX.test(clean)) {
+    const { data } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', clean)
+      .eq('org_id', orgId)
+      .maybeSingle();
+    if (data?.id) return data.id;
+  }
+  return await deriveOrgScopedUserUuid(orgId, clean);
+}
 
 export async function OPTIONS() {
   return handleCorsOptions();
@@ -17,7 +33,10 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const validatedOrgId = (req.headers.get('x-validated-org-id') || '').trim();
   const validatedUserId = (req.headers.get('x-validated-user-id') || '').trim();
-  const queryUserId = searchParams.get('userId')?.trim() || validatedUserId;
+  const rawQueryUserId = searchParams.get('userId')?.trim() || '';
+  const queryUserId =
+    validatedUserId ||
+    (rawQueryUserId ? await resolveQueryUserIdForOrg(validatedOrgId, rawQueryUserId) : '');
 
   if (!validatedOrgId) {
     return NextResponse.json(
@@ -79,7 +98,12 @@ export async function DELETE(req: NextRequest) {
     }
 
     const targetOrgId = validatedOrgId;
-    const targetUserId = (validatedUserId || searchParams.get('userId') || '').trim();
+    const rawTargetUserId = (validatedUserId || searchParams.get('userId') || '').trim();
+    const targetUserId =
+      validatedUserId ||
+      (rawTargetUserId && targetOrgId
+        ? await resolveQueryUserIdForOrg(targetOrgId, rawTargetUserId)
+        : '');
     const confirmOrgWipe =
       searchParams.get('confirmOrgWipe') === 'true' || body.confirmOrgWipe === true;
     const excludeIdsRaw = searchParams.get('excludeFileIds') || body.excludeFileIds || '';

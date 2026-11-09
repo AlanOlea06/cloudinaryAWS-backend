@@ -188,3 +188,61 @@ export function verifyCronSecretHeader(headers: Headers): {
 
   return { valid: true, status: 200 };
 }
+
+/**
+ * Verifies the organization registration invite code (`x-invite-code` header or `inviteCode` in body)
+ * against `ORG_INVITE_CODE` (or `ADMIN_API_SECRET` if an admin registers the organization).
+ */
+export function verifyOrgInviteCode(
+  headers: Headers,
+  bodyInviteCode?: string | null
+): {
+  valid: boolean;
+  status: 200 | 401 | 403;
+  code?: string;
+  message?: string;
+} {
+  // Admin secret always authorizes organization creation
+  const adminCheck = verifyAdminSecretHeader(headers);
+  if (adminCheck.valid) {
+    return { valid: true, status: 200 };
+  }
+
+  const candidate = (
+    headers.get('x-invite-code') ||
+    bodyInviteCode ||
+    ''
+  ).trim();
+
+  if (!candidate) {
+    return {
+      valid: false,
+      status: 401,
+      code: 'MISSING_INVITE_CODE',
+      message:
+        'Para registrar una nueva organización debes proporcionar el código de invitación en el campo inviteCode o en la cabecera x-invite-code.',
+    };
+  }
+
+  const configuredInviteCode = getOptionalEnv('ORG_INVITE_CODE');
+  const { current: adminSecret, previous: prevAdminSecret } = getAdminApiSecrets();
+
+  if (configuredInviteCode && constantTimeEqual(candidate, configuredInviteCode)) {
+    return { valid: true, status: 200 };
+  }
+
+  if (constantTimeEqual(candidate, adminSecret)) {
+    return { valid: true, status: 200 };
+  }
+
+  if (prevAdminSecret && constantTimeEqual(candidate, prevAdminSecret)) {
+    return { valid: true, status: 200 };
+  }
+
+  return {
+    valid: false,
+    status: 403,
+    code: 'INVALID_INVITE_CODE',
+    message: 'El código de invitación (inviteCode) proporcionado no es válido.',
+  };
+}

@@ -27,23 +27,36 @@ Es un servicio de plano de control (*control plane*) para almacenamiento de imá
 
 ---
 
-## 2. Cómo obtener una API Key
+## 2. Cómo obtener tu Organización, Usuarios y API Key
 
-Actualmente el alta inicial de organizaciones, usuarios y la primera API Key la realiza el **administrador de la plataforma**.
-
-### ¿Qué debes solicitar al administrador para empezar?
-Solicita al administrador los siguientes datos para tu entorno:
-1. **`orgId` (UUID de tu Organización):** Identificador único de tu organización (y los límites de cuota que requieras).
-2. **Lista de `userId` (UUIDs de tus usuarios registrados):** Cada archivo subido debe asociarse a un usuario registrado en tu organización con permiso de subida (`can_upload = true`).
-3. **Tu `API Key` inicial (`sk_live_...`):**
-   - Pide una **API Key Maestra de Organización** (`can_manage_keys = true`, `can_read = true`, `can_upload = true`, `can_delete = true`).
-   - **Importante:** Por arquitectura *Zero-Knowledge*, el servidor solo almacena el hash SHA-256 de la llave. Guarda tu `sk_live_...` en tus variables de entorno (`TU_API_KEY`) en cuanto la recibas, ya que no es posible recuperarla en texto plano después.
-
-### ¿Cómo crear llaves adicionales tú mismo (Delegación)?
-Si tu llave inicial tiene `can_manage_keys: true`, puedes crear llaves operativas secundarias (con `can_manage_keys: false`) desde tu propio backend sin contactar al administrador, hasta el límite `max_api_keys` de tu organización (por defecto **3 llaves activas**):
+### Opción A: Registro Automático en 1 Paso (`POST /api/organizations` con Código de Invitación)
+Si cuentas con el **código de invitación (`inviteCode`)** de la plataforma, puedes crear automáticamente tu **Organización**, tu **Usuario inicial** y tu **API Key Maestra (`sk_live_...`)** con una sola petición:
 
 ```bash
-curl -X POST "https://cloudinary-aws-backend.vercel.app/api/keys" \
+curl -X POST "https://d1nuawu3owad6c.cloudfront.net/api/organizations" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Mi Plataforma Backend",
+    "slug": "mi-plataforma",
+    "inviteCode": "TU_CODIGO_DE_INVITACION"
+  }'
+```
+
+* **Importante (Zero-Knowledge):** La respuesta `201 Created` te devolverá el campo `apiKey` (`sk_live_...`). Guárdalo de inmediato en las variables de entorno de tu servidor (`TU_API_KEY`), ya que por seguridad solo se almacena su hash SHA-256 y nunca vuelve a mostrarse.
+
+### ¿Cómo funcionan los usuarios (`x-user-id`) en tu Organización? (Creación 100% Automática y Sin Colisiones)
+No necesitas pre-registrar a los usuarios de tu plataforma antes de subir archivos:
+- En la cabecera `x-user-id` puedes enviar **cualquier identificador de usuario de tu propio sistema** (por ejemplo un ID numérico `"1"`, `"450"`, un string `"cliente_99"` o un UUID).
+- Nuestro servicio calcula internamente un **UUID determinista único por organización**:
+  $$\text{internalUserId} = \text{UUID\_SHA256}(\text{org\_id} + \text{":"} + \text{x-user-id})$$
+- Si ese usuario aún no existe en tu organización, **se registra automáticamente al vuelo** y jamás chocará con usuarios de otras organizaciones aunque ambas usen `x-user-id: 1`.
+- *(Opcional)* También puedes listar o registrar usuarios explícitamente en `GET /api/users` y `POST /api/users` enviando tu `x-api-key`.
+
+### ¿Cómo crear llaves adicionales tú mismo (Delegación)?
+Con tu API Key Maestra (`can_manage_keys: true`), puedes crear llaves operativas secundarias (con `can_manage_keys: false`) desde tu propio backend, hasta el límite `max_api_keys` de tu organización (por defecto **3 llaves activas**):
+
+```bash
+curl -X POST "https://d1nuawu3owad6c.cloudfront.net/api/keys" \
   -H "Content-Type: application/json" \
   -H "x-api-key: TU_API_KEY" \
   -d '{
@@ -56,7 +69,7 @@ curl -X POST "https://cloudinary-aws-backend.vercel.app/api/keys" \
 
 ### Cabeceras de autenticación en tus peticiones:
 - `x-api-key: TU_API_KEY` *(Obligatoria en todas las rutas protegidas)*.
-- `x-user-id: TU_USER_UUID` *(Obligatoria cuando usas una llave de organización para indicar en nombre de qué usuario estás subiendo o leyendo un archivo)*.
+- `x-user-id: 1` *(Obligatoria cuando usas una llave de organización para indicar en nombre de qué usuario de tu sistema estás subiendo o leyendo un archivo; acepta cualquier ID como `"1"`, `"user_42"` o UUID)*.
 
 ---
 

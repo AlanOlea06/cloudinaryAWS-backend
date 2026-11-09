@@ -5,6 +5,11 @@ import {
   verifyAdminSecretHeader,
   verifyCronSecretHeader,
 } from '@/lib/env';
+import {
+  deriveOrgScopedUserUuid,
+  isValidExternalUserId,
+  buildAutoProvisionedUserMetadata,
+} from '@/lib/user-namespace';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -86,7 +91,7 @@ const SECURITY_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
   'Access-Control-Allow-Headers':
-    'Content-Type, Authorization, x-api-key, x-user-id, x-end-user-id, x-admin-secret, x-cron-secret, x-amz-checksum-sha256',
+    'Content-Type, Authorization, x-api-key, x-user-id, x-end-user-id, x-invite-code, x-admin-secret, x-cron-secret, x-amz-checksum-sha256',
 };
 
 interface ApiKeyRecord {
@@ -187,8 +192,6 @@ function isAdminRoute(pathname: string): boolean {
     pathname.startsWith('/api/logs/') ||
     pathname === '/api/records' ||
     pathname.startsWith('/api/records/') ||
-    pathname === '/api/users' ||
-    pathname.startsWith('/api/users/') ||
     pathname === '/api/webhooks' ||
     pathname.startsWith('/api/webhooks/') ||
     pathname === '/api/test' ||
@@ -306,6 +309,14 @@ export async function middleware(request: NextRequest) {
         return applySecurityHeaders(response);
       }
 
+      // POST /api/organizations can be called with inviteCode (validated inside route handler)
+      if (pathname === '/api/organizations' && method === 'POST') {
+        const sanitizedHeaders = sanitizeClientHeaders(request);
+        const response = NextResponse.next({ request: { headers: sanitizedHeaders } });
+        Object.entries(rateLimitHeaders).forEach(([k, v]) => response.headers.set(k, v));
+        return applySecurityHeaders(response);
+      }
+
       // If no admin secret, requires x-api-key with can_manage_keys=true
       if (!rawApiKey) {
         return jsonError(
@@ -398,6 +409,15 @@ export async function middleware(request: NextRequest) {
         );
       }
       return applySecurityHeaders(NextResponse.next());
+    }
+
+    // 6.b Dual-auth for /api/users: allow ADMIN_API_SECRET or fall through to x-api-key
+    if (pathname === '/api/users' || pathname.startsWith('/api/users/')) {
+      const adminCheck = verifyAdminSecretHeader(request.headers);
+      if (adminCheck.valid) {
+        const sanitizedHeaders = sanitizeClientHeaders(request);
+        return applySecurityHeaders(NextResponse.next({ request: { headers: sanitizedHeaders } }));
+      }
     }
 
     // 7. All remaining /api/* routes require a valid organization API Key (x-api-key)
@@ -507,14 +527,17 @@ export async function middleware(request: NextRequest) {
     const boundUserId = keyRecord.user_id ? String(keyRecord.user_id).trim() : '';
 
     // If the key is bound to a specific user_id, prevent impersonating any other user via header
-    if (boundUserId && headerUserId && headerUserId !== boundUserId) {
-      return jsonError(
-        403,
-        'Forbidden',
-        'FORBIDDEN_USER_IMPERSONATION',
-        `La API Key '${keyRecord.name}' está vinculada exclusivamente al usuario '${boundUserId}' y no puede operar en nombre de '${headerUserId}'.`,
-        rateLimitHeaders
-      );
+    if (boundUserId && headerUserId) {
+      const derivedFromHeader = await deriveOrgScopedUserUuid(keyRecord.org_id, headerUserId);
+      if (headerUserId !== boundUserId && derivedFromHeader !== boundUserId) {
+        return jsonError(
+          403,
+          'Forbidden',
+          'FORBIDDEN_USER_IMPERSONATION',
+          `La API Key '${keyRecord.name}' está vinculada exclusivamente al usuario '${boundUserId}' y no puede operar en nombre de '${headerUserId}'.`,
+          rateLimitHeaders
+        );
+      }
     }
 
     const candidateUserId = boundUserId || headerUserId;
@@ -529,7 +552,7 @@ export async function middleware(request: NextRequest) {
         400,
         'Bad Request',
         'MISSING_END_USER_ID',
-        'Las API Keys de organización (sin user_id fijo) requieren que el backend envíe el UUID del usuario final en la cabecera x-user-id.',
+        'Las API Keys de organización (sin user_id fijo) requieren que el backend envíe el identificador del usuario final en la cabecera x-user-id.',
         rateLimitHeaders
       );
     }
@@ -537,64 +560,126 @@ export async function middleware(request: NextRequest) {
     let validatedUserId = '';
 
     if (candidateUserId) {
-      if (!UUID_REGEX.test(candidateUserId)) {
+      if (!isValidExternalUserId(candidateUserId)) {
         return jsonError(
           400,
           'Bad Request',
           'INVALID_END_USER_ID',
-          'El identificador de usuario final en la cabecera x-user-id debe ser un UUID v4 válido.',
+          'El identificador de usuario final en la cabecera x-user-id debe tener entre 1 y 128 caracteres válidos.',
           rateLimitHeaders
         );
       }
 
-      const userRestUrl = `${supabaseUrl}/rest/v1/users?id=eq.${encodeURIComponent(
-        candidateUserId
-      )}&select=id,org_id,name,email,role,can_upload&limit=1`;
+      let resolvedUserRecord: UserRecord | undefined;
 
-      const userResp = await fetchWithTimeout(userRestUrl, {
-        method: 'GET',
-        headers: {
-          apikey: supabaseServiceRoleKey,
-          Authorization: `Bearer ${supabaseServiceRoleKey}`,
-          'Content-Type': 'application/json',
-        },
-        cache: 'no-store',
-      });
+      // 1) Backward compatibility: if candidateUserId is already a UUID v4 registered under THIS organization, use it directly
+      if (UUID_REGEX.test(candidateUserId)) {
+        const directUserUrl = `${supabaseUrl}/rest/v1/users?id=eq.${encodeURIComponent(
+          candidateUserId
+        )}&org_id=eq.${encodeURIComponent(
+          keyRecord.org_id
+        )}&select=id,org_id,name,email,role,can_upload&limit=1`;
 
-      if (!userResp.ok) {
-        return jsonError(
-          500,
-          'Internal Server Error',
-          'USER_VERIFICATION_ERROR',
-          'Error al verificar la pertenencia del usuario final en la base de datos.',
-          rateLimitHeaders
-        );
+        const directResp = await fetchWithTimeout(directUserUrl, {
+          method: 'GET',
+          headers: {
+            apikey: supabaseServiceRoleKey,
+            Authorization: `Bearer ${supabaseServiceRoleKey}`,
+            'Content-Type': 'application/json',
+          },
+          cache: 'no-store',
+        });
+
+        if (!directResp.ok) {
+          return jsonError(
+            500,
+            'Internal Server Error',
+            'USER_VERIFICATION_ERROR',
+            'Error al verificar la pertenencia del usuario final en la base de datos.',
+            rateLimitHeaders
+          );
+        }
+
+        const directRows = (await directResp.json()) as UserRecord[];
+        if (directRows?.[0]) {
+          resolvedUserRecord = directRows[0];
+        }
       }
 
-      const userRows = (await userResp.json()) as UserRecord[];
-      const userRecord = userRows?.[0];
-
-      if (!userRecord) {
-        return jsonError(
-          401,
-          'Unauthorized',
-          'USER_NOT_REGISTERED',
-          `El usuario final '${candidateUserId}' no existe en el sistema.`,
-          rateLimitHeaders
+      // 2) If not found directly in this org (e.g. normal ID "1", "42", or external UUID),
+      //    compute the deterministic org-scoped UUID = Hash(org_id + ":" + candidateUserId)
+      //    so users across different organizations NEVER collide, and auto-provision if needed.
+      if (!resolvedUserRecord) {
+        const derivedUserId = await deriveOrgScopedUserUuid(
+          keyRecord.org_id,
+          candidateUserId
         );
+
+        const derivedUserUrl = `${supabaseUrl}/rest/v1/users?id=eq.${encodeURIComponent(
+          derivedUserId
+        )}&org_id=eq.${encodeURIComponent(
+          keyRecord.org_id
+        )}&select=id,org_id,name,email,role,can_upload&limit=1`;
+
+        const derivedResp = await fetchWithTimeout(derivedUserUrl, {
+          method: 'GET',
+          headers: {
+            apikey: supabaseServiceRoleKey,
+            Authorization: `Bearer ${supabaseServiceRoleKey}`,
+            'Content-Type': 'application/json',
+          },
+          cache: 'no-store',
+        });
+
+        if (!derivedResp.ok) {
+          return jsonError(
+            500,
+            'Internal Server Error',
+            'USER_VERIFICATION_ERROR',
+            'Error al consultar el usuario derivado de la organización.',
+            rateLimitHeaders
+          );
+        }
+
+        const derivedRows = (await derivedResp.json()) as UserRecord[];
+        if (derivedRows?.[0]) {
+          resolvedUserRecord = derivedRows[0];
+        } else {
+          // Auto-provision the user inside keyRecord.org_id
+          const newUserMeta = buildAutoProvisionedUserMetadata(
+            keyRecord.org_id,
+            candidateUserId,
+            derivedUserId
+          );
+
+          const createResp = await fetchWithTimeout(`${supabaseUrl}/rest/v1/users`, {
+            method: 'POST',
+            headers: {
+              apikey: supabaseServiceRoleKey,
+              Authorization: `Bearer ${supabaseServiceRoleKey}`,
+              'Content-Type': 'application/json',
+              Prefer: 'resolution=merge-duplicates,return=representation',
+            },
+            body: JSON.stringify(newUserMeta),
+            cache: 'no-store',
+          });
+
+          if (!createResp.ok) {
+            return jsonError(
+              500,
+              'Internal Server Error',
+              'USER_AUTO_PROVISION_ERROR',
+              'No se pudo auto-registrar el usuario en la organización.',
+              rateLimitHeaders
+            );
+          }
+
+          const createdRows = (await createResp.json()) as UserRecord[];
+          resolvedUserRecord = createdRows?.[0] || newUserMeta;
+        }
       }
 
-      if (userRecord.org_id !== keyRecord.org_id) {
-        return jsonError(
-          403,
-          'Forbidden',
-          'FORBIDDEN_USER_ORG_MISMATCH',
-          `Aislamiento Multi-Tenant: el usuario '${candidateUserId}' no pertenece a la organización propietaria de la API Key.`,
-          rateLimitHeaders
-        );
-      }
-
-      validatedUserId = userRecord.id;
+      validatedUserId = resolvedUserRecord.id;
     }
 
     // 10. Strip any client-supplied x-validated-* / x-can-manage-keys headers and inject server-verified context

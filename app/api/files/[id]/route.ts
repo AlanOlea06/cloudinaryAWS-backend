@@ -16,6 +16,7 @@ import {
   PRIVATE_NO_STORE_CACHE_CONTROL,
   PUBLIC_SHORT_TTL_CACHE_CONTROL,
 } from '@/lib/s3';
+import { deriveOrgScopedUserUuid } from '@/lib/user-namespace';
 
 
 // Validador de formato UUID v4
@@ -138,7 +139,16 @@ export async function GET(
     }
 
     // 4. Bloquear discrepancia entre query ?userId y el usuario validado por el middleware
-    if (validatedUserId && queryUserId && queryUserId !== validatedUserId) {
+    const derivedQueryUserId =
+      queryUserId && fileRow.org_id
+        ? await deriveOrgScopedUserUuid(fileRow.org_id, queryUserId)
+        : '';
+    if (
+      validatedUserId &&
+      queryUserId &&
+      queryUserId !== validatedUserId &&
+      derivedQueryUserId !== validatedUserId
+    ) {
       await addServiceLog({
         method: 'GET',
         action: 'ACCESS_DENIED',
