@@ -5,7 +5,9 @@ import { supabase } from '@/lib/supabase';
 import { addServiceLog } from '@/lib/service-logs';
 import {
   validateAllowedFileType,
+  buildOrgS3FolderPrefix,
   generateOpaqueS3Key,
+  promotePendingS3ObjectToFinal,
   createS3MultipartUpload,
   generatePresignedUploadPartUrl,
   listS3UploadedParts,
@@ -424,8 +426,8 @@ async function handleCreateMultipart(req: NextRequest, body: any) {
   }
 
   const ticketId = crypto.randomUUID();
-  const s3FolderPrefix = normalizedVisibility === 'private' ? 'static/private' : 'static/files';
-  const pendingKey = generateOpaqueS3Key(s3FolderPrefix, ext);
+  const s3PendingPrefix = buildOrgS3FolderPrefix('pending', orgId);
+  const pendingKey = generateOpaqueS3Key(s3PendingPrefix, ext);
 
   const { uploadId, cacheControl, contentDisposition } = await createS3MultipartUpload({
     key: pendingKey,
@@ -837,10 +839,29 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
     );
   }
 
-  // 5. PRODUCTION FLOW: Direct storage without server processing
+  // 5. PRODUCTION FLOW: Promote verified object from static/pending/{orgId}/ to static/{public|private}/{orgId}/ in S3
+  const fileVisibility: 'public' | 'private' =
+    String(fileRow.visibility || 'private').toLowerCase() === 'public' ? 'public' : 'private';
+  const expectedDisposition: 'inline' | 'attachment' =
+    String(fileRow.extension || '').toLowerCase() === '.pdf' ? 'attachment' : 'inline';
+
+  let promotedKey = fileRow.s3_pending_key;
+  try {
+    const promoted = await promotePendingS3ObjectToFinal(
+      fileRow.s3_pending_key,
+      fileRow.org_id,
+      fileVisibility,
+      fileRow.mime_type || 'application/octet-stream',
+      expectedDisposition
+    );
+    promotedKey = promoted.finalKey;
+  } catch (promoteErr: any) {
+    console.warn('Could not promote multipart S3 object from pending to final folder:', promoteErr.message);
+  }
+
   const publicCfUrl =
-    fileRow.visibility === 'public'
-      ? getBaseCloudFrontUrl(fileRow.s3_pending_key)
+    fileVisibility === 'public' && promotedKey
+      ? getBaseCloudFrontUrl(promotedKey)
       : null;
 
   const isChecksumVerified = Boolean(fileRow.sha256_hash && headMeta.checksumSHA256);
@@ -855,7 +876,7 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
       completed_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       cloudfront_url: publicCfUrl,
-      s3_processed_key: fileRow.s3_pending_key,
+      s3_processed_key: promotedKey,
       sha256_verified: isChecksumVerified,
     })
     .eq('id', fileRow.id);

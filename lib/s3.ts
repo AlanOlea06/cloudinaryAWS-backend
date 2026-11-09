@@ -248,8 +248,19 @@ export function getCacheControlForVisibility(
  * - Never includes organization slug, visibility ('private'/'public'), or original filename.
  * - Always resides under 'static/' so CloudFront (/static/*) can reach public files when needed.
  */
+export function buildOrgS3FolderPrefix(
+  stage: 'pending' | 'public' | 'private',
+  orgId: string
+): string {
+  const cleanOrgId = (orgId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!cleanOrgId) {
+    return `static/${stage}`;
+  }
+  return `static/${stage}/${cleanOrgId}`;
+}
+
 export function generateOpaqueS3Key(
-  prefix: 'static/pending' | 'static/files' | 'static/private' = 'static/files',
+  prefix: string = 'static/public',
   extension: string = ''
 ): string {
   const random128Hex = crypto.randomBytes(16).toString('hex');
@@ -259,7 +270,8 @@ export function generateOpaqueS3Key(
   }
   // Keep only safe alphanumeric extension characters
   cleanExt = cleanExt.replace(/[^a-z0-9.]/g, '');
-  return `${prefix}/${random128Hex}${cleanExt}`;
+  const cleanPrefix = (prefix || 'static/public').trim().replace(/^\/+|\/+$/g, '');
+  return `${cleanPrefix}/${random128Hex}${cleanExt}`;
 }
 
 /**
@@ -536,6 +548,71 @@ export async function applyS3CacheControlMetadata(
 
   await client.send(copyCommand);
   return cacheControl;
+}
+
+/**
+ * Promueve un objeto verificado desde la zona de aterrizaje (`static/pending/{orgId}/<file>`)
+ * hacia su carpeta final definitiva según la visibilidad y organización:
+ * - Si visibility === 'public'  -> `static/public/{orgId}/<file>`
+ * - Si visibility === 'private' -> `static/private/{orgId}/<file>`
+ * Realiza `CopyObjectCommand` en S3 (sin descargar el binario al servidor) aplicando el
+ * `Cache-Control` y `Content-Disposition` definitivos, y luego elimina el objeto de `pending`.
+ */
+export async function promotePendingS3ObjectToFinal(
+  pendingKey: string,
+  orgId: string,
+  visibility: 'public' | 'private' = 'private',
+  contentType: string = 'application/octet-stream',
+  contentDisposition?: 'inline' | 'attachment'
+): Promise<{ finalKey: string; cacheControl: string }> {
+  const client = getS3Client();
+  const trimmedBucket = getS3BucketName();
+
+  const cleanPendingKey = (pendingKey || '').trim().replace(/^\/+/, '');
+  const fileNamePart =
+    cleanPendingKey.split('/').pop() || `${crypto.randomBytes(16).toString('hex')}.bin`;
+
+  const targetStage: 'public' | 'private' =
+    String(visibility).toLowerCase() === 'public' ? 'public' : 'private';
+  const targetPrefix = buildOrgS3FolderPrefix(targetStage, orgId);
+  const finalKey = `${targetPrefix}/${fileNamePart}`;
+
+  const cacheControl = getCacheControlForVisibility(targetStage, false);
+
+  const encodedCopySource = `${trimmedBucket}/${cleanPendingKey
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/')}`;
+
+  const copyParams: Record<string, any> = {
+    Bucket: trimmedBucket,
+    CopySource: encodedCopySource,
+    Key: finalKey,
+    ContentType: contentType,
+    CacheControl: cacheControl,
+    MetadataDirective: 'REPLACE',
+  };
+
+  if (contentDisposition === 'attachment' || finalKey.toLowerCase().endsWith('.pdf')) {
+    copyParams.ContentDisposition = 'attachment';
+  }
+
+  await client.send(new CopyObjectCommand(copyParams as any));
+
+  if (cleanPendingKey !== finalKey) {
+    try {
+      await client.send(
+        new DeleteObjectCommand({
+          Bucket: trimmedBucket,
+          Key: cleanPendingKey,
+        })
+      );
+    } catch (delErr: any) {
+      console.warn(`Warning deleting promoted pending object '${cleanPendingKey}':`, delErr.message);
+    }
+  }
+
+  return { finalKey, cacheControl };
 }
 
 /**

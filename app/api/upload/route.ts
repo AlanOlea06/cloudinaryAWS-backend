@@ -4,9 +4,11 @@ import { addServiceLog } from '@/lib/service-logs';
 import { supabase } from '@/lib/supabase';
 import {
   isAwsConfigured,
+  buildOrgS3FolderPrefix,
   generateOpaqueS3Key,
   generatePresignedUploadUrl,
   applyS3CacheControlMetadata,
+  promotePendingS3ObjectToFinal,
   getCacheControlForVisibility,
   validateAllowedFileType,
   headS3Object,
@@ -366,9 +368,9 @@ export async function POST(req: NextRequest) {
     const resourceType = typeValidation.resourceType!;
     const contentDisposition = typeValidation.contentDisposition!;
 
-    // Claves por visibilidad: públicos en static/files/<rand128>.<ext>, privados en static/private/<rand128>.<ext>
-    const s3FolderPrefix = visibility === 'private' ? 'static/private' : 'static/files';
-    const landingZoneKey = generateOpaqueS3Key(s3FolderPrefix, extension);
+    // Zona de aterrizaje inicial: static/pending/{orgId}/<rand128>.<ext>
+    const s3PendingPrefix = buildOrgS3FolderPrefix('pending', targetOrg.id);
+    const landingZoneKey = generateOpaqueS3Key(s3PendingPrefix, extension);
     // Task A.3: Signed Cache-Control for landing zone is strictly no-store
     const signedUploadCacheControl = PRIVATE_NO_STORE_CACHE_CONTROL;
 
@@ -1026,24 +1028,39 @@ export async function PUT(req: NextRequest) {
     );
   }
 
-  // PRODUCTION FLOW: No files pass through Vercel
+  // PRODUCTION FLOW: Promote verified object from static/pending/{orgId}/ to static/{public|private}/{orgId}/ in S3
   let s3CacheControl: string | null = null;
-  if (fileVisibility === 'public' && fileRow?.s3_pending_key) {
+  let promotedKey = fileRow.s3_pending_key;
+
+  if (fileRow?.s3_pending_key) {
     try {
-      s3CacheControl = await applyS3CacheControlMetadata(
+      const promoted = await promotePendingS3ObjectToFinal(
         fileRow.s3_pending_key,
-        fileRow.mime_type || 'application/octet-stream',
+        fileRow.org_id,
         fileVisibility,
+        fileRow.mime_type || 'application/octet-stream',
         expectedDisposition
       );
-    } catch (metaErr: any) {
-      console.warn('Could not apply Cache-Control metadata on S3 object:', metaErr.message);
+      promotedKey = promoted.finalKey;
+      s3CacheControl = promoted.cacheControl;
+    } catch (promoteErr: any) {
+      console.warn('Could not promote S3 object from pending to final folder:', promoteErr.message);
+      if (fileVisibility === 'public') {
+        try {
+          s3CacheControl = await applyS3CacheControlMetadata(
+            fileRow.s3_pending_key,
+            fileRow.mime_type || 'application/octet-stream',
+            fileVisibility,
+            expectedDisposition
+          );
+        } catch {}
+      }
     }
   }
 
   const publicCfUrl =
-    fileVisibility === 'public' && fileRow?.s3_pending_key
-      ? getBaseCloudFrontUrl(fileRow.s3_pending_key)
+    fileVisibility === 'public' && promotedKey
+      ? getBaseCloudFrontUrl(promotedKey)
       : null;
 
   const isChecksumVerified = Boolean(fileRow.sha256_hash && headMeta.checksumSHA256);
@@ -1056,7 +1073,7 @@ export async function PUT(req: NextRequest) {
       completed_at: nowIso,
       updated_at: nowIso,
       cloudfront_url: publicCfUrl,
-      s3_processed_key: fileRow.s3_pending_key,
+      s3_processed_key: promotedKey,
       sha256_verified: isChecksumVerified,
     })
     .eq('ticket_id', ticketId);

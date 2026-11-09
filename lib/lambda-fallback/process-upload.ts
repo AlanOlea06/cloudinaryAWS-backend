@@ -23,6 +23,7 @@ import sharp from 'sharp';
 import { supabase } from '@/lib/supabase';
 import { addServiceLog } from '@/lib/service-logs';
 import {
+  buildOrgS3FolderPrefix,
   generateOpaqueS3Key,
   getCacheControlForVisibility,
   getS3ObjectBuffer,
@@ -226,8 +227,9 @@ export async function processUpload(
     const processedSizeBytes = processedBuffer.length;
     const sha256Hash = crypto.createHash('sha256').update(processedBuffer).digest('hex');
 
-    // 5. Write processed file to final destination with a NEW 128-bit opaque key: static/files/<rand128_B>.<ext>
-    const finalKey = generateOpaqueS3Key('static/files', extension);
+    // 5. Write processed file to final destination with a NEW 128-bit opaque key: static/{public|private}/{orgId}/<rand128_B>.<ext>
+    const finalStagePrefix = buildOrgS3FolderPrefix(visibility, fileRow.org_id || '');
+    const finalKey = generateOpaqueS3Key(finalStagePrefix, extension);
     const finalCacheControl = getCacheControlForVisibility(visibility, false);
     const contentDisposition: 'inline' | 'attachment' =
       extension === '.pdf' || detectedMime === 'application/pdf' ? 'attachment' : 'inline';
