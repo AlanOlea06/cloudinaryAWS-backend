@@ -27,11 +27,6 @@ function enforceAdminAuth(req: NextRequest): NextResponse | null {
   return null;
 }
 
-function maskIpAddress(ip: string | null | undefined): string | null {
-  if (!ip) return null;
-  return 'xxx.xxx.xxx.xxx';
-}
-
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const pageParam = url.searchParams.get('page');
@@ -40,15 +35,38 @@ export async function GET(req: NextRequest) {
   const page = pageParam ? Math.max(1, parseInt(pageParam, 10) || 1) : 1;
   const limit = limitParam ? Math.max(1, Math.min(100, parseInt(limitParam, 10) || 20)) : 20;
 
-  const isAdmin = verifyAdminSecretHeader(req.headers).valid;
-  const rawApiKey = req.headers.get('x-api-key')?.trim();
+  const rawApiKey = (
+    req.headers.get('x-api-key') ||
+    req.headers.get('x-admin-secret') ||
+    url.searchParams.get('apiKey') ||
+    ''
+  ).trim();
 
-  // Si envía x-api-key, devolver exclusivamente los logs de su propia organización
+  // Check if either the original headers OR the key provided in x-api-key matches ADMIN_API_SECRET
+  const syntheticAdminHeaders = new Headers(req.headers);
+  if (rawApiKey && !syntheticAdminHeaders.get('x-admin-secret')) {
+    syntheticAdminHeaders.set('x-admin-secret', rawApiKey);
+  }
+  const isAdmin = verifyAdminSecretHeader(syntheticAdminHeaders).valid;
+
+  if (!isAdmin && !rawApiKey) {
+    return NextResponse.json(
+      {
+        error: 'Unauthorized',
+        code: 'AUTHENTICATION_REQUIRED',
+        message:
+          'Se requiere una API Key de organización (para ver los logs de tu organización) o la llave de administrador (para ver todos los logs) en la cabecera x-api-key.',
+      },
+      { status: 401, headers: corsHeaders }
+    );
+  }
+
+  // Caso 1: Llave de una Organización -> devolver únicamente los logs de esa organización (con su IP real sin censurar)
   if (!isAdmin && rawApiKey) {
     const keyHash = crypto.createHash('sha256').update(rawApiKey).digest('hex');
     const { data: keyRecord } = await supabase
       .from('api_keys')
-      .select('id, org_id, is_active')
+      .select('id, org_id, name, is_active')
       .eq('hashed_key', keyHash)
       .eq('is_active', true)
       .maybeSingle();
@@ -65,12 +83,9 @@ export async function GET(req: NextRequest) {
     }
 
     const allRes = await getServiceLogs({ page: 1, limit: 1000 });
-    const orgLogs = allRes.logs
-      .filter((l) => l.orgId === keyRecord.org_id || l.targetOrgId === keyRecord.org_id)
-      .map((l) => ({
-        ...l,
-        ipAddress: maskIpAddress(l.ipAddress),
-      }));
+    const orgLogs = allRes.logs.filter(
+      (l) => l.orgId === keyRecord.org_id || l.targetOrgId === keyRecord.org_id
+    );
 
     const total = orgLogs.length;
     const totalPages = Math.max(1, Math.ceil(total / limit));
@@ -79,6 +94,9 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json(
       {
+        scope: 'organization',
+        orgId: keyRecord.org_id,
+        keyName: keyRecord.name,
         count: total,
         total,
         page,
@@ -90,28 +108,19 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // Caso 2: Llave de Administrador -> devolver TODOS los logs del sistema (con IP real sin censurar)
   const result = await getServiceLogs({ page, limit });
-
-  // Si es vista pública (sin x-admin-secret), enmascarar IPs y nombres de archivos privados
-  const safeLogs = isAdmin
-    ? result.logs
-    : result.logs.map((l) => {
-        const isPrivate = String(l.visibility || '').toLowerCase() === 'private';
-        return {
-          ...l,
-          ipAddress: maskIpAddress(l.ipAddress),
-          fileName: isPrivate && l.fileName ? '[privado]' : l.fileName,
-        };
-      });
 
   return NextResponse.json(
     {
+      scope: 'admin_all',
+      orgId: null,
       count: result.total,
       total: result.total,
       page: result.page,
       limit: result.limit,
       totalPages: result.totalPages,
-      logs: safeLogs,
+      logs: result.logs,
     },
     { status: 200, headers: corsHeaders }
   );

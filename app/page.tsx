@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 
 interface LogEntry {
   id: number | string;
@@ -106,8 +106,13 @@ function getStatusBadgeStyle(status: string): React.CSSProperties {
 
 export default function ServiceLogsPage() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [statusMessage, setStatusMessage] = useState<string>('Cargando registros...');
+  const [loading, setLoading] = useState<boolean>(false);
+  const [apiKeyInput, setApiKeyInput] = useState<string>('');
+  const [activeScope, setActiveScope] = useState<string | null>(null);
+  const [activeOrgId, setActiveOrgId] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string>(
+    'Ingresa tu API Key de organización (o la llave de administrador) para consultar la bitácora.'
+  );
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState<number>(1);
@@ -116,17 +121,38 @@ export default function ServiceLogsPage() {
   const [totalCount, setTotalCount] = useState<number>(0);
 
   const fetchLogs = useCallback(
-    async (pageToFetch: number = currentPage, sizeToFetch: number = pageSize) => {
+    async (
+      pageToFetch: number = currentPage,
+      sizeToFetch: number = pageSize,
+      keyOverride?: string
+    ) => {
+      const effectiveKey = (keyOverride !== undefined ? keyOverride : apiKeyInput).trim();
+      if (!effectiveKey) {
+        setLogs([]);
+        setTotalCount(0);
+        setTotalPages(1);
+        setActiveScope(null);
+        setActiveOrgId(null);
+        setStatusMessage(
+          'Ingresa tu API Key de organización (para ver los logs de tu organización) o la llave de administrador (para ver todos los logs).'
+        );
+        return;
+      }
+
       try {
         setLoading(true);
-        setStatusMessage('Actualizando eventos desde Supabase...');
+        setStatusMessage('Verificando API Key y consultando eventos...');
 
         const res = await fetch(`/api/logs?page=${pageToFetch}&limit=${sizeToFetch}&_t=${Date.now()}`, {
           cache: 'no-store',
+          headers: {
+            'x-api-key': effectiveKey,
+          },
         });
 
+        const data = await res.json().catch(() => ({}));
+
         if (res.ok) {
-          const data = await res.json();
           const returnedLogs: LogEntry[] = Array.isArray(data.logs) ? data.logs : [];
           setLogs(returnedLogs);
           const total = typeof data.total === 'number' ? data.total : (typeof data.count === 'number' ? data.count : returnedLogs.length);
@@ -136,9 +162,21 @@ export default function ServiceLogsPage() {
           setTotalCount(total);
           setTotalPages(pages);
           setCurrentPage(actualPage);
-          setStatusMessage(`Conectado en tiempo real. Mostrando ${returnedLogs.length} de ${total} eventos.`);
+          setActiveScope(data.scope || null);
+          setActiveOrgId(data.orgId || null);
+
+          if (data.scope === 'admin_all') {
+            setStatusMessage(`Modo Administrador activo: mostrando todos los eventos del sistema (${returnedLogs.length} de ${total}).`);
+          } else {
+            setStatusMessage(`Organización autenticada (${data.orgId}): mostrando ${returnedLogs.length} de ${total} eventos de tu organización.`);
+          }
         } else {
-          setStatusMessage(`Error al consultar logs: HTTP ${res.status}`);
+          setLogs([]);
+          setTotalCount(0);
+          setTotalPages(1);
+          setActiveScope(null);
+          setActiveOrgId(null);
+          setStatusMessage(data.message || `Error al consultar logs: HTTP ${res.status}`);
         }
       } catch (err: any) {
         console.error('Error fetching logs:', err);
@@ -147,13 +185,8 @@ export default function ServiceLogsPage() {
         setLoading(false);
       }
     },
-    [currentPage, pageSize]
+    [currentPage, pageSize, apiKeyInput]
   );
-
-  // Auto-fetch on component mount
-  useEffect(() => {
-    fetchLogs(1, pageSize);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Page navigation helper
   const goToPage = (page: number) => {
@@ -217,7 +250,7 @@ export default function ServiceLogsPage() {
           justifyContent: 'space-between',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
           <strong style={{ fontSize: '15px' }}>Bitácora del Sistema (service_logs)</strong>
           <span
             style={{
@@ -232,15 +265,56 @@ export default function ServiceLogsPage() {
           >
             {totalCount} eventos registrados
           </span>
+          {activeScope && (
+            <span
+              style={{
+                backgroundColor: activeScope === 'admin_all' ? '#fff8c5' : '#dafbe1',
+                color: activeScope === 'admin_all' ? '#9a6700' : '#1a7f37',
+                border: `1px solid ${activeScope === 'admin_all' ? '#f1e05a' : '#aceebb'}`,
+                padding: '2px 8px',
+                borderRadius: '12px',
+                fontSize: '11px',
+                fontWeight: 600,
+              }}
+            >
+              {activeScope === 'admin_all'
+                ? 'Vista Admin (Todas las Organizaciones)'
+                : `Organización: ${activeOrgId?.slice(0, 8)}...`}
+            </span>
+          )}
         </div>
 
-        <button
-          onClick={() => fetchLogs(currentPage, pageSize)}
-          disabled={loading}
-          style={{ ...btnStyle, backgroundColor: '#0969da', color: '#fff', borderColor: '#0969da', fontWeight: 600 }}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            setCurrentPage(1);
+            fetchLogs(1, pageSize, apiKeyInput);
+          }}
+          style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}
         >
-          {loading ? 'Cargando...' : '↻ Refrescar'}
-        </button>
+          <input
+            type="password"
+            value={apiKeyInput}
+            onChange={(e) => setApiKeyInput(e.target.value)}
+            placeholder="Ingresa API Key de Organización o Admin..."
+            style={{
+              padding: '5px 10px',
+              borderRadius: '6px',
+              border: '1px solid #d0d7de',
+              fontSize: '12px',
+              minWidth: '280px',
+              backgroundColor: '#ffffff',
+              color: '#24292f',
+            }}
+          />
+          <button
+            type="submit"
+            disabled={loading}
+            style={{ ...btnStyle, backgroundColor: '#0969da', color: '#fff', borderColor: '#0969da', fontWeight: 600 }}
+          >
+            {loading ? 'Consultando...' : 'Consultar / Refrescar'}
+          </button>
+        </form>
       </div>
 
       {/* Status message & range info */}

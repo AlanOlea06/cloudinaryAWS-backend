@@ -2245,11 +2245,14 @@ paths:
     get:
       operationId: listServiceLogs
       tags: [Logs]
-      summary: Consultar bitácora paginada de eventos del servicio
+      summary: Consultar bitácora paginada de eventos de tu organización
       description: |
-        Devuelve los eventos de auditoría registrados en `service_logs` en orden cronológico inverso (del más reciente al más antiguo).
-        Actualmente es de acceso público de solo lectura y soporta paginación mediante `page` y `limit` (máximo 100 por página).
-      security: []
+        Devuelve los eventos de auditoría registrados en `service_logs` en orden cronológico inverso (del más reciente al más antiguo), incluyendo la dirección IP real de origen (`ipAddress`).
+        - **Con `x-api-key` de una Organización:** Devuelve exclusivamente los logs pertenecientes a esa organización (`scope: "organization"`).
+        - **Con la llave de Administrador:** Devuelve todos los logs del sistema (`scope: "admin_all"`).
+        - **Sin llave:** Devuelve `401 AUTHENTICATION_REQUIRED`.
+      security:
+        - ApiKeyAuth: []
       parameters:
         - name: page
           in: query
