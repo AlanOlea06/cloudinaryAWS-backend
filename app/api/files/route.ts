@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { addServiceLog } from '@/lib/service-logs';
 import { abortS3MultipartUpload, deleteS3Object } from '@/lib/s3';
+import { invalidateCloudFrontPaths } from '@/lib/cloudfront';
 
 export async function OPTIONS() {
   return handleCorsOptions();
@@ -127,6 +128,7 @@ export async function DELETE(req: NextRequest) {
     const filteredFiles = (filesToDelete || []).filter((f) => !excludeFileIds.has(f.id));
     const deletedFileIds: string[] = [];
     const deletedS3Keys: string[] = [];
+    const publicS3KeysToInvalidate: string[] = [];
     let abortedMultiparts = 0;
 
     for (const fileRow of filteredFiles) {
@@ -143,10 +145,17 @@ export async function DELETE(req: NextRequest) {
         new Set([fileRow.s3_pending_key, fileRow.s3_processed_key].filter(Boolean))
       ) as string[];
 
+      const isPublicFile =
+        String(fileRow.visibility || '').toLowerCase() === 'public' ||
+        Boolean(fileRow.cloudfront_url);
+
       for (const k of keys) {
         try {
           await deleteS3Object(k);
           deletedS3Keys.push(k);
+          if (isPublicFile) {
+            publicS3KeysToInvalidate.push(k);
+          }
         } catch (s3Err: any) {
           console.warn(`Error eliminando clave S3 '${k}':`, s3Err.message);
         }
@@ -157,6 +166,14 @@ export async function DELETE(req: NextRequest) {
       if (!delRowErr) {
         deletedFileIds.push(fileRow.id);
       }
+    }
+
+    let cloudfrontInvalidated = false;
+    let cloudfrontInvalidationId: string | null = null;
+    if (publicS3KeysToInvalidate.length > 0) {
+      const invRes = await invalidateCloudFrontPaths(publicS3KeysToInvalidate);
+      cloudfrontInvalidated = invRes.invalidated;
+      cloudfrontInvalidationId = invRes.invalidationId;
     }
 
     const scopeLabel = targetUserId
@@ -170,7 +187,7 @@ export async function DELETE(req: NextRequest) {
       userId: validatedUserId || targetUserId || undefined,
       orgId: targetOrgId,
       ipAddress,
-      message: `Derecho de eliminación ejecutado para ${scopeLabel}: ${deletedFileIds.length} archivos borrados de DB, ${deletedS3Keys.length} claves borradas de S3 y ${abortedMultiparts} multiparts abortados.`,
+      message: `Derecho de eliminación ejecutado para ${scopeLabel}: ${deletedFileIds.length} archivos borrados de DB, ${deletedS3Keys.length} claves borradas de S3, ${abortedMultiparts} multiparts abortados (CloudFront invalidated: ${cloudfrontInvalidated}).`,
     });
 
     return NextResponse.json(
@@ -184,6 +201,8 @@ export async function DELETE(req: NextRequest) {
         deletedFileIds,
         deletedS3ObjectsCount: deletedS3Keys.length,
         abortedMultiparts,
+        cloudfrontInvalidated,
+        cloudfrontInvalidationId,
       },
       { status: 200, headers: corsHeaders }
     );

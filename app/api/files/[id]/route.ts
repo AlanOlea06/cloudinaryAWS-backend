@@ -7,6 +7,7 @@ import {
   generateCloudFrontUrl,
   getBaseCloudFrontUrl,
   isCloudFrontConfigured,
+  invalidateCloudFrontPaths,
 } from '@/lib/cloudfront';
 import {
   generatePresignedReadUrl,
@@ -500,6 +501,18 @@ export async function DELETE(
       }
     }
 
+    // 4.5. Invalidar caché en CloudFront si el archivo era público o tenía URL de CloudFront
+    let cloudfrontInvalidated = false;
+    let cloudfrontInvalidationId: string | null = null;
+    if (
+      deletedS3Keys.length > 0 &&
+      (String(fileRow.visibility || '').toLowerCase() === 'public' || Boolean(fileRow.cloudfront_url))
+    ) {
+      const invRes = await invalidateCloudFrontPaths(deletedS3Keys);
+      cloudfrontInvalidated = invRes.invalidated;
+      cloudfrontInvalidationId = invRes.invalidationId;
+    }
+
     // 5. Eliminar el registro de public.files en Supabase
     const { error: delError } = await supabase
       .from('files')
@@ -524,7 +537,7 @@ export async function DELETE(
       fileId: fileId,
       fileName: fileRow.original_name,
       ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-      message: `File '${fileRow.original_name}' permanently deleted from S3 (${deletedS3Keys.length} objects removed) and Supabase. [fileId: ${fileId}]`,
+      message: `File '${fileRow.original_name}' permanently deleted from S3 (${deletedS3Keys.length} objects removed, CloudFront invalidated: ${cloudfrontInvalidated}) and Supabase. [fileId: ${fileId}]`,
     });
 
     return NextResponse.json(
@@ -536,6 +549,8 @@ export async function DELETE(
         storageCleaned: true,
         deletedObjectsCount: deletedS3Keys.length,
         multipartAborted,
+        cloudfrontInvalidated,
+        cloudfrontInvalidationId,
       },
       { status: 200, headers: corsHeaders }
     );
