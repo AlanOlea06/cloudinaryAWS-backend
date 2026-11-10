@@ -83,20 +83,22 @@ servers:
     description: Servidor de Producción Espejo (Vercel)
 
 tags:
-  - name: Health
-    description: Estado de salud del servicio.
-  - name: Upload Simple
-    description: Emisión de tickets de subida directa a S3 (<= 25 MB) y confirmación criptográfica.
-  - name: Upload Multipart
-    description: Subida fragmentada en partes a S3 para archivos grandes (hasta 500 MB).
-  - name: Files
-    description: Consulta, obtención de URLs de descarga (CloudFront / S3 Presigned), estado y eliminación de archivos.
-  - name: API Keys
-    description: Gestión de API Keys de la organización (requiere llave con `can_manage_keys=true`).
   - name: Organizations & Webhooks
-    description: Consulta de cuotas y configuración de URL/secreto de Webhooks HMAC-SHA256.
+    description: 1. Onboarding automático de organización (POST con inviteCode), consulta de cuotas y configuración de Webhooks.
+  - name: Users
+    description: 2. Registro y consulta de usuarios de tu organización (además del auto-registro automático vía cabecera x-user-id).
+  - name: Upload Simple
+    description: 3. Subida directa a S3 (<= 25 MB) en static/pending/{org_id}/ y promoción a static/public/{org_id}/ o static/private/{org_id}/.
+  - name: Files
+    description: 4. Obtención de links de descarga (CloudFront público o S3 prefirmado privado), listado, estado y eliminación de archivos.
+  - name: Upload Multipart
+    description: 5. Subida fragmentada en partes a S3 para archivos grandes (> 25 MB hasta 500 MB).
+  - name: API Keys
+    description: 6. Gestión de API Keys secundarias de tu organización (requiere llave maestra con can_manage_keys=true).
   - name: Logs
-    description: Bitácora de auditoría de eventos del servicio.
+    description: 7. Bitácora de auditoría filtrada por organización (enviando x-api-key).
+  - name: Health
+    description: 8. Estado de salud público del servicio.
 
 components:
   securitySchemes:
@@ -322,16 +324,52 @@ components:
           example: null
 
 paths:
-  /api/health:
-    get:
-      operationId: getHealth
-      tags: [Health]
-      summary: Healthcheck público del servicio
-      description: Verifica que el servicio se encuentra activo. No requiere autenticación y no expone variables de entorno ni datos internos.
+  /api/organizations:
+    post:
+      operationId: createOrganization
+      tags: [Organizations & Webhooks]
+      summary: Registrar automáticamente una nueva organización, usuario inicial y API Key Maestra (Onboarding con inviteCode)
+      description: |
+        Permite a cualquier plataforma o desarrollador autorizado dar de alta su propia organización enviando el código de invitación (`inviteCode` en el body o en la cabecera `x-invite-code`).
+        En un solo paso crea:
+        1. La organización con sus cuotas iniciales (`1 GB` de almacenamiento, `20` tickets pendientes, `3` API Keys).
+        2. Un usuario inicial aislado a la organización.
+        3. Su **API Key Maestra (`can_manage_keys = true`)**, mostrada por única vez en la respuesta (`201 Created`).
       security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - inviteCode
+              properties:
+                name:
+                  type: string
+                  minLength: 2
+                  maxLength: 80
+                  example: Mi Plataforma E-Commerce
+                slug:
+                  type: string
+                  example: mi-plataforma-ecommerce
+                inviteCode:
+                  type: string
+                  description: Código de invitación proporcionado para registrar una nueva organización en el servicio.
+                  example: TU_CODIGO_DE_INVITACION
+                webhookUrl:
+                  type: string
+                  format: uri
+                  nullable: true
+                  example: https://api.mi-plataforma.com/webhooks/storage
+                webhookSecret:
+                  type: string
+                  nullable: true
+                  example: TU_WEBHOOK_SECRET
       responses:
-        "200":
-          description: Servicio operativo.
+        "201":
+          description: Organización, usuario inicial y API Key Maestra creados exitosamente.
           content:
             application/json:
               schema:
@@ -339,16 +377,362 @@ paths:
                 properties:
                   status:
                     type: string
-                    example: ok
-                  service:
+                    example: created
+                  message:
                     type: string
-                    example: cloudinary-aws-backend
-                  timestamp:
+                  apiKey:
                     type: string
-                    format: date-time
-                    example: "2026-11-06T18:00:00.000Z"
+                    example: TU_API_KEY_GENERADA
+                  organization:
+                    type: object
+                  defaultUser:
+                    type: object
+                  keyMetadata:
+                    type: object
+        "400":
+          description: "`INVALID_ORG_NAME` o error de validación SSRF en `webhookUrl`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "`MISSING_INVITE_CODE`: No se envió `inviteCode` ni cabecera `x-invite-code`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "`INVALID_INVITE_CODE`: El código de invitación no es válido."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "429":
-          description: Límite de peticiones excedido.
+          description: "`KEYS_RATE_LIMIT_EXCEEDED`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    get:
+      operationId: getOrganization
+      tags: [Organizations & Webhooks]
+      summary: Consultar cuotas y configuración de Webhook de tu organización
+      description: |
+        Devuelve los límites de cuota (`max_storage_bytes`, `max_pending_tickets`, `max_api_keys`) y la `webhook_url` actual de tu organización.
+        **Requiere una API Key de organización con `can_manage_keys = true`.** (Por seguridad, `webhook_secret` nunca se devuelve en lecturas).
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Datos de la organización.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  count:
+                    type: integer
+                    example: 1
+                  organizations:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        example: 11111111-1111-1111-1111-111111111111
+                      name:
+                        type: string
+                        example: Organización 1
+                      slug:
+                        type: string
+                        example: org-1
+                      webhook_url:
+                        type: string
+                        nullable: true
+                        example: https://mi-backend.ejemplo.com/webhooks/archivos
+                      max_storage_bytes:
+                        type: integer
+                        example: 5368709120
+                      max_pending_tickets:
+                        type: integer
+                        example: 20
+                      max_api_keys:
+                        type: integer
+                        example: 3
+                      created_at:
+                        type: string
+                        format: date-time
+        "401":
+          description: "`AUTHENTICATION_REQUIRED` o `UNAUTHORIZED`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "`CANNOT_MANAGE_KEYS`, `CANNOT_MANAGE_ORGANIZATION`, `USER_KEY_CANNOT_MANAGE_KEYS` o `FORBIDDEN_CROSS_ORG`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: "`KEYS_RATE_LIMIT_EXCEEDED` (20 req / 60s)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    patch:
+      operationId: updateOrganizationWebhooks
+      tags: [Organizations & Webhooks]
+      summary: Configurar la URL y el secreto HMAC-SHA256 de Webhooks de tu organización
+      description: |
+        Permite a una API Key con `can_manage_keys = true` configurar o desactivar (`null`) el destino `webhookUrl` y el secreto `webhookSecret` de su propia organización.
+        - **Validación Anti-SSRF en tiempo real:** `webhookUrl` debe usar obligatoriamente `https://`, no contener credenciales en la URL y resolver por DNS exclusivamente a direcciones IP públicas (se bloquean `localhost`, loopback `127.0.0.0/8`, `::1`, redes privadas RFC1918, link-local `169.254.0.0/16` y rangos reservados).
+        - **Nota:** Los campos de cuotas (`maxStorageBytes`, `maxPendingTickets`, `maxApiKeys`, `name`) son exclusivos de administración interna; intentar modificarlos con una API Key devuelve `403 FORBIDDEN_QUOTA_MODIFICATION`.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                webhookUrl:
+                  type: string
+                  format: uri
+                  nullable: true
+                  description: URL HTTPS pública de tu servidor donde recibirás los eventos `POST` (o `null` para desactivar webhooks).
+                  example: https://api.tu-dominio.com/webhooks/storage
+                webhookSecret:
+                  type: string
+                  nullable: true
+                  description: Secreto compartido para firmar los payloads con HMAC-SHA256 en la cabecera `x-webhook-signature`.
+                  example: TU_WEBHOOK_SECRET
+      responses:
+        "200":
+          description: Configuración de webhook actualizada.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: updated
+                  message:
+                    type: string
+                    example: Organización actualizada exitosamente.
+                  organization:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      name:
+                        type: string
+                      slug:
+                        type: string
+                      webhook_url:
+                        type: string
+                        nullable: true
+                      max_storage_bytes:
+                        type: integer
+                      max_pending_tickets:
+                        type: integer
+                      max_api_keys:
+                        type: integer
+        "400":
+          description: |
+            URL de webhook rechazada por validación SSRF o petición vacía. Códigos posibles:
+            - `SSRF_URL_MALFORMED`: La URL no tiene un formato válido.
+            - `SSRF_PROTOCOL_NOT_HTTPS`: La URL debe comenzar con `https://` (no se permite `http://`).
+            - `SSRF_CREDENTIALS_IN_URL`: No se permiten credenciales `usuario:password@` dentro de la URL.
+            - `SSRF_BLOCKED_HOST`: El dominio es `localhost`, `*.localhost` o `*.internal`.
+            - `SSRF_BLOCKED_IP`: El dominio o IP apunta a una dirección privada, loopback o reservada.
+            - `SSRF_DNS_EMPTY` / `SSRF_DNS_ERROR`: El dominio no pudo resolverse mediante DNS público.
+            - `NO_CHANGES_PROVIDED`: No se enviaron `webhookUrl` ni `webhookSecret`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: |
+            - `FORBIDDEN_QUOTA_MODIFICATION`: Intentaste modificar cuotas (`maxStorageBytes`, `maxPendingTickets`, `maxApiKeys`) o `name` con una API Key. **Acción:** Envía únicamente `webhookUrl` y `webhookSecret`.
+            - `FORBIDDEN_CROSS_ORG`: Intentaste modificar otra organización.
+            - `CANNOT_MANAGE_KEYS` / `CANNOT_MANAGE_ORGANIZATION`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: "`KEYS_RATE_LIMIT_EXCEEDED`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/users:
+    post:
+      operationId: createOrResolveUser
+      tags: [Users]
+      summary: Registrar o resolver un usuario dentro de tu organización (sin colisiones Multi-Tenant)
+      description: |
+        Registra explícitamente un usuario en tu organización a partir de cualquier identificador de tu plataforma (`externalUserId`, como `"1"`, `"cliente_42"` o un UUID) y devuelve su `internalUserId` determinista (`UUID_SHA256(org_id + ":" + externalUserId)`).
+        - **Nota:** También puedes enviar directamente cualquier `x-user-id` en `POST /api/upload` y el servicio auto-registrará al usuario al vuelo si aún no existe.
+        - **Roles permitidos:** `editor` (por defecto, puede subir archivos), `admin` (puede subir archivos) o `viewer` (`canUpload: false`, solo lectura).
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - externalUserId
+              properties:
+                externalUserId:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  description: ID del usuario en tu sistema (ej. `"1"`, `"cliente_e2e_001"` o un UUID). También acepta el alias `userId`.
+                  example: cliente_e2e_001
+                name:
+                  type: string
+                  maxLength: 80
+                  description: Nombre visible del usuario.
+                  example: Alan E2E Tester
+                role:
+                  type: string
+                  enum: [editor, admin, viewer]
+                  default: editor
+                  description: Rol dentro de la organización (`editor`, `admin` o `viewer`).
+                  example: editor
+                canUpload:
+                  type: boolean
+                  default: true
+                  description: Define si el usuario tiene permiso para subir archivos (`true` por defecto).
+                  example: true
+      responses:
+        "201":
+          description: Usuario creado exitosamente en la organización (o `200 OK` con `alreadyExisted: true` si ya estaba registrado).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: created
+                  alreadyExisted:
+                    type: boolean
+                    example: false
+                  externalUserId:
+                    type: string
+                    example: cliente_e2e_001
+                  internalUserId:
+                    type: string
+                    format: uuid
+                    example: bb60f8d4-1ec9-4775-9a1c-ee3f23010998
+                  message:
+                    type: string
+                    example: Usuario registrado en tu organización. Puedes enviar tanto externalUserId como internalUserId en la cabecera x-user-id.
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                        example: bb60f8d4-1ec9-4775-9a1c-ee3f23010998
+                      org_id:
+                        type: string
+                        format: uuid
+                        example: 6e7a8716-dd1e-48c5-a7cb-547003f96505
+                      name:
+                        type: string
+                        example: Alan E2E Tester
+                      role:
+                        type: string
+                        enum: [editor, admin, viewer]
+                        example: editor
+                      can_upload:
+                        type: boolean
+                        example: true
+                      created_at:
+                        type: string
+                        format: date-time
+        "400":
+          description: "`INVALID_USER_ID`: El identificador no es válido."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "`AUTHENTICATION_REQUIRED`: Falta cabecera `x-api-key`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    get:
+      operationId: listOrganizationUsers
+      tags: [Users]
+      summary: Listar los usuarios registrados en tu organización
+      description: Devuelve exclusivamente los usuarios pertenecientes a la organización autenticada por tu `x-api-key`.
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Lista de usuarios de la organización.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  orgId:
+                    type: string
+                    format: uuid
+                    example: 6e7a8716-dd1e-48c5-a7cb-547003f96505
+                  usersCount:
+                    type: integer
+                    example: 2
+                  users:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        org_id:
+                          type: string
+                          format: uuid
+                        name:
+                          type: string
+                        role:
+                          type: string
+                          enum: [editor, admin, viewer]
+                        can_upload:
+                          type: boolean
+                        created_at:
+                          type: string
+                          format: date-time
+        "401":
+          description: "`AUTHENTICATION_REQUIRED`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "`FORBIDDEN_CROSS_ORG`: Intentaste consultar usuarios de otra organización."
           content:
             application/json:
               schema:
@@ -442,7 +826,7 @@ paths:
                     type: string
                     format: uri
                     description: URL prefirmada de Amazon S3 donde debes hacer `PUT` con el binario del archivo antes de que expire (300 s).
-                    example: https://practicas-alan-418272802078.s3.us-east-1.amazonaws.com/static/private/9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&...
+                    example: https://practicas-alan-418272802078.s3.us-east-1.amazonaws.com/static/pending/11111111-1111-1111-1111-111111111111/9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&...
                   uploadMethod:
                     type: string
                     example: PUT
@@ -744,6 +1128,477 @@ paths:
                 "400":
                   description: Firma HMAC inválida o payload rechazado por el servidor receptor.
 
+  /api/files/{id}:
+    get:
+      operationId: getFileDeliveryUrl
+      tags: [Files]
+      summary: Obtener URL de descarga de un archivo (CloudFront público o S3 prefirmada privada de 5 min)
+      description: |
+        Devuelve la URL para descargar o visualizar el archivo según su visibilidad:
+        - **Archivos `public`**: Devuelve `delivery: "cloudfront"` con la URL pública de Amazon CloudFront CDN (`https://<cloudfront-domain>/static/public/<org_id>/<rand128>.<ext>`).
+        - **Archivos `private`**: Verifica estrictamente que el usuario en `x-user-id` sea el **propietario** (`ownerUserId`) que subió el archivo. Si es válido, devuelve `delivery: "s3_presigned"` con una **URL prefirmada de Amazon S3 válida por 5 minutos (`300` segundos)** y `cloudfrontUrl: null`. **Cuando la URL privada expira tras 5 minutos, tu backend debe volver a llamar a este endpoint para obtener una nueva.**
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OptionalEndUserIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID v4 del archivo (`fileId`).
+          example: b087905a-00fd-4bcf-812c-5d8ba159d6c1
+      responses:
+        "200":
+          description: URL de entrega generada exitosamente.
+          content:
+            application/json:
+              schema:
+                type: object
+              examples:
+                private_file:
+                  summary: Archivo privado (URL prefirmada de S3 por 5 minutos)
+                  value:
+                    url: https://practicas-alan-418272802078.s3.us-east-1.amazonaws.com/static/private/11111111-1111-1111-1111-111111111111/82236c2598b02c377b79faddfa130622.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=300&...
+                    delivery: s3_presigned
+                    expiresInSeconds: 300
+                    cloudfrontUrl: null
+                    fileId: b087905a-00fd-4bcf-812c-5d8ba159d6c1
+                    fileName: factura-noviembre.jpg
+                    orgId: 11111111-1111-1111-1111-111111111111
+                    ownerUserId: a1111111-0000-0000-0000-000000000001
+                    visibility: private
+                    fileStatus: uploaded
+                    status: uploaded
+                    sha256Verified: true
+                    cacheControl: private, no-store, no-cache, max-age=0, must-revalidate
+                public_file:
+                  summary: Archivo público (URL de Amazon CloudFront CDN)
+                  value:
+                    url: https://d1nuawu3owad6c.cloudfront.net/static/public/11111111-1111-1111-1111-111111111111/a8b2d395ab586e460f5615486fd77cc3.png
+                    delivery: cloudfront
+                    cloudfrontDomain: d1nuawu3owad6c.cloudfront.net
+                    cloudfrontUrl: https://d1nuawu3owad6c.cloudfront.net/static/public/11111111-1111-1111-1111-111111111111/a8b2d395ab586e460f5615486fd77cc3.png
+                    fileId: b087905a-00fd-4bcf-812c-5d8ba159d6c1
+                    fileName: banner-publico.png
+                    orgId: 11111111-1111-1111-1111-111111111111
+                    ownerUserId: a1111111-0000-0000-0000-000000000001
+                    visibility: public
+                    fileStatus: uploaded
+                    status: uploaded
+                    sha256Verified: true
+                    cacheControl: public, max-age=300, must-revalidate
+        "400":
+          description: "`INVALID_FILE_ID`: El parámetro `{id}` no es un UUID v4 válido."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: |
+            Acceso denegado. Códigos posibles:
+            - `FORBIDDEN_TENANT_MISMATCH`: El archivo pertenece a otra organización.
+            - `FORBIDDEN_USER_IMPERSONATION`: El query param `?userId=` difiere del usuario autenticado en `x-user-id`.
+            - `FORBIDDEN_PRIVATE_USER_REQUIRED`: El archivo es `private` y no enviaste `x-user-id`. **Acción:** Envía la cabecera `x-user-id` con el UUID del propietario.
+            - `FORBIDDEN_PRIVATE_NOT_OWNER`: El archivo es `private` y el usuario en `x-user-id` no es el propietario que lo subió. **Acción:** Solo el usuario propietario puede leer archivos privados.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: |
+            - `FILE_NOT_FOUND`: El archivo no existe en la base de datos.
+            - `S3_KEY_NOT_FOUND`: El archivo no tiene clave de almacenamiento en S3.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: "`DB_QUERY_FAILED`, `S3_PRESIGNED_READ_FAILED`, `CLOUDFRONT_NOT_CONFIGURED` o `CLOUDFRONT_URL_GENERATION_FAILED`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      operationId: deleteFileById
+      tags: [Files]
+      summary: Eliminar permanentemente un archivo de Amazon S3, invalidar caché en CloudFront y borrar de la base de datos
+      description: Aborta cualquier subida multipart en curso para ese archivo, elimina el objeto físico en Amazon S3 (`DeleteObjectCommand`), dispara una invalidación de caché en Amazon CloudFront (`CreateInvalidation`) si el archivo era público y borra el registro de la base de datos, liberando cuota de almacenamiento (`max_storage_bytes`). Requiere una API Key con `can_delete = true`.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OptionalEndUserIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: b087905a-00fd-4bcf-812c-5d8ba159d6c1
+      responses:
+        "200":
+          description: Archivo eliminado de S3, caché de CloudFront invalidada (si aplica) y eliminado de base de datos.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: El archivo 'factura-noviembre.jpg' fue eliminado exitosamente de S3 y de Supabase.
+                  deletedFileId:
+                    type: string
+                    format: uuid
+                  ticketId:
+                    type: string
+                    format: uuid
+                  storageCleaned:
+                    type: boolean
+                    example: true
+                  deletedObjectsCount:
+                    type: integer
+                    example: 1
+                  multipartAborted:
+                    type: boolean
+                    example: false
+                  cloudfrontInvalidated:
+                    type: boolean
+                    example: true
+                  cloudfrontInvalidationId:
+                    type: string
+                    nullable: true
+                    example: I2J0K1L2M3N4O5P6Q7R8S9
+        "400":
+          description: "`INVALID_FILE_ID`: El `{id}` no tiene formato UUID v4."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "`INSUFFICIENT_API_KEY_PERMISSIONS` (la API Key tiene `can_delete=false`) o `FORBIDDEN_TENANT_MISMATCH`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "`FILE_NOT_FOUND`: El archivo no existe."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/files:
+    get:
+      operationId: listFiles
+      tags: [Files]
+      summary: Listar archivos de la organización
+      description: Lista los archivos registrados en la organización asociada a la API Key (ordenados del más reciente al más antiguo). Si se envía `x-user-id` o el query param `?userId=<uuid>`, filtra únicamente los archivos de ese usuario.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OptionalEndUserIdHeader"
+        - name: userId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Filtrar archivos por UUID de usuario propietario.
+      responses:
+        "200":
+          description: Lista de archivos de la organización (sin exponer claves internas de S3).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  count:
+                    type: integer
+                    example: 1
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        ticket_id:
+                          type: string
+                          format: uuid
+                        user_id:
+                          type: string
+                          format: uuid
+                        org_id:
+                          type: string
+                          format: uuid
+                        original_name:
+                          type: string
+                          example: factura-noviembre.jpg
+                        extension:
+                          type: string
+                          example: .jpg
+                        mime_type:
+                          type: string
+                          example: image/jpeg
+                        size_bytes:
+                          type: integer
+                          example: 115710
+                        visibility:
+                          type: string
+                          enum: [private, public]
+                        status:
+                          type: string
+                          example: uploaded
+                        scan_status:
+                          type: string
+                          example: not_scanned
+                        sha256_verified:
+                          type: boolean
+                          example: true
+                        cloudfront_url:
+                          type: string
+                          nullable: true
+                        created_at:
+                          type: string
+                          format: date-time
+        "401":
+          description: "`MISSING_API_KEY` o `MISSING_VALIDATED_ORG`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "`INVALID_OR_INACTIVE_API_KEY` o `INSUFFICIENT_API_KEY_PERMISSIONS` (requiere `can_read=true`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    delete:
+      operationId: bulkDeleteFiles
+      tags: [Files]
+      summary: Borrado masivo de archivos por usuario u organización (Derecho de Supresión)
+      description: Elimina todos los objetos en S3, aborta multiparts activos y borra los registros en base de datos pertenecientes a un usuario (`?userId=<uuid>` o `x-user-id`) o de toda la organización (`?confirmOrgWipe=true`). Requiere `can_delete = true`.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OptionalEndUserIdHeader"
+        - name: userId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: UUID del usuario cuyos archivos serán eliminados.
+        - name: confirmOrgWipe
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: Enviar `true` para confirmar el borrado de todos los archivos de la organización cuando no se especifica `userId`.
+      responses:
+        "200":
+          description: Archivos eliminados masivamente de S3 y base de datos.
+        "400":
+          description: "`MISSING_ERASURE_SCOPE`: No se indicó `userId` ni `confirmOrgWipe=true`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/files/{id}/status:
+    get:
+      operationId: getFileStatus
+      tags: [Files]
+      summary: Consultar estado transaccional, verificación SHA-256 y scan_status de un archivo
+      description: 'Devuelve los metadatos completos de estado del archivo (`pending_upload`, `uploaded`, `failed`), resultado de integridad `sha256Verified` y estado de escaneo (`scanStatus: "not_scanned"`). Los archivos privados nunca exponen `cloudfrontUrl`.'
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OptionalEndUserIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: b087905a-00fd-4bcf-812c-5d8ba159d6c1
+      responses:
+        "200":
+          description: Estado actual del archivo.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  fileId:
+                    type: string
+                    format: uuid
+                  ticketId:
+                    type: string
+                    format: uuid
+                  orgId:
+                    type: string
+                    format: uuid
+                  ownerUserId:
+                    type: string
+                    format: uuid
+                  originalName:
+                    type: string
+                    example: factura-noviembre.jpg
+                  extension:
+                    type: string
+                    example: .jpg
+                  mimeType:
+                    type: string
+                    example: image/jpeg
+                  sizeBytes:
+                    type: integer
+                    example: 115710
+                  sha256Hash:
+                    type: string
+                    nullable: true
+                  visibility:
+                    type: string
+                    enum: [private, public]
+                  fileStatus:
+                    type: string
+                    enum: [pending_upload, uploaded, processed, completed, failed, expired]
+                    example: uploaded
+                  dbStatus:
+                    type: string
+                    example: uploaded
+                  sha256Verified:
+                    type: boolean
+                    example: true
+                  scanStatus:
+                    type: string
+                    example: not_scanned
+                  cloudfrontUrl:
+                    type: string
+                    nullable: true
+                  retryCount:
+                    type: integer
+                    example: 0
+                  errorMessage:
+                    type: string
+                    nullable: true
+                  createdAt:
+                    type: string
+                    format: date-time
+                  updatedAt:
+                    type: string
+                    format: date-time
+                    nullable: true
+                  completedAt:
+                    type: string
+                    format: date-time
+                    nullable: true
+        "400":
+          description: "`INVALID_FILE_ID`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "`FORBIDDEN_CROSS_ORGANIZATION` o `FORBIDDEN_PRIVATE_NOT_OWNER`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "`FILE_NOT_FOUND`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    post:
+      operationId: triggerFileWebhook
+      tags: [Files]
+      summary: Re-enviar notificación Webhook manualmente para un archivo
+      description: |
+        Dispara manualmente una entrega de webhook firmada con HMAC-SHA256 hacia la `webhook_url` configurada en la organización cuando se envía `{ "triggerWebhook": true }` (o `{ "action": "webhook" }`).
+        > Si se invoca sin `triggerWebhook: true`, devuelve `400 SERVER_PROCESSING_DISABLED` porque el procesamiento binario en servidor está deshabilitado en Vercel.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OptionalEndUserIdHeader"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - triggerWebhook
+              properties:
+                triggerWebhook:
+                  type: boolean
+                  example: true
+                action:
+                  type: string
+                  enum: [webhook]
+                  example: webhook
+      responses:
+        "200":
+          description: Resultado del despacho manual del webhook.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  fileId:
+                    type: string
+                    format: uuid
+                  fileStatus:
+                    type: string
+                    example: uploaded
+                  scanStatus:
+                    type: string
+                    example: not_scanned
+                  webhook:
+                    $ref: "#/components/schemas/WebhookDispatchResult"
+        "400":
+          description: "`INVALID_FILE_ID` o `SERVER_PROCESSING_DISABLED` (si no se envió `triggerWebhook: true`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: "`FORBIDDEN_CROSS_ORGANIZATION`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "`FILE_NOT_FOUND`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/upload/multipart:
     post:
       operationId: multipartUploadAction
@@ -894,7 +1749,7 @@ paths:
                     fileId: 4a5b6c7d-8e9f-4a0b-9c1d-2e3f4a5b6c7d
                     uploadId: Vdf89s7df89s7df89s7df89s7df89s7df
                     partNumber: 1
-                    uploadPartUrl: https://practicas-alan-418272802078.s3.us-east-1.amazonaws.com/static/private/...?partNumber=1&uploadId=...
+                    uploadPartUrl: https://practicas-alan-418272802078.s3.us-east-1.amazonaws.com/static/pending/11111111-1111-1111-1111-111111111111/...?partNumber=1&uploadId=...
                     expiresInSeconds: 900
                 complete_response:
                   summary: Respuesta de action=complete
@@ -1230,477 +2085,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
-  /api/files:
-    get:
-      operationId: listFiles
-      tags: [Files]
-      summary: Listar archivos de la organización
-      description: Lista los archivos registrados en la organización asociada a la API Key (ordenados del más reciente al más antiguo). Si se envía `x-user-id` o el query param `?userId=<uuid>`, filtra únicamente los archivos de ese usuario.
-      security:
-        - ApiKeyAuth: []
-      parameters:
-        - $ref: "#/components/parameters/OptionalEndUserIdHeader"
-        - name: userId
-          in: query
-          required: false
-          schema:
-            type: string
-            format: uuid
-          description: Filtrar archivos por UUID de usuario propietario.
-      responses:
-        "200":
-          description: Lista de archivos de la organización (sin exponer claves internas de S3).
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: success
-                  count:
-                    type: integer
-                    example: 1
-                  files:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        id:
-                          type: string
-                          format: uuid
-                        ticket_id:
-                          type: string
-                          format: uuid
-                        user_id:
-                          type: string
-                          format: uuid
-                        org_id:
-                          type: string
-                          format: uuid
-                        original_name:
-                          type: string
-                          example: factura-noviembre.jpg
-                        extension:
-                          type: string
-                          example: .jpg
-                        mime_type:
-                          type: string
-                          example: image/jpeg
-                        size_bytes:
-                          type: integer
-                          example: 115710
-                        visibility:
-                          type: string
-                          enum: [private, public]
-                        status:
-                          type: string
-                          example: uploaded
-                        scan_status:
-                          type: string
-                          example: not_scanned
-                        sha256_verified:
-                          type: boolean
-                          example: true
-                        cloudfront_url:
-                          type: string
-                          nullable: true
-                        created_at:
-                          type: string
-                          format: date-time
-        "401":
-          description: "`MISSING_API_KEY` o `MISSING_VALIDATED_ORG`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "403":
-          description: "`INVALID_OR_INACTIVE_API_KEY` o `INSUFFICIENT_API_KEY_PERMISSIONS` (requiere `can_read=true`)."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-    delete:
-      operationId: bulkDeleteFiles
-      tags: [Files]
-      summary: Borrado masivo de archivos por usuario u organización (Derecho de Supresión)
-      description: Elimina todos los objetos en S3, aborta multiparts activos y borra los registros en base de datos pertenecientes a un usuario (`?userId=<uuid>` o `x-user-id`) o de toda la organización (`?confirmOrgWipe=true`). Requiere `can_delete = true`.
-      security:
-        - ApiKeyAuth: []
-      parameters:
-        - $ref: "#/components/parameters/OptionalEndUserIdHeader"
-        - name: userId
-          in: query
-          required: false
-          schema:
-            type: string
-            format: uuid
-          description: UUID del usuario cuyos archivos serán eliminados.
-        - name: confirmOrgWipe
-          in: query
-          required: false
-          schema:
-            type: boolean
-          description: Enviar `true` para confirmar el borrado de todos los archivos de la organización cuando no se especifica `userId`.
-      responses:
-        "200":
-          description: Archivos eliminados masivamente de S3 y base de datos.
-        "400":
-          description: "`MISSING_ERASURE_SCOPE`: No se indicó `userId` ni `confirmOrgWipe=true`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /api/files/{id}:
-    get:
-      operationId: getFileDeliveryUrl
-      tags: [Files]
-      summary: Obtener URL de descarga de un archivo (CloudFront público o S3 prefirmada privada de 5 min)
-      description: |
-        Devuelve la URL para descargar o visualizar el archivo según su visibilidad:
-        - **Archivos `public`**: Devuelve `delivery: "cloudfront"` con la URL pública de Amazon CloudFront CDN (`https://<cloudfront-domain>/static/files/<rand128>.<ext>`).
-        - **Archivos `private`**: Verifica estrictamente que el usuario en `x-user-id` sea el **propietario** (`ownerUserId`) que subió el archivo. Si es válido, devuelve `delivery: "s3_presigned"` con una **URL prefirmada de Amazon S3 válida por 5 minutos (`300` segundos)** y `cloudfrontUrl: null`. **Cuando la URL privada expira tras 5 minutos, tu backend debe volver a llamar a este endpoint para obtener una nueva.**
-      security:
-        - ApiKeyAuth: []
-      parameters:
-        - $ref: "#/components/parameters/OptionalEndUserIdHeader"
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-          description: UUID v4 del archivo (`fileId`).
-          example: b087905a-00fd-4bcf-812c-5d8ba159d6c1
-      responses:
-        "200":
-          description: URL de entrega generada exitosamente.
-          content:
-            application/json:
-              schema:
-                type: object
-              examples:
-                private_file:
-                  summary: Archivo privado (URL prefirmada de S3 por 5 minutos)
-                  value:
-                    url: https://practicas-alan-418272802078.s3.us-east-1.amazonaws.com/static/private/9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c.jpg?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=300&...
-                    delivery: s3_presigned
-                    expiresInSeconds: 300
-                    cloudfrontUrl: null
-                    fileId: b087905a-00fd-4bcf-812c-5d8ba159d6c1
-                    fileName: factura-noviembre.jpg
-                    orgId: 11111111-1111-1111-1111-111111111111
-                    ownerUserId: a1111111-0000-0000-0000-000000000001
-                    visibility: private
-                    fileStatus: uploaded
-                    status: uploaded
-                    sha256Verified: true
-                    cacheControl: private, no-store, no-cache, max-age=0, must-revalidate
-                public_file:
-                  summary: Archivo público (URL de Amazon CloudFront CDN)
-                  value:
-                    url: https://d1nuawu3owad6c.cloudfront.net/static/files/1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d.png
-                    delivery: cloudfront
-                    cloudfrontDomain: d1nuawu3owad6c.cloudfront.net
-                    cloudfrontUrl: https://d1nuawu3owad6c.cloudfront.net/static/files/1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d.png
-                    fileId: b087905a-00fd-4bcf-812c-5d8ba159d6c1
-                    fileName: banner-publico.png
-                    orgId: 11111111-1111-1111-1111-111111111111
-                    ownerUserId: a1111111-0000-0000-0000-000000000001
-                    visibility: public
-                    fileStatus: uploaded
-                    status: uploaded
-                    sha256Verified: true
-                    cacheControl: public, max-age=300, must-revalidate
-        "400":
-          description: "`INVALID_FILE_ID`: El parámetro `{id}` no es un UUID v4 válido."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "403":
-          description: |
-            Acceso denegado. Códigos posibles:
-            - `FORBIDDEN_TENANT_MISMATCH`: El archivo pertenece a otra organización.
-            - `FORBIDDEN_USER_IMPERSONATION`: El query param `?userId=` difiere del usuario autenticado en `x-user-id`.
-            - `FORBIDDEN_PRIVATE_USER_REQUIRED`: El archivo es `private` y no enviaste `x-user-id`. **Acción:** Envía la cabecera `x-user-id` con el UUID del propietario.
-            - `FORBIDDEN_PRIVATE_NOT_OWNER`: El archivo es `private` y el usuario en `x-user-id` no es el propietario que lo subió. **Acción:** Solo el usuario propietario puede leer archivos privados.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
-          description: |
-            - `FILE_NOT_FOUND`: El archivo no existe en la base de datos.
-            - `S3_KEY_NOT_FOUND`: El archivo no tiene clave de almacenamiento en S3.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "500":
-          description: "`DB_QUERY_FAILED`, `S3_PRESIGNED_READ_FAILED`, `CLOUDFRONT_NOT_CONFIGURED` o `CLOUDFRONT_URL_GENERATION_FAILED`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-    delete:
-      operationId: deleteFileById
-      tags: [Files]
-      summary: Eliminar permanentemente un archivo de Amazon S3, invalidar caché en CloudFront y borrar de la base de datos
-      description: Aborta cualquier subida multipart en curso para ese archivo, elimina el objeto físico en Amazon S3 (`DeleteObjectCommand`), dispara una invalidación de caché en Amazon CloudFront (`CreateInvalidation`) si el archivo era público y borra el registro de la base de datos, liberando cuota de almacenamiento (`max_storage_bytes`). Requiere una API Key con `can_delete = true`.
-      security:
-        - ApiKeyAuth: []
-      parameters:
-        - $ref: "#/components/parameters/OptionalEndUserIdHeader"
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-          example: b087905a-00fd-4bcf-812c-5d8ba159d6c1
-      responses:
-        "200":
-          description: Archivo eliminado de S3, caché de CloudFront invalidada (si aplica) y eliminado de base de datos.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: success
-                  message:
-                    type: string
-                    example: El archivo 'factura-noviembre.jpg' fue eliminado exitosamente de S3 y de Supabase.
-                  deletedFileId:
-                    type: string
-                    format: uuid
-                  ticketId:
-                    type: string
-                    format: uuid
-                  storageCleaned:
-                    type: boolean
-                    example: true
-                  deletedObjectsCount:
-                    type: integer
-                    example: 1
-                  multipartAborted:
-                    type: boolean
-                    example: false
-                  cloudfrontInvalidated:
-                    type: boolean
-                    example: true
-                  cloudfrontInvalidationId:
-                    type: string
-                    nullable: true
-                    example: I2J0K1L2M3N4O5P6Q7R8S9
-        "400":
-          description: "`INVALID_FILE_ID`: El `{id}` no tiene formato UUID v4."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "403":
-          description: "`INSUFFICIENT_API_KEY_PERMISSIONS` (la API Key tiene `can_delete=false`) o `FORBIDDEN_TENANT_MISMATCH`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
-          description: "`FILE_NOT_FOUND`: El archivo no existe."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-  /api/files/{id}/status:
-    get:
-      operationId: getFileStatus
-      tags: [Files]
-      summary: Consultar estado transaccional, verificación SHA-256 y scan_status de un archivo
-      description: 'Devuelve los metadatos completos de estado del archivo (`pending_upload`, `uploaded`, `failed`), resultado de integridad `sha256Verified` y estado de escaneo (`scanStatus: "not_scanned"`). Los archivos privados nunca exponen `cloudfrontUrl`.'
-      security:
-        - ApiKeyAuth: []
-      parameters:
-        - $ref: "#/components/parameters/OptionalEndUserIdHeader"
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-          example: b087905a-00fd-4bcf-812c-5d8ba159d6c1
-      responses:
-        "200":
-          description: Estado actual del archivo.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: success
-                  fileId:
-                    type: string
-                    format: uuid
-                  ticketId:
-                    type: string
-                    format: uuid
-                  orgId:
-                    type: string
-                    format: uuid
-                  ownerUserId:
-                    type: string
-                    format: uuid
-                  originalName:
-                    type: string
-                    example: factura-noviembre.jpg
-                  extension:
-                    type: string
-                    example: .jpg
-                  mimeType:
-                    type: string
-                    example: image/jpeg
-                  sizeBytes:
-                    type: integer
-                    example: 115710
-                  sha256Hash:
-                    type: string
-                    nullable: true
-                  visibility:
-                    type: string
-                    enum: [private, public]
-                  fileStatus:
-                    type: string
-                    enum: [pending_upload, uploaded, processed, completed, failed, expired]
-                    example: uploaded
-                  dbStatus:
-                    type: string
-                    example: uploaded
-                  sha256Verified:
-                    type: boolean
-                    example: true
-                  scanStatus:
-                    type: string
-                    example: not_scanned
-                  cloudfrontUrl:
-                    type: string
-                    nullable: true
-                  retryCount:
-                    type: integer
-                    example: 0
-                  errorMessage:
-                    type: string
-                    nullable: true
-                  createdAt:
-                    type: string
-                    format: date-time
-                  updatedAt:
-                    type: string
-                    format: date-time
-                    nullable: true
-                  completedAt:
-                    type: string
-                    format: date-time
-                    nullable: true
-        "400":
-          description: "`INVALID_FILE_ID`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "403":
-          description: "`FORBIDDEN_CROSS_ORGANIZATION` o `FORBIDDEN_PRIVATE_NOT_OWNER`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
-          description: "`FILE_NOT_FOUND`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-    post:
-      operationId: triggerFileWebhook
-      tags: [Files]
-      summary: Re-enviar notificación Webhook manualmente para un archivo
-      description: |
-        Dispara manualmente una entrega de webhook firmada con HMAC-SHA256 hacia la `webhook_url` configurada en la organización cuando se envía `{ "triggerWebhook": true }` (o `{ "action": "webhook" }`).
-        > Si se invoca sin `triggerWebhook: true`, devuelve `400 SERVER_PROCESSING_DISABLED` porque el procesamiento binario en servidor está deshabilitado en Vercel.
-      security:
-        - ApiKeyAuth: []
-      parameters:
-        - $ref: "#/components/parameters/OptionalEndUserIdHeader"
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - triggerWebhook
-              properties:
-                triggerWebhook:
-                  type: boolean
-                  example: true
-                action:
-                  type: string
-                  enum: [webhook]
-                  example: webhook
-      responses:
-        "200":
-          description: Resultado del despacho manual del webhook.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: success
-                  fileId:
-                    type: string
-                    format: uuid
-                  fileStatus:
-                    type: string
-                    example: uploaded
-                  scanStatus:
-                    type: string
-                    example: not_scanned
-                  webhook:
-                    $ref: "#/components/schemas/WebhookDispatchResult"
-        "400":
-          description: "`INVALID_FILE_ID` o `SERVER_PROCESSING_DISABLED` (si no se envió `triggerWebhook: true`)."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "403":
-          description: "`FORBIDDEN_CROSS_ORGANIZATION`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "404":
-          description: "`FILE_NOT_FOUND`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
   /api/keys:
     get:
       operationId: listApiKeys
@@ -1989,258 +2373,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
-  /api/organizations:
-    get:
-      operationId: getOrganization
-      tags: [Organizations & Webhooks]
-      summary: Consultar cuotas y configuración de Webhook de tu organización
-      description: |
-        Devuelve los límites de cuota (`max_storage_bytes`, `max_pending_tickets`, `max_api_keys`) y la `webhook_url` actual de tu organización.
-        **Requiere una API Key de organización con `can_manage_keys = true`.** (Por seguridad, `webhook_secret` nunca se devuelve en lecturas).
-      security:
-        - ApiKeyAuth: []
-      responses:
-        "200":
-          description: Datos de la organización.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: success
-                  count:
-                    type: integer
-                    example: 1
-                  organizations:
-                    type: object
-                    properties:
-                      id:
-                        type: string
-                        format: uuid
-                        example: 11111111-1111-1111-1111-111111111111
-                      name:
-                        type: string
-                        example: Organización 1
-                      slug:
-                        type: string
-                        example: org-1
-                      webhook_url:
-                        type: string
-                        nullable: true
-                        example: https://mi-backend.ejemplo.com/webhooks/archivos
-                      max_storage_bytes:
-                        type: integer
-                        example: 5368709120
-                      max_pending_tickets:
-                        type: integer
-                        example: 20
-                      max_api_keys:
-                        type: integer
-                        example: 3
-                      created_at:
-                        type: string
-                        format: date-time
-        "401":
-          description: "`AUTHENTICATION_REQUIRED` o `UNAUTHORIZED`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "403":
-          description: "`CANNOT_MANAGE_KEYS`, `CANNOT_MANAGE_ORGANIZATION`, `USER_KEY_CANNOT_MANAGE_KEYS` o `FORBIDDEN_CROSS_ORG`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "429":
-          description: "`KEYS_RATE_LIMIT_EXCEEDED` (20 req / 60s)."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-    post:
-      operationId: createOrganization
-      tags: [Organizations & Webhooks]
-      summary: Registrar automáticamente una nueva organización, usuario inicial y API Key Maestra (Onboarding con inviteCode)
-      description: |
-        Permite a cualquier plataforma o desarrollador autorizado dar de alta su propia organización enviando el código de invitación (`inviteCode` en el body o en la cabecera `x-invite-code`).
-        En un solo paso crea:
-        1. La organización con sus cuotas iniciales (`1 GB` de almacenamiento, `20` tickets pendientes, `3` API Keys).
-        2. Un usuario inicial aislado a la organización.
-        3. Su **API Key Maestra (`can_manage_keys = true`)**, mostrada por única vez en la respuesta (`201 Created`).
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - name
-                - inviteCode
-              properties:
-                name:
-                  type: string
-                  minLength: 2
-                  maxLength: 80
-                  example: Mi Plataforma E-Commerce
-                slug:
-                  type: string
-                  example: mi-plataforma-ecommerce
-                inviteCode:
-                  type: string
-                  description: Código de invitación proporcionado para registrar una nueva organización en el servicio.
-                  example: TU_CODIGO_DE_INVITACION
-                webhookUrl:
-                  type: string
-                  format: uri
-                  nullable: true
-                  example: https://api.mi-plataforma.com/webhooks/storage
-                webhookSecret:
-                  type: string
-                  nullable: true
-                  example: TU_WEBHOOK_SECRET
-      responses:
-        "201":
-          description: Organización, usuario inicial y API Key Maestra creados exitosamente.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: created
-                  message:
-                    type: string
-                  apiKey:
-                    type: string
-                    example: TU_API_KEY_GENERADA
-                  organization:
-                    type: object
-                  defaultUser:
-                    type: object
-                  keyMetadata:
-                    type: object
-        "400":
-          description: "`INVALID_ORG_NAME` o error de validación SSRF en `webhookUrl`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "401":
-          description: "`MISSING_INVITE_CODE`: No se envió `inviteCode` ni cabecera `x-invite-code`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "403":
-          description: "`INVALID_INVITE_CODE`: El código de invitación no es válido."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "429":
-          description: "`KEYS_RATE_LIMIT_EXCEEDED`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
-    patch:
-      operationId: updateOrganizationWebhooks
-      tags: [Organizations & Webhooks]
-      summary: Configurar la URL y el secreto HMAC-SHA256 de Webhooks de tu organización
-      description: |
-        Permite a una API Key con `can_manage_keys = true` configurar o desactivar (`null`) el destino `webhookUrl` y el secreto `webhookSecret` de su propia organización.
-        - **Validación Anti-SSRF en tiempo real:** `webhookUrl` debe usar obligatoriamente `https://`, no contener credenciales en la URL y resolver por DNS exclusivamente a direcciones IP públicas (se bloquean `localhost`, loopback `127.0.0.0/8`, `::1`, redes privadas RFC1918, link-local `169.254.0.0/16` y rangos reservados).
-        - **Nota:** Los campos de cuotas (`maxStorageBytes`, `maxPendingTickets`, `maxApiKeys`, `name`) son exclusivos de administración interna; intentar modificarlos con una API Key devuelve `403 FORBIDDEN_QUOTA_MODIFICATION`.
-      security:
-        - ApiKeyAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                webhookUrl:
-                  type: string
-                  format: uri
-                  nullable: true
-                  description: URL HTTPS pública de tu servidor donde recibirás los eventos `POST` (o `null` para desactivar webhooks).
-                  example: https://api.tu-dominio.com/webhooks/storage
-                webhookSecret:
-                  type: string
-                  nullable: true
-                  description: Secreto compartido para firmar los payloads con HMAC-SHA256 en la cabecera `x-webhook-signature`.
-                  example: TU_WEBHOOK_SECRET
-      responses:
-        "200":
-          description: Configuración de webhook actualizada.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: updated
-                  message:
-                    type: string
-                    example: Organización actualizada exitosamente.
-                  organization:
-                    type: object
-                    properties:
-                      id:
-                        type: string
-                        format: uuid
-                      name:
-                        type: string
-                      slug:
-                        type: string
-                      webhook_url:
-                        type: string
-                        nullable: true
-                      max_storage_bytes:
-                        type: integer
-                      max_pending_tickets:
-                        type: integer
-                      max_api_keys:
-                        type: integer
-        "400":
-          description: |
-            URL de webhook rechazada por validación SSRF o petición vacía. Códigos posibles:
-            - `SSRF_URL_MALFORMED`: La URL no tiene un formato válido.
-            - `SSRF_PROTOCOL_NOT_HTTPS`: La URL debe comenzar con `https://` (no se permite `http://`).
-            - `SSRF_CREDENTIALS_IN_URL`: No se permiten credenciales `usuario:password@` dentro de la URL.
-            - `SSRF_BLOCKED_HOST`: El dominio es `localhost`, `*.localhost` o `*.internal`.
-            - `SSRF_BLOCKED_IP`: El dominio o IP apunta a una dirección privada, loopback o reservada.
-            - `SSRF_DNS_EMPTY` / `SSRF_DNS_ERROR`: El dominio no pudo resolverse mediante DNS público.
-            - `NO_CHANGES_PROVIDED`: No se enviaron `webhookUrl` ni `webhookSecret`.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "403":
-          description: |
-            - `FORBIDDEN_QUOTA_MODIFICATION`: Intentaste modificar cuotas (`maxStorageBytes`, `maxPendingTickets`, `maxApiKeys`) o `name` con una API Key. **Acción:** Envía únicamente `webhookUrl` y `webhookSecret`.
-            - `FORBIDDEN_CROSS_ORG`: Intentaste modificar otra organización.
-            - `CANNOT_MANAGE_KEYS` / `CANNOT_MANAGE_ORGANIZATION`.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "429":
-          description: "`KEYS_RATE_LIMIT_EXCEEDED`."
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-
   /api/logs:
     get:
       operationId: listServiceLogs
@@ -2368,6 +2500,38 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Error al consultar la bitácora en la base de datos.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/health:
+    get:
+      operationId: getHealth
+      tags: [Health]
+      summary: Healthcheck público del servicio
+      description: Verifica que el servicio se encuentra activo. No requiere autenticación y no expone variables de entorno ni datos internos.
+      security: []
+      responses:
+        "200":
+          description: Servicio operativo.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: cloudinary-aws-backend
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2026-11-06T18:00:00.000Z"
+        "429":
+          description: Límite de peticiones excedido.
           content:
             application/json:
               schema:

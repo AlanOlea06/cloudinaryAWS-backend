@@ -1,199 +1,108 @@
-# Documentación Técnica del Servidor (`servicio`) — Arquitectura y Referencia
+# Documentación de Consumo e Integración del Servicio (S3 + CloudFront + PostgreSQL)
 
-> **Versión:** 2.1.0 (Universal SQL / Drizzle ORM)  
-> **Fecha:** 5 de Noviembre de 2026  
-> **Arquitectura:** Next.js 14 Serverless en Vercel + AWS S3 / CloudFront + Base de Datos SQL Universal (Drizzle ORM + PostgreSQL Directo)  
-> **Regla de Arquitectura Fundamental:** *Ningún archivo binario pasa por Vercel*. Los bytes viajan exclusivamente entre Cliente y AWS S3 / CloudFront CDN. El backend opera exclusivamente en control plane (emisión de tickets, firmas criptográficas, verificación Range GET de 32 bytes, control de cuotas y webhooks).
+> **URL Base de Producción:** `https://d1nuawu3owad6c.cloudfront.net`  
+> **Documentación OpenAPI Interactiva:** `https://d1nuawu3owad6c.cloudfront.net/docs`  
+> **Especificación YAML:** `https://d1nuawu3owad6c.cloudfront.net/docs/openapi.yaml`
 
 ---
 
-## 📁 Estructura del Proyecto `servicio`
+## 1. Endpoints Principales Ordenados por Frecuencia de Uso del Desarrollador
 
-```text
-servicio/
-├── middleware.ts            # Interceptor perimetral Edge: Autenticación dual (Admin / API Keys), RBAC y Rate Limiting
-├── next.config.js           # Configuración Next.js y validación estricta de variables obligatorias en arranque
-├── database/                # Scripts DDL y esquemas SQL versionados
-│   ├── schema.sql           # Esquema base original 3NF
-│   ├── migration_section3_api_keys_can_manage_keys.sql
-│   ├── migration_section5_sha256_verified.sql
-│   ├── migration_sectionC_shared_rate_limiting.sql
-│   ├── migration_sectionC_webhooks_persistent_retries.sql
-│   └── universal/           # Esquemas SQL portables agnósticos de proveedor
-│       ├── schema.postgresql.sql # Esquema estándar PostgreSQL 15+ (AWS RDS, Neon, Docker, Supabase)
-│       ├── schema.mysql.sql      # Esquema estándar MySQL 8+ / PlanetScale
-│       └── schema.sqlite.sql     # Esquema estándar SQLite 3 / Turso
-├── lib/
-│   ├── db/                  # Capa de Datos Universal (Drizzle ORM + PostgreSQL Directo)
-│   │   ├── schema.ts        # Definición tipada de las 7 tablas relacionales e índices
-│   │   ├── index.ts         # Singleton de conexión directa postgres.js + Drizzle ORM (DATABASE_URL)
-│   │   └── dal.ts           # Data Access Layer (Repositorios: filesDal, organizationsDal, usersDal, apiKeysDal)
-│   ├── env.ts               # Validador centralizado de variables obligatorias y verificación de secretos
-│   ├── supabase.ts          # Cliente de compatibilidad HTTP Supabase (fallback cuando no hay DATABASE_URL)
-│   ├── s3.ts                # AWS SDK v3: firma presigned PUT/GET, multipart, HeadObject y Range GET 32b
-│   ├── cloudfront.ts        # Generación de URLs públicas de CDN (d1nuawu3owad6c.cloudfront.net)
-│   ├── magic-bytes.ts       # Detección e inspección de firmas binarias reales (PNG, JPEG, PDF, etc.)
-│   ├── quotas.ts            # Control transaccional de cuotas (max_storage_bytes y max_pending_tickets)
-│   ├── service-logs.ts      # Registro y consulta de pistas de auditoría vía Drizzle SQL directo (public.service_logs)
-│   ├── ticket-token.ts      # HMAC-SHA256 de tokens de confirmación criptográficos (confirmToken)
-│   ├── shared-rate-limit.ts # Rate limiting atómico SQL directo (UPSERT ON CONFLICT DO UPDATE, fail-open)
-│   └── lambda-fallback/
-│       ├── webhook-dispatcher.ts # Despacho HTTPS fijado a IP (anti-SSRF/TOCTOU), reclamo SQL FOR UPDATE SKIP LOCKED y Circuit Breaker
-│       └── process-upload.ts    # Pipeline de procesamiento [TEST-ONLY: apagado por defecto en prod]
-└── app/
-    ├── api/
-    │   ├── health/route.ts      # Endpoint público de healthcheck
-    │   ├── organizations/route.ts # Consulta y configuración de organizaciones y webhooks (Dual-Auth)
-    │   ├── keys/route.ts        # Generador y gestor de API Keys (Dual-Auth, cupo atómico, anti-escalada)
-    │   ├── upload/route.ts      # Flujo principal: Emisión de tickets PUT (POST) y confirmación (PUT)
-    │   ├── upload/multipart/route.ts # Flujo multipart: create, presign_part, complete y abort
-    │   ├── files/route.ts       # Listado de archivos por organización
-    │   ├── files/[id]/route.ts  # Entrega directa (CloudFront público vs S3 prefirmado privado) y DELETE
-    │   ├── files/[id]/status/route.ts # Estado transaccional y re-notificación manual de webhook
-    │   ├── img/[id]/route.ts    # Redirección/entrega de recursos de imagen
-    │   ├── cron/maintenance/route.ts # Mantenimiento: limpieza de tickets, multiparts, webhooks y rate limits
-    │   ├── webhooks/test-receiver/route.ts # Receptor y validador de firmas HMAC de webhooks de prueba
-    │   ├── logs/route.ts        # Auditoría de logs administrativos
-    │   ├── records/route.ts     # Métricas agregadas de archivos
-    │   └── users/route.ts       # Gestión administrativa de usuarios internos
-    ├── layout.tsx
-    └── page.tsx                 # Vista administrativa de logs en tiempo real
+| Orden | Operación | Endpoint | Cabeceras |
+| :---: | :--- | :--- | :--- |
+| **1** | **Solicitar ticket de subida (`<= 25 MB`)** | `POST /api/upload` | `x-api-key`, `x-user-id` |
+| **2** | **Confirmar subida y mover de `pending` a `public`/`private`** | `PUT /api/upload?ticketId=<uuid>` | `x-api-key`, `x-user-id` |
+| **3** | **Pedir archivo y obtener link (CloudFront o S3 Presigned)** | `GET /api/files/:id` | `x-api-key`, `x-user-id` |
+| **4** | **Listar archivos de tu organización** | `GET /api/files` | `x-api-key` |
+| **5** | **Eliminar archivo de S3 y liberar cuota** | `DELETE /api/files/:id` | `x-api-key`, `x-user-id` |
+| **6** | **Crear organización y API Key Maestra (Onboarding)** | `POST /api/organizations` | Body con `inviteCode` |
+| **7** | **Registrar o listar usuarios de tu organización** | `POST /api/users` y `GET /api/users` | `x-api-key` |
+| **8** | **Subida Multipart para archivos grandes (`> 25 MB` a `500 MB`)** | `POST /api/upload/multipart` | `x-api-key`, `x-user-id` |
+| **9** | **Consultar logs de tu organización** | `GET /api/logs` | `x-api-key` |
+| **10** | **Crear API Keys secundarias y configurar Webhooks** | `POST /api/keys` y `PATCH /api/organizations` | `x-api-key` (Maestra) |
+
+---
+
+## 2. Uso Diario #1: Subir un Archivo (`POST /api/upload` -> `PUT S3` -> `PUT /api/upload`)
+
+### Paso 1: Solicitar Ticket (`POST /api/upload`)
+```http
+POST https://d1nuawu3owad6c.cloudfront.net/api/upload
+Content-Type: application/json
+x-api-key: TU_API_KEY
+x-user-id: TU_USER_ID
+
+{
+  "fileName": "Captura para pruebas.png",
+  "fileType": "image/png",
+  "fileSize": 289159,
+  "visibility": "public",
+  "sha256Hash": "8c44e6f2915666a4ad83dcf5aaf620cd51e5657eba5a01f4fe6fd5037b345345"
+}
 ```
+* El servicio genera una URL prefirmada hacia `static/pending/{org_id}/` y te devuelve `ticketId`, `fileId`, `uploadUrl`, `requiredHeaders` y `confirmToken`.
 
----
+### Paso 2: Subir el binario directo a S3 (`PUT <uploadUrl>`)
+Envía el binario del archivo a `uploadUrl` incluyendo exactamente las cabeceras de `requiredHeaders`.
 
-## 1. Variables de Entorno
+### Paso 3: Confirmar la Subida (`PUT /api/upload?ticketId=<ticketId>`)
+```http
+PUT https://d1nuawu3owad6c.cloudfront.net/api/upload?ticketId=130828db-9a08-4cf3-9829-4ebdfcfbbb75
+Content-Type: application/json
+x-api-key: TU_API_KEY
+x-user-id: TU_USER_ID
 
-El archivo [`lib/env.ts`](file:///C:/Users/alano/Desktop/github/cloudinary-project/servicio/lib/env.ts) y [`lib/db/index.ts`](file:///C:/Users/alano/Desktop/github/cloudinary-project/servicio/lib/db/index.ts) gestionan las variables de entorno del servicio:
-
-| Variable | Tipo / Alcance | Propósito |
-| :--- | :--- | :--- |
-| `DATABASE_URL` | PostgreSQL Direct URI | Conexión SQL directa nativa vía `postgres.js` y `drizzle-orm` (puerto 5432). Desacopla las consultas de SDKs propietarios. |
-| `AWS_ACCESS_KEY_ID` | IAM Credential | Identificador de credenciales de AWS para S3 y CloudFront. |
-| `AWS_SECRET_ACCESS_KEY` | IAM Secret | Clave secreta para firmar peticiones de S3 (`PutObject`, `GetObject`, `Range GET`). |
-| `AWS_REGION` | AWS Config | Región del bucket (fijada en `us-east-1`). |
-| `AWS_S3_BUCKET_NAME` | S3 Config | Nombre del bucket (`practicas-alan-418272802078`). |
-| `AWS_CLOUDFRONT_DOMAIN` | CDN Config | Dominio de CloudFront para entrega pública (`d1nuawu3owad6c.cloudfront.net`). |
-| `SUPABASE_URL` | PostgreSQL URL | Endpoint REST de compatibilidad / validación perimetral Edge. |
-| `SUPABASE_SERVICE_ROLE_KEY` | DB Secret | Llave `service_role` de compatibilidad HTTP. |
-| `TICKET_SIGNING_SECRET` | Criptografía | Secreto HMAC-SHA256 para firmar y validar tokens de confirmación (`confirmToken`). |
-| `ADMIN_API_SECRET` | Autenticación | Secreto maestro para rutas administrativas y creación de llaves de organización. |
-| `CRON_SECRET` | Autenticación | Secreto Bearer para autorizar ejecuciones del cron de mantenimiento (`/api/cron/maintenance`). |
-
-*(Nota: Para el almacenamiento de identificadores sensibles en la tabla `rate_limit_buckets`, las direcciones IP son hasheadas directamente mediante digest SHA-256 sin requerir variables adicionales).*
-
----
-
-## 2. Esquema de Base de Datos y Tablas Críticas
-
-### 2.1. Tabla `public.api_keys`
-Almacena las credenciales de clientes garantizando arquitectura Zero-Knowledge:
-* `id` (`UUID PRIMARY KEY`): Identificador único de la llave.
-* `org_id` (`UUID NOT NULL REFERENCES organizations(id)`): Organización a la que pertenece la llave.
-* `user_id` (`UUID NULL REFERENCES users(id)`): Usuario específico al que se vincula (si es llave personal). Si es llave de organización, es `NULL`.
-* `name` (`TEXT NOT NULL`): Etiqueta descriptiva.
-* `hashed_key` (`TEXT UNIQUE NOT NULL`): Hash SHA-256 de la llave plana. **Nunca se almacena la llave en texto plano.**
-* `can_read` (`BOOLEAN DEFAULT false`): Privilegio de lectura de archivos y metadatos.
-* `can_upload` (`BOOLEAN DEFAULT false`): Privilegio de solicitud y confirmación de tickets.
-* `can_delete` (`BOOLEAN DEFAULT false`): Privilegio de eliminación de recursos.
-* `can_manage_keys` (`BOOLEAN DEFAULT false`): Permite gestionar llaves hijas y configurar webhooks de la organización.
-  * **Regla estricta:** Solo puede ser `true` si `user_id IS NULL`. Una llave vinculada a un usuario jamás gestiona llaves.
-  * **Anti-escalada:** Una llave con `can_manage_keys=true` solo puede crear llaves con permisos iguales o menores a los que ella posee, y siempre crea llaves hijas con `can_manage_keys=false`.
-  * **Protección de última llave:** No es posible eliminar la última llave administradora de una organización salvo con `ADMIN_API_SECRET`.
-* `is_active` (`BOOLEAN DEFAULT true`): Bandera para revocación lógica.
-* **Control de Cupo Atómico:** Trigger `trg_enforce_max_active_keys` con bloqueo `FOR UPDATE` sobre `organizations` que impide condiciones de carrera concurrentes (`Promise.all`), limitando las llaves activas al valor de `organizations.max_api_keys`.
-
-### 2.2. Tabla `public.webhook_deliveries`
-Maneja la cola transaccional y el historial de despachos de webhooks:
-* `id` (`UUID PRIMARY KEY`): Identificador único de entrega.
-* `org_id` (`UUID NOT NULL REFERENCES organizations(id)`): Organización destinataria.
-* `file_id` (`UUID NOT NULL REFERENCES files(id) ON DELETE CASCADE`): Archivo asociado.
-* `event_type` (`TEXT NOT NULL`): Evento (`file.uploaded`, `file.deleted`, etc.).
-* `status` (`TEXT NOT NULL`): Estado (`pending`, `sending`, `delivered`, `failed`).
-* `attempts` (`INT DEFAULT 0`): Intentos realizados.
-* `max_attempts` (`INT DEFAULT 5`): Intentos máximos antes de marcar como fallido definitivo.
-* `locked_until` (`TIMESTAMPTZ`): Bloqueo temporal anti-carreras para despachos en curso.
-* `next_retry_at` (`TIMESTAMPTZ`): Marca temporal para reintentos con backoff exponencial.
-
-### 2.3. Tabla `public.rate_limit_buckets`
-Almacena los contadores atómicos del limitador distribuido:
-* `key` (`TEXT PRIMARY KEY`): Identificador del bucket con formato estricto `<scope>:<kind>:<id>`. Para llaves API usa el UUID `api_keys.id`; para peticiones por IP usa el hash SHA-256 (`h:<sha256hex>`), garantizando privacidad y cumplimiento GDPR.
-* `count` (`INT NOT NULL`): Peticiones consumidas en la ventana actual.
-* `window_start` (`TIMESTAMPTZ NOT NULL`): Inicio de la ventana deslizante.
-* `last_request_at` (`TIMESTAMPTZ NOT NULL`): Última petición registrada.
-* **Ejecución SQL Directa:** Cuando `DATABASE_URL` está configurado, `checkSharedRateLimit` ejecuta una instrucción SQL portable atómica (`INSERT ... ON CONFLICT (key) DO UPDATE ... RETURNING`) vía Drizzle ORM sin depender de procedimientos almacenados propietarios.
-* **Limpieza:** Registros con `last_request_at > 1 día` son eliminados por el cron diario y de forma oportunista.
-* **Comportamiento ante fallos:** Opera en modo **Fail-Open** (`allowed: true`) para evitar caídas de servicio ante fallos de conectividad con la base de datos, mientras que el limitador en memoria del Edge absorbe los picos abusivos.
-
----
-
-## 3. Flujo de Subida y Regla "Zero Binaries on Vercel"
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Cliente as Cliente Web / Postman
-    participant Backend as Backend en Vercel
-    participant S3 as AWS S3 (Bucket)
-    participant DB as Supabase PostgreSQL
-
-    Note over Cliente,S3: FASE 1: Solicitud de Ticket
-    Cliente->>Backend: POST /api/upload (fileName, fileSize, mimeType, visibility, sha256Hash)
-    Backend->>DB: Validar API Key, cuotas y limpiar oportunamente tickets vencidos
-    Backend->>Backend: Generar confirmToken (HMAC-SHA256)
-    Backend->>S3: getSignedUrl(PutObjectCommand) con Cache-Control no-store
-    Backend-->>Cliente: 200 OK: { ticketId, uploadUrl, confirmToken, s3Key }
-
-    Note over Cliente,S3: FASE 2: Subida Binaria Directa
-    Cliente->>S3: PUT a uploadUrl con el binario y x-amz-checksum-sha256
-    S3-->>Cliente: 200 OK (o 403 SignatureDoesNotMatch si checksum es inválido)
-
-    Note over Cliente,S3: FASE 3: Confirmación e Inspección en S3
-    Cliente->>Backend: PUT /api/upload?ticketId=...&token=confirmToken
-    Backend->>Backend: Validar firma HMAC de confirmToken (anti-forja)
-    Backend->>S3: HeadObjectCommand (verificar existencia, tamaño y ETag)
-    Backend->>S3: Range GET 0-31 (leer 32 bytes de Magic Bytes)
-    alt Magic Bytes no coinciden con MIME
-        Backend->>S3: DeleteObjectCommand (purgar archivo corrupto)
-        Backend->>DB: Marcar ticket como 'failed'
-        Backend-->>Cliente: 422 Unprocessable Entity (MAGIC_BYTES_MISMATCH)
-    else Magic Bytes válidos
-        Backend->>DB: Actualizar status = 'uploaded', sha256_verified = true
-        Backend->>Backend: Despachar Webhook con socket fijado a IP (anti-SSRF)
-        Backend-->>Cliente: 200 OK: { fileStatus: 'uploaded', cloudfrontUrl (solo si público) }
-    end
+{
+  "confirmToken": "TU_CONFIRM_TOKEN"
+}
 ```
+* El servidor verifica en S3 el tamaño (`HeadObject`), el checksum **SHA-256** y los primeros 32 bytes (**Magic Bytes**), y mueve el archivo de `static/pending/{org_id}/` hacia:
+  * `static/public/{org_id}/` si es `public`.
+  * `static/private/{org_id}/` si es `private`.
 
 ---
 
-## 4. Políticas de Visibilidad y Entrega
+## 3. Uso Diario #2: Consumir / Pedir un Archivo (`GET /api/files/:id`)
 
-### 4.1. Archivos Públicos (`visibility: 'public'`)
-* **Landing Zone y Destino:** `public/{org_id}/[custom_folder]/<rand128>.<ext>`
-* **Entrega:** Exclusivamente vía Amazon CloudFront CDN (`https://d1nuawu3owad6c.cloudfront.net/public/{org_id}/...`).
-* **Cache-Control:** `public, max-age=31536000, immutable` (o `max-age=300`).
-* **Seguridad:** El backend persiste `cloudfront_url` en la base de datos para consumo directo de clientes.
-
-### 4.2. Archivos Privados (`visibility: 'private'`)
-* **Landing Zone y Destino:** `private/{org_id}/[custom_folder]/<rand128>.<ext>`
-* **Entrega:** URL prefirmada directa de S3 con TTL corto de **5 minutos (300 segundos)** emitida únicamente al propietario verificado (`ownerUserId`).
-* **Cache-Control:** `private, no-store, no-cache, max-age=0, must-revalidate`.
-* **Seguridad:** En la base de datos y en todas las respuestas JSON, `cloudfront_url` es estrictamente `null`. La CDN de CloudFront no tiene acceso al prefijo `/private/*`. Terceros que solicitan el archivo reciben `403 Forbidden` (`FORBIDDEN_PRIVATE_NOT_OWNER`).
+```http
+GET https://d1nuawu3owad6c.cloudfront.net/api/files/27ebb714-e03c-4a55-bcaa-0232a2391ef9
+x-api-key: TU_API_KEY
+x-user-id: TU_USER_ID
+```
+* **Si es `public`:** Devuelve `url` permanente de **Amazon CloudFront CDN** (`https://d1nuawu3owad6c.cloudfront.net/static/public/{org_id}/{archivo}`).
+* **Si es `private`:** Verifica que `x-user-id` sea el propietario y devuelve una **URL prefirmada de S3 válida por 5 minutos (300 s)** (`https://practicas-alan-418272802078.s3.us-east-1.amazonaws.com/static/private/{org_id}/{archivo}?X-Amz-Expires=300...`).
 
 ---
 
-## 5. Prevención de SSRF y Circuit Breaker de Webhooks
+## 4. Onboarding: Crear Organización (`POST /api/organizations`) y Usuarios (`POST /api/users`)
 
-### 5.1. Conexión Fijada a IP (Anti-DNS Rebinding / Anti-TOCTOU)
-Al despachar un webhook:
-1. `validateWebhookUrlSSRF()` analiza la sintaxis y resuelve el nombre de dominio vía `dns.resolve()`.
-2. `isIpBlocked()` analiza cada byte de la dirección IP y rechaza:
-   - Loopback: `127.0.0.0/8`, `::1`
-   - Red cero: `0.0.0.0/8`, `::`
-   - Redes privadas: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`
-   - Link-Local / Metadata: `169.254.0.0/16`, `fe80::/10`
-   - Notaciones octales (`0177.0.0.1`), hexadecimales (`0x7f.1`) o enteros (`2130706433`).
-3. `executePinnedHttpsPost()` abre el socket HTTPS fijando el agente al socket de la dirección IP previamente validada, conservando las cabeceras `Host` y el SNI TLS originales. Esto elimina completamente la ventana de tiempo (TOCTOU) para ataques de DNS Rebinding.
+### 1. Crear una Organización Nueva
+```http
+POST https://d1nuawu3owad6c.cloudfront.net/api/organizations
+Content-Type: application/json
 
-### 5.2. Circuit Breaker `[TEMPORARY-LAMBDA-FALLBACK: WEBHOOK-CIRCUIT-BREAKER]`
-Si las últimas 3 entregas de una organización fallaron consecutivamente (`recentDeliveries.every(d => d.status !== 'delivered')`), el despachador abre el circuito y **encola la entrega automáticamente en segundo plano** (`status: 'pending'`, `error: 'CIRCUIT_BREAKER_QUEUED'`) sin bloquear la petición HTTP del usuario con reintentos síncronos ni agotar el timeout de 3.5 segundos. El cron de mantenimiento retoma los reintentos cuando el receptor se recupera.
+{
+  "name": "Mi Plataforma",
+  "slug": "mi-plataforma",
+  "inviteCode": "TU_CODIGO_DE_INVITACION",
+  "keyLabel": "Master Key"
+}
+```
+Devuelve `201 Created` con tu `apiKey` Maestra (`sk_live_...`), los datos de `organization` y `defaultUser`.
+
+### 2. Crear o Resolver un Usuario (`POST /api/users` o Automático vía `x-user-id`)
+* **Automático:** Puedes enviar cualquier identificador de tu sistema en la cabecera `x-user-id` (ej. `"1"`, `"cliente_001"` o un UUID) al subir un archivo y el servicio calculará su UUID determinista por organización (`UUID_SHA256(org_id + ":" + x-user-id)`) y lo registrará al vuelo sin colisiones con otras organizaciones.
+* **Explícito (`POST /api/users`):**
+```http
+POST https://d1nuawu3owad6c.cloudfront.net/api/users
+Content-Type: application/json
+x-api-key: TU_API_KEY
+
+{
+  "externalUserId": "cliente_001",
+  "name": "Nombre del Usuario",
+  "role": "editor",
+  "canUpload": true
+}
+```
+*(Roles soportados: `"editor"`, `"admin"`, `"viewer"`).*

@@ -8,6 +8,21 @@ Esta guía está diseñada para que puedas integrar el servicio de almacenamient
 
 ---
 
+## 0. Tabla Rápida: Los Endpoints que Más Vas a Usar (Ordenados por Uso Diario)
+
+| Prioridad | Acción Principal | Método y Ruta | Cabeceras Requeridas |
+| :---: | :--- | :--- | :--- |
+| **1 (Uso Diario)** | **Solicitar ticket de subida (`<= 25 MB`)** hacia `static/pending/{org_id}/` | `POST /api/upload` | `x-api-key`, `x-user-id` |
+| **2 (Uso Diario)** | **Confirmar subida** y mover archivo a `static/public/{org_id}/` o `static/private/{org_id}/` | `PUT /api/upload?ticketId=<uuid>` | `x-api-key`, `x-user-id` |
+| **3 (Uso Diario)** | **Pedir archivo y obtener link** (CloudFront permanente en `public` o S3 prefirmada 5m en `private`) | `GET /api/files/{id}` | `x-api-key`, `x-user-id` |
+| **4 (Uso Diario)** | **Listar o Eliminar archivos** de tu organización | `GET /api/files`<br>`DELETE /api/files/{id}` | `x-api-key` (`x-user-id` en delete) |
+| **5 (Onboarding)** | **Crear tu Organización** y obtener tu `x-api-key` Maestra | `POST /api/organizations` | Body con `inviteCode` |
+| **6 (Onboarding)** | **Crear o listar Usuarios** de tu organización *(también se auto-crean al enviar `x-user-id`)* | `POST /api/users`<br>`GET /api/users` | `x-api-key` |
+| **7 (Archivos Grandes)** | **Subida Multipart (`> 25 MB` a `500 MB`)** | `POST /api/upload/multipart` | `x-api-key`, `x-user-id` |
+| **8 (Admin / Logs)** | **Ver Logs de tu organización, crear API Keys o configurar Webhooks** | `GET /api/logs`<br>`POST /api/keys`<br>`PATCH /api/organizations` | `x-api-key` |
+
+---
+
 ## 1. ¿Qué es el servicio y qué NO hace?
 
 ### Qué ES y qué HACE:
@@ -50,7 +65,19 @@ No necesitas pre-registrar a los usuarios de tu plataforma antes de subir archiv
 - Nuestro servicio calcula internamente un **UUID determinista único por organización**:
   $$\text{internalUserId} = \text{UUID\_SHA256}(\text{org\_id} + \text{":"} + \text{x-user-id})$$
 - Si ese usuario aún no existe en tu organización, **se registra automáticamente al vuelo** y jamás chocará con usuarios de otras organizaciones aunque ambas usen `x-user-id: 1`.
-- *(Opcional)* También puedes listar o registrar usuarios explícitamente en `GET /api/users` y `POST /api/users` enviando tu `x-api-key`.
+- *(Opcional)* También puedes listar o registrar usuarios explícitamente en `GET /api/users` y `POST /api/users` enviando tu `x-api-key`:
+
+```bash
+curl -X POST "https://d1nuawu3owad6c.cloudfront.net/api/users" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: TU_API_KEY" \
+  -d '{
+    "externalUserId": "cliente_001",
+    "name": "Alan Tester",
+    "role": "editor",
+    "canUpload": true
+  }'
+```
 
 ### ¿Cómo crear llaves adicionales tú mismo (Delegación)?
 Con tu API Key Maestra (`can_manage_keys: true`), puedes crear llaves operativas secundarias (con `can_manage_keys: false`) desde tu propio backend, hasta el límite `max_api_keys` de tu organización (por defecto **3 llaves activas**):
@@ -363,7 +390,7 @@ curl -s -X GET "https://cloudinary-aws-backend.vercel.app/api/files/b087905a-00f
 ```
 
 ### A) Archivos Públicos (`visibility: "public"`)
-- La respuesta devuelve `delivery: "cloudfront"` y `url` apuntando a **Amazon CloudFront CDN** (`https://d1nuawu3owad6c.cloudfront.net/static/files/<hash>.<ext>`).
+- La respuesta devuelve `delivery: "cloudfront"` y `url` apuntando a **Amazon CloudFront CDN** (`https://d1nuawu3owad6c.cloudfront.net/static/public/{org_id}/<hash>.<ext>`).
 - Esta URL es estable (no tiene firma que caduque a los 5 minutos) y utiliza caché en el Edge (`Cache-Control: public, max-age=300, must-revalidate`).
 
 ### B) Archivos Privados (`visibility: "private"`)
