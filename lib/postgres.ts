@@ -1,32 +1,28 @@
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import postgres from 'postgres';
-import { requireEnv } from '@/lib/env';
-
-let cachedClient: SupabaseClient | null = null;
-let cachedUrl: string | null = null;
-let cachedKey: string | null = null;
 
 declare global {
   // eslint-disable-next-line no-var
   var __directPgSql: postgres.Sql | undefined;
 }
 
-function getDirectDatabaseUrl(): string | null {
+function getDirectDatabaseUrl(): string {
   const raw =
     process.env.DATABASE_URL?.trim() ||
     process.env.POSTGRES_URL?.trim() ||
     process.env.DIRECT_URL?.trim() ||
-    null;
+    '';
 
-  if (!raw) return null;
-  return raw.replace(/(\.pooler\.supabase\.com):6543\b/, '$1:5432');
+  if (!raw) {
+    throw new Error(
+      "[ENV_MISSING] Falta la variable de entorno obligatoria 'DATABASE_URL' para la conexión directa a PostgreSQL."
+    );
+  }
+  return raw.replace(/(\.pooler\.[^:]+):6543\b/, '$1:5432');
 }
 
-export function getPostgresSql(): postgres.Sql | null {
-  const connStr = getDirectDatabaseUrl();
-  if (!connStr) return null;
-
+export function getPostgresSql(): postgres.Sql {
   if (!globalThis.__directPgSql) {
+    const connStr = getDirectDatabaseUrl();
     globalThis.__directPgSql = postgres(connStr, {
       max: process.env.NODE_ENV === 'production' ? 10 : 5,
       idle_timeout: 20,
@@ -76,7 +72,13 @@ function normalizeRow(row: Record<string, any> | null | undefined): any {
   return out;
 }
 
-class DirectPostgresQueryBuilder implements PromiseLike<any> {
+export interface PgQueryResult<TData = any> {
+  data: TData | null;
+  error: any;
+  count?: number | null;
+}
+
+export class DirectPostgresQueryBuilder<TData = any[]> implements PromiseLike<PgQueryResult<TData>> {
   private sql: postgres.Sql;
   private table: string;
   private op: 'select' | 'insert' | 'update' | 'delete' = 'select';
@@ -246,20 +248,20 @@ class DirectPostgresQueryBuilder implements PromiseLike<any> {
     return this;
   }
 
-  single() {
+  single(): DirectPostgresQueryBuilder<any> {
     this.singleMode = 'single';
     if (this.op === 'select' && this.limitVal === null) {
       this.limitVal = 1;
     }
-    return this;
+    return this as unknown as DirectPostgresQueryBuilder<any>;
   }
 
-  maybeSingle() {
+  maybeSingle(): DirectPostgresQueryBuilder<any> {
     this.singleMode = 'maybeSingle';
     if (this.op === 'select' && this.limitVal === null) {
       this.limitVal = 1;
     }
-    return this;
+    return this as unknown as DirectPostgresQueryBuilder<any>;
   }
 
   private buildWhere(initialParams: any[]): { whereSql: string; params: any[] } {
@@ -411,85 +413,40 @@ class DirectPostgresQueryBuilder implements PromiseLike<any> {
     }
   }
 
-  then<TResult1 = any, TResult2 = never>(
-    onfulfilled?: ((value: { data: any; error: any; count?: number | null }) => TResult1 | PromiseLike<TResult1>) | null,
+  then<TResult1 = PgQueryResult<TData>, TResult2 = never>(
+    onfulfilled?: ((value: PgQueryResult<TData>) => TResult1 | PromiseLike<TResult1>) | null,
     onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null
   ): PromiseLike<TResult1 | TResult2> {
     return this.execute().then(onfulfilled, onrejected);
   }
 }
 
-export function getSupabaseUrl(): string {
-  return requireEnv('SUPABASE_URL');
-}
-
-export function getSupabaseServiceRoleKey(): string {
-  return requireEnv('SUPABASE_SERVICE_ROLE_KEY');
-}
-
-export function getSupabaseClient(): SupabaseClient {
-  const url = getSupabaseUrl();
-  const key = getSupabaseServiceRoleKey();
-
-  if (!cachedClient || cachedUrl !== url || cachedKey !== key) {
-    cachedClient = createClient(url, key, {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-      },
-      global: {
-        fetch: (fetchUrl, options = {}) =>
-          fetch(fetchUrl, {
-            ...options,
-            cache: 'no-store',
-          }),
-      },
-    });
-    cachedUrl = url;
-    cachedKey = key;
-  }
-
-  return cachedClient;
-}
-
 /**
- * Universal database client proxy:
- * - When DATABASE_URL is configured, executes queries directly against PostgreSQL via postgres.js.
- * - Falls back to @supabase/supabase-js HTTP client only if DATABASE_URL is absent.
+ * Direct PostgreSQL query client via postgres.js (DATABASE_URL).
  */
-export const supabase: SupabaseClient = new Proxy({} as SupabaseClient, {
-  get(_target, prop, _receiver) {
-    const pgSql = getPostgresSql();
-    if (pgSql) {
-      if (prop === 'from') {
-        return (table: string) => new DirectPostgresQueryBuilder(pgSql, table);
-      }
-      if (prop === 'rpc') {
-        return async (fnName: string, args: Record<string, any> = {}) => {
-          try {
-            const entries = Object.entries(args);
-            const params = entries.map(([, v]) => v);
-            const namedArgs = entries
-              .map(([k], idx) => `${quoteIdent(k)} := $${idx + 1}`)
-              .join(', ');
-            const query = `SELECT * FROM public.${quoteIdent(fnName)}(${namedArgs})`;
-            const rows = await pgSql.unsafe(query, params);
-            return { data: rows.map(normalizeRow), error: null };
-          } catch (err: any) {
-            return {
-              data: null,
-              error: {
-                message: err?.message || 'RPC error',
-                code: err?.code || 'RPC_ERROR',
-              },
-            };
-          }
-        };
-      }
-    }
-
-    const client = getSupabaseClient();
-    const value = (client as any)[prop];
-    return typeof value === 'function' ? value.bind(client) : value;
+export const pgClient = {
+  from(table: string) {
+    return new DirectPostgresQueryBuilder(getPostgresSql(), table);
   },
-});
+  async rpc(fnName: string, args: Record<string, any> = {}) {
+    try {
+      const sql = getPostgresSql();
+      const entries = Object.entries(args);
+      const params = entries.map(([, v]) => v);
+      const namedArgs = entries
+        .map(([k], idx) => `${quoteIdent(k)} := $${idx + 1}`)
+        .join(', ');
+      const query = `SELECT * FROM public.${quoteIdent(fnName)}(${namedArgs})`;
+      const rows = await sql.unsafe(query, params);
+      return { data: rows.map(normalizeRow), error: null };
+    } catch (err: any) {
+      return {
+        data: null,
+        error: {
+          message: err?.message || 'RPC error',
+          code: err?.code || 'RPC_ERROR',
+        },
+      };
+    }
+  },
+};

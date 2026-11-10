@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { pgClient } from './postgres';
 import { db, isDirectDatabaseConfigured, serviceLogs, files, users, organizations } from '@/lib/db';
 import { desc, count, inArray } from 'drizzle-orm';
 
@@ -34,7 +34,7 @@ export interface ServiceLog {
  * La tabla `service_logs` almacena exclusivamente eventos de auditoría y
  * seguridad atómicos (método HTTP, acción, estado, IP, mensaje, ticket_id, file_id).
  * Toda la información de archivos, usuarios y organizaciones se resuelve
- * a través de claves foráneas relacionales en PostgreSQL (JOINs en Supabase),
+ * a través de claves foráneas relacionales en PostgreSQL (JOINs en PostgreSQL),
  * garantizando cero redundancia y eliminación total de columnas JSON/JSONB.
  * ==============================================================================
  */
@@ -139,7 +139,7 @@ if (!globalForLogs.serviceLogs) {
 }
 
 /**
- * Persists an audit log event to memory and to Supabase (service_logs table)
+ * Persists an audit log event to memory and to PostgreSQL (service_logs table)
  * completely normalized without any JSONB column.
  */
 export async function addServiceLog(logInput: {
@@ -211,7 +211,7 @@ export async function addServiceLog(logInput: {
     details: legacyDetails,
   };
 
-  // 1. Persist log (Direct PostgreSQL if DATABASE_URL is set, Supabase fallback otherwise)
+  // 1. Persist log (Direct PostgreSQL if DATABASE_URL is set, PostgreSQL fallback otherwise)
   try {
     const validOrgId = logInput.orgId && UUID_REGEX.test(logInput.orgId) ? logInput.orgId : (logInput.targetOrgId && UUID_REGEX.test(logInput.targetOrgId) ? logInput.targetOrgId : null);
     const validUserId = logInput.userId && UUID_REGEX.test(logInput.userId) && logInput.userId !== '00000000-0000-0000-0000-000000000000' ? logInput.userId : null;
@@ -272,7 +272,7 @@ export async function addServiceLog(logInput: {
       message: message,
     };
 
-    let { data: insertedRow, error: insertErr } = await supabase
+    let { data: insertedRow, error: insertErr } = await pgClient
       .from('service_logs')
       .insert(payload)
       .select('id')
@@ -282,14 +282,14 @@ export async function addServiceLog(logInput: {
     if (insertErr && (insertErr.code === '23503' || insertErr.message?.includes('foreign key') || insertErr.message?.includes('files'))) {
       console.warn('Llave foránea en file_id no coincide con registro activo en files; guardando log con file_id: null:', insertErr.message);
       const safePayload = { ...payload, file_id: null };
-      const retryFk = await supabase.from('service_logs').insert(safePayload).select('id').single();
+      const retryFk = await pgClient.from('service_logs').insert(safePayload).select('id').single();
       insertedRow = retryFk.data;
       insertErr = retryFk.error;
     }
 
-    // Resilient fallback if ALTER TABLE hasn't been executed yet in Supabase
+    // Resilient fallback if ALTER TABLE hasn't been executed yet in PostgreSQL
     if (insertErr && insertErr.message.includes('in the schema cache')) {
-      console.warn('Supabase missing new columns, falling back to base columns:', insertErr.message);
+      console.warn('PostgreSQL missing new columns, falling back to base columns:', insertErr.message);
       const fallbackPayload = {
         org_id: validOrgId,
         user_id: validUserId,
@@ -298,7 +298,7 @@ export async function addServiceLog(logInput: {
         ip_address: ipAddress,
         created_at: newLog.timestamp,
       };
-      const retry = await supabase.from('service_logs').insert(fallbackPayload).select('id').single();
+      const retry = await pgClient.from('service_logs').insert(fallbackPayload).select('id').single();
       insertedRow = retry.data;
       insertErr = retry.error;
     }
@@ -330,7 +330,7 @@ export interface PaginatedServiceLogs {
 }
 
 /**
- * Fetches audit logs from Supabase (service_logs table) with pagination,
+ * Fetches audit logs from PostgreSQL (service_logs table) with pagination,
  * sorted strictly from newest to oldest (id DESC, created_at DESC).
  */
 export async function getServiceLogs(options?: {
@@ -462,20 +462,20 @@ export async function getServiceLogs(options?: {
         totalPages,
       };
     } catch (directErr: any) {
-      console.warn('[SERVICE_LOGS_DIRECT_FALLBACK] Direct query failed, falling back to Supabase:', directErr.message, directErr.cause);
+      console.warn('[SERVICE_LOGS_DIRECT_FALLBACK] Direct query failed, falling back to PostgreSQL:', directErr.message, directErr.cause);
     }
   }
 
   try {
-    // 2. Legacy Supabase HTTP query fallback
-    const { data, count, error } = await supabase
+    // 2. Legacy PostgreSQL HTTP query fallback
+    const { data, count, error } = await pgClient
       .from('service_logs')
       .select('*', { count: 'exact' })
       .order('id', { ascending: false })
       .range(offset, offset + limit - 1);
 
     if (error) {
-      console.warn('Error querying service_logs from Supabase:', error.message);
+      console.warn('Error querying service_logs from PostgreSQL:', error.message);
       throw error;
     }
 
@@ -500,16 +500,16 @@ export async function getServiceLogs(options?: {
 
     const [filesByIdRes, filesByTicketRes, usersRes, orgsRes] = await Promise.all([
       fileIds.length > 0
-        ? supabase.from('files').select('*').in('id', fileIds)
+        ? pgClient.from('files').select('*').in('id', fileIds)
         : Promise.resolve({ data: [] }),
       ticketIds.length > 0
-        ? supabase.from('files').select('*').in('ticket_id', ticketIds)
+        ? pgClient.from('files').select('*').in('ticket_id', ticketIds)
         : Promise.resolve({ data: [] }),
       userIds.length > 0
-        ? supabase.from('users').select('id, name').in('id', userIds)
+        ? pgClient.from('users').select('id, name').in('id', userIds)
         : Promise.resolve({ data: [] }),
       orgIds.length > 0
-        ? supabase.from('organizations').select('id, name').in('id', orgIds)
+        ? pgClient.from('organizations').select('id, name').in('id', orgIds)
         : Promise.resolve({ data: [] }),
     ]);
 
@@ -642,14 +642,14 @@ export async function getServiceLogs(options?: {
 }
 
 /**
- * Clears service logs from Supabase and memory
+ * Clears service logs from PostgreSQL and memory
  */
 export async function clearServiceLogs(): Promise<void> {
   globalForLogs.serviceLogs = [];
   try {
-    await supabase.from('service_logs').delete().not('created_at', 'is', null);
+    await pgClient.from('service_logs').delete().not('created_at', 'is', null);
   } catch (err) {
-    console.error('Error clearing logs in Supabase:', err);
+    console.error('Error clearing logs in PostgreSQL:', err);
   }
 }
 
@@ -676,7 +676,7 @@ export async function enforceIpAddressRetention(options?: {
 
   const cutoffIso = new Date(Date.now() - retentionMs).toISOString();
 
-  let query: any = supabase
+  let query: any = pgClient
     .from('service_logs')
     .select('id, ip_address, created_at')
     .not('ip_address', 'is', null)
@@ -684,7 +684,7 @@ export async function enforceIpAddressRetention(options?: {
     .limit(500);
 
   if (options?.logId !== undefined) {
-    query = supabase
+    query = pgClient
       .from('service_logs')
       .select('id, ip_address, created_at')
       .eq('id', options.logId);
@@ -701,7 +701,7 @@ export async function enforceIpAddressRetention(options?: {
   }
 
   const ids = rowsToAnonymize.map((r: any) => r.id);
-  const { error: updateErr } = await supabase
+  const { error: updateErr } = await pgClient
     .from('service_logs')
     .update({ ip_address: null })
     .in('id', ids);

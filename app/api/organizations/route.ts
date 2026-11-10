@@ -1,7 +1,7 @@
 import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { verifyAdminSecretHeader, verifyOrgInviteCode } from '@/lib/env';
 import { addServiceLog } from '@/lib/service-logs';
 import { validateWebhookUrlSSRF } from '@/lib/lambda-fallback/webhook-dispatcher';
@@ -28,7 +28,7 @@ async function resolveCallerAuth(req: NextRequest): Promise<AuthResult> {
   const rawApiKey = req.headers.get('x-api-key')?.trim();
   if (rawApiKey) {
     const keyHash = crypto.createHash('sha256').update(rawApiKey).digest('hex');
-    const { data: keyRecord } = await supabase
+    const { data: keyRecord } = await pgClient
       .from('api_keys')
       .select('id, org_id, user_id, can_manage_keys, is_active')
       .eq('hashed_key', keyHash)
@@ -102,7 +102,7 @@ export async function GET(req: NextRequest) {
     targetId = auth.callerKey.org_id;
   }
 
-  let query = supabase.from('organizations').select('id, name, slug, webhook_url, max_storage_bytes, max_pending_tickets, max_api_keys, created_at');
+  let query = pgClient.from('organizations').select('id, name, slug, webhook_url, max_storage_bytes, max_pending_tickets, max_api_keys, created_at');
   if (targetId) {
     query = query.eq('id', targetId);
   }
@@ -169,7 +169,7 @@ export async function POST(req: NextRequest) {
 
     // Verify if slug already exists; if so, append a short random suffix
     let finalSlug = baseSlug;
-    const { data: existingSlugOrg } = await supabase
+    const { data: existingSlugOrg } = await pgClient
       .from('organizations')
       .select('id')
       .eq('slug', finalSlug)
@@ -205,7 +205,7 @@ export async function POST(req: NextRequest) {
     const description = body?.description ? String(body.description).trim().slice(0, 250) : `Organización ${rawName}`;
 
     // 1. Insert Organization
-    const { data: createdOrg, error: orgErr } = await supabase
+    const { data: createdOrg, error: orgErr } = await pgClient
       .from('organizations')
       .insert({
         id: orgId,
@@ -231,7 +231,7 @@ export async function POST(req: NextRequest) {
     // 2. Create initial default user scoped to this organization
     const defaultExternalId = body?.defaultUserId ? String(body.defaultUserId).trim() : '1';
     const defaultUserUuid = await deriveOrgScopedUserUuid(orgId, defaultExternalId);
-    const { data: createdUser } = await supabase
+    const { data: createdUser } = await pgClient
       .from('users')
       .insert({
         id: defaultUserUuid,
@@ -248,7 +248,7 @@ export async function POST(req: NextRequest) {
     const rawApiKey = `sk_live_${crypto.randomBytes(32).toString('hex')}`;
     const hashedKey = crypto.createHash('sha256').update(rawApiKey).digest('hex');
 
-    const { data: createdKey, error: keyErr } = await supabase
+    const { data: createdKey, error: keyErr } = await pgClient
       .from('api_keys')
       .insert({
         id: crypto.randomUUID(),
@@ -401,7 +401,7 @@ export async function PATCH(req: NextRequest) {
       );
     }
 
-    const { data: updatedOrg, error: updateErr } = await supabase
+    const { data: updatedOrg, error: updateErr } = await pgClient
       .from('organizations')
       .update(updates)
       .eq('id', targetId)

@@ -1,6 +1,6 @@
 import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { addServiceLog } from '@/lib/service-logs';
 import { abortS3MultipartUpload, deleteS3Object } from '@/lib/s3';
 import { invalidateCloudFrontPaths } from '@/lib/cloudfront';
@@ -10,7 +10,7 @@ async function resolveQueryUserIdForOrg(orgId: string, rawUserId: string): Promi
   const clean = (rawUserId || '').trim();
   if (!clean) return '';
   if (UUID_V4_OR_NAMESPACE_REGEX.test(clean)) {
-    const { data } = await supabase
+    const { data } = await pgClient
       .from('users')
       .select('id')
       .eq('id', clean)
@@ -45,7 +45,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  let query = supabase
+  let query = pgClient
     .from('files')
     .select('*')
     .eq('org_id', validatedOrgId)
@@ -136,7 +136,7 @@ export async function DELETE(req: NextRequest) {
       );
     }
 
-    let query = supabase.from('files').select('*').eq('org_id', targetOrgId);
+    let query = pgClient.from('files').select('*').eq('org_id', targetOrgId);
     if (targetUserId) {
       query = query.eq('user_id', targetUserId);
     }
@@ -186,7 +186,7 @@ export async function DELETE(req: NextRequest) {
       }
 
       // 3. Delete row from public.files
-      const { error: delRowErr } = await supabase.from('files').delete().eq('id', fileRow.id);
+      const { error: delRowErr } = await pgClient.from('files').delete().eq('id', fileRow.id);
       if (!delRowErr) {
         deletedFileIds.push(fileRow.id);
       }

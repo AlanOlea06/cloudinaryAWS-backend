@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { constantTimeEqual, requireEnv } from '@/lib/env';
 import {
   deriveOrgScopedUserUuid,
@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'MISSING_HASHED_KEY' }, { status: 400 });
     }
 
-    const { data: keyRecord, error: keyErr } = await supabase
+    const { data: keyRecord, error: keyErr } = await pgClient
       .from('api_keys')
       .select('id,org_id,user_id,name,can_read,can_upload,can_delete,can_manage_keys,is_active')
       .eq('hashed_key', hashedKey)
@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
 
     if (candidateUserId) {
       if (UUID_REGEX.test(candidateUserId)) {
-        const { data: directUser } = await supabase
+        const { data: directUser } = await pgClient
           .from('users')
           .select('id,org_id,name,email,role,can_upload')
           .eq('id', candidateUserId)
@@ -60,7 +60,7 @@ export async function POST(req: NextRequest) {
 
       if (!userRecord) {
         const derivedUserId = await deriveOrgScopedUserUuid(keyRecord.org_id, candidateUserId);
-        const { data: derivedUser } = await supabase
+        const { data: derivedUser } = await pgClient
           .from('users')
           .select('id,org_id,name,email,role,can_upload')
           .eq('id', derivedUserId)
@@ -75,7 +75,7 @@ export async function POST(req: NextRequest) {
             candidateUserId,
             derivedUserId
           );
-          const { data: createdUser } = await supabase
+          const { data: createdUser } = await pgClient
             .from('users')
             .insert(newUserMeta)
             .select('id,org_id,name,email,role,can_upload')

@@ -20,9 +20,9 @@ function getDatabaseUrl(): string | null {
 
   if (!raw) return null;
 
-  // Safeguard: Supabase Supavisor port 6543 can timeout on TLS startup in serverless;
+  // Safeguard: PostgreSQL Supavisor port 6543 can timeout on TLS startup in serverless;
   // session mode on port 5432 over the IPv4 pooler negotiates TLS immediately.
-  return raw.replace(/(\.pooler\.supabase\.com):6543\b/, '$1:5432');
+  return raw.replace(/(\.pooler\.pgClient\.com):6543\b/, '$1:5432');
 }
 
 export function isDirectDatabaseConfigured(): boolean {

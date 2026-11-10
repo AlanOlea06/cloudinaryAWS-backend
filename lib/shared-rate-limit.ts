@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { db, isDirectDatabaseConfigured, rateLimitBuckets } from '@/lib/db';
 import { sql, lt } from 'drizzle-orm';
 
@@ -68,7 +68,7 @@ export async function purgeStaleRateLimitBuckets(): Promise<{ ok: boolean; error
   }
 
   const cutoffIso = new Date(Date.now() - RATE_LIMIT_BUCKET_RETENTION_MS).toISOString();
-  const { error } = await supabase
+  const { error } = await pgClient
     .from('rate_limit_buckets')
     .delete()
     .lt('last_request_at', cutoffIso);
@@ -78,7 +78,7 @@ export async function purgeStaleRateLimitBuckets(): Promise<{ ok: boolean; error
 /**
  * Checks rate limit against database sliding window table `rate_limit_buckets`.
  * - If DATABASE_URL is configured: executes atomic portable SQL UPSERT directly.
- * - Otherwise: falls back to Supabase client RPC `check_rate_limit_atomic`.
+ * - Otherwise: falls back to PostgreSQL client RPC `check_rate_limit_atomic`.
  */
 export async function checkSharedRateLimit(
   key: string,
@@ -134,9 +134,9 @@ export async function checkSharedRateLimit(
     }
   }
 
-  // 2. Legacy Supabase PostgREST RPC Fallback
+  // 2. Legacy PostgreSQL PostgREST RPC Fallback
   try {
-    const { data, error } = await supabase.rpc('check_rate_limit_atomic', {
+    const { data, error } = await pgClient.rpc('check_rate_limit_atomic', {
       p_key: key,
       p_max_requests: maxRequests,
       p_window_seconds: windowSeconds,

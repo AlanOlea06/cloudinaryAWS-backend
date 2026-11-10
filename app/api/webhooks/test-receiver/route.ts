@@ -8,7 +8,7 @@ import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 // ============================================================================
 
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { verifyWebhookSignature } from '@/lib/lambda-fallback/webhook-dispatcher';
 import { verifyAdminSecretHeader } from '@/lib/env';
 
@@ -91,7 +91,7 @@ export async function PUT(req: NextRequest) {
       );
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await pgClient
       .from('organizations')
       .update({
         webhook_url: webhookUrl,
@@ -148,7 +148,7 @@ export async function POST(req: NextRequest) {
 
     // If no manual secret header provided, look up the organization's webhook_secret from DB
     if (!secretToVerify && parsedPayload?.orgId) {
-      const { data: org } = await supabase
+      const { data: org } = await pgClient
         .from('organizations')
         .select('webhook_secret')
         .eq('id', parsedPayload.orgId)

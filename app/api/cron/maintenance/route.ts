@@ -3,13 +3,13 @@ import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 // [TEMPORARY-LAMBDA-FALLBACK: TASK-B8-CRON-MAINTENANCE]
 // Búsqueda rápida: "TEMPORARY-LAMBDA-FALLBACK"
 // Cron de Mantenimiento en Vercel (reemplaza S3 Lifecycle Rules y DLQ):
-// 1. Borra tickets vencidos (fila en Supabase + objeto en S3 con DeleteObjectCommand).
+// 1. Borra tickets vencidos (fila en PostgreSQL + objeto en S3 con DeleteObjectCommand).
 // 2. Cancela subidas multipart abandonadas usando s3_upload_id (AbortMultipartUploadCommand).
 // 3. Reintenta procesamientos pendientes o fallidos (processUpload(fileId) cuando retry_count < 3).
 // ============================================================================
 
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { addServiceLog, enforceIpAddressRetention } from '@/lib/service-logs';
 import {
   headS3Object,
@@ -81,7 +81,7 @@ async function runMaintenanceCron(req: NextRequest) {
   // ==========================================================================
   // 1. BORRAR TICKETS VENCIDOS (fila en BD + objeto en S3 con DeleteObjectCommand)
   // ==========================================================================
-  let expiredQuery = supabase
+  let expiredQuery = pgClient
     .from('files')
     .select('*')
     .in('status', ['pending_upload', 'expired'])
@@ -106,7 +106,7 @@ async function runMaintenanceCron(req: NextRequest) {
     }
 
     // Delete expired ticket row from public.files
-    await supabase.from('files').delete().eq('id', row.id);
+    await pgClient.from('files').delete().eq('id', row.id);
 
     await addServiceLog({
       method: req.method,
@@ -134,7 +134,7 @@ async function runMaintenanceCron(req: NextRequest) {
   // Aborta solo si el ticket venció más un margen y ListParts no muestra partes nuevas.
   // NO borra la fila si falla el abort en S3.
   // ==========================================================================
-  let multipartQuery = supabase
+  let multipartQuery = pgClient
     .from('files')
     .select('*')
     .not('s3_upload_id', 'is', null)
@@ -191,7 +191,7 @@ async function runMaintenanceCron(req: NextRequest) {
       }
 
       // No borres la fila si falla el abort en S3 (requisito explícito)
-      await supabase.from('files').delete().eq('id', row.id);
+      await pgClient.from('files').delete().eq('id', row.id);
 
       await addServiceLog({
         method: req.method,
@@ -227,7 +227,7 @@ async function runMaintenanceCron(req: NextRequest) {
   // y NUNCA marca 'failed' un archivo 'uploaded' por no estar procesado.
   // ==========================================================================
   if (ENABLE_SERVER_PROCESSING_FALLBACK) {
-    let retryQuery: any = supabase
+    let retryQuery: any = pgClient
       .from('files')
       .select('*')
       .in('status', ['completed', 'failed'])
@@ -247,7 +247,7 @@ async function runMaintenanceCron(req: NextRequest) {
       const head = await headS3Object(row.s3_pending_key);
       if (!head.exists) {
         // Object no longer in pending -> mark failed
-        await supabase
+        await pgClient
           .from('files')
           .update({
             status: 'failed',

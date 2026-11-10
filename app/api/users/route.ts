@@ -1,7 +1,7 @@
 import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { verifyAdminSecretHeader } from '@/lib/env';
 import {
   deriveOrgScopedUserUuid,
@@ -45,7 +45,7 @@ export async function GET(req: NextRequest) {
         );
       }
 
-      const { data: users, error: userError } = await supabase
+      const { data: users, error: userError } = await pgClient
         .from('users')
         .select('id, org_id, name, role, can_upload, created_at')
         .eq('org_id', validatedOrgId)
@@ -70,7 +70,7 @@ export async function GET(req: NextRequest) {
     }
 
     // Modo Admin: devuelve organizaciones y usuarios (filtrables por orgId)
-    const { data: orgs, error: orgError } = await supabase
+    const { data: orgs, error: orgError } = await pgClient
       .from('organizations')
       .select('id, name, slug, description, max_storage_bytes, max_pending_tickets, max_api_keys, created_at')
       .order('slug', { ascending: true });
@@ -82,7 +82,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    let userQuery = supabase
+    let userQuery = pgClient
       .from('users')
       .select('id, org_id, name, email, role, can_upload, created_at')
       .order('name', { ascending: true });
@@ -169,7 +169,7 @@ export async function POST(req: NextRequest) {
     const derivedUuid = await deriveOrgScopedUserUuid(targetOrgId, rawExternalId);
 
     // Verificar si ya existe en la organización
-    const { data: existingUser } = await supabase
+    const { data: existingUser } = await pgClient
       .from('users')
       .select('id, org_id, name, role, can_upload, created_at')
       .eq('id', derivedUuid)
@@ -206,7 +206,7 @@ export async function POST(req: NextRequest) {
         ? 'viewer'
         : 'editor';
 
-    const { data: createdUser, error: insertErr } = await supabase
+    const { data: createdUser, error: insertErr } = await pgClient
       .from('users')
       .insert({
         id: derivedUuid,

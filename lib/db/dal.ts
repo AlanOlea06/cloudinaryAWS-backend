@@ -1,11 +1,11 @@
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { db, isDirectDatabaseConfigured, files, organizations, users, apiKeys } from '@/lib/db';
 import { eq, and, desc, inArray, sql } from 'drizzle-orm';
 
 /**
  * High-Level Data Access Layer (DAL) / Repository Layer
  * Seamlessly executes direct SQL queries via Drizzle ORM when DATABASE_URL is present,
- * and gracefully falls back to Supabase PostgREST HTTP client otherwise.
+ * and gracefully falls back to PostgreSQL PostgREST HTTP client otherwise.
  */
 
 // ==============================================================================
@@ -17,7 +17,7 @@ export const filesDal = {
       const [row] = await db.select().from(files).where(eq(files.id, id));
       return row || null;
     }
-    const { data } = await supabase.from('files').select('*').eq('id', id).maybeSingle();
+    const { data } = await pgClient.from('files').select('*').eq('id', id).maybeSingle();
     return data || null;
   },
 
@@ -26,7 +26,7 @@ export const filesDal = {
       const [row] = await db.select().from(files).where(eq(files.ticket_id, ticketId));
       return row || null;
     }
-    const { data } = await supabase.from('files').select('*').eq('ticket_id', ticketId).maybeSingle();
+    const { data } = await pgClient.from('files').select('*').eq('ticket_id', ticketId).maybeSingle();
     return data || null;
   },
 
@@ -58,7 +58,7 @@ export const filesDal = {
       }).returning();
       return inserted;
     }
-    const { data, error } = await supabase.from('files').insert(payload).select().single();
+    const { data, error } = await pgClient.from('files').insert(payload).select().single();
     if (error) throw error;
     return data;
   },
@@ -76,7 +76,7 @@ export const filesDal = {
       const [updated] = await db.update(files).set(cleanUpdates).where(eq(files.id, id)).returning();
       return updated || null;
     }
-    const { data, error } = await supabase.from('files').update(updates).eq('id', id).select().maybeSingle();
+    const { data, error } = await pgClient.from('files').update(updates).eq('id', id).select().maybeSingle();
     if (error) throw error;
     return data;
   },
@@ -94,7 +94,7 @@ export const filesDal = {
       const [updated] = await db.update(files).set(cleanUpdates).where(eq(files.ticket_id, ticketId)).returning();
       return updated || null;
     }
-    const { data, error } = await supabase.from('files').update(updates).eq('ticket_id', ticketId).select().maybeSingle();
+    const { data, error } = await pgClient.from('files').update(updates).eq('ticket_id', ticketId).select().maybeSingle();
     if (error) throw error;
     return data;
   },
@@ -104,7 +104,7 @@ export const filesDal = {
       await db.delete(files).where(eq(files.id, id));
       return { ok: true };
     }
-    const { error } = await supabase.from('files').delete().eq('id', id);
+    const { error } = await pgClient.from('files').delete().eq('id', id);
     if (error) throw error;
     return { ok: true };
   },
@@ -116,7 +116,7 @@ export const filesDal = {
       if (options?.offset) q = q.offset(options.offset) as any;
       return await q;
     }
-    let query = supabase.from('files').select('*').eq('org_id', orgId).order('created_at', { ascending: false });
+    let query = pgClient.from('files').select('*').eq('org_id', orgId).order('created_at', { ascending: false });
     if (options?.limit) query = query.limit(options.limit);
     if (options?.offset) query = query.range(options.offset, options.offset + (options.limit || 20) - 1);
     const { data, error } = await query;
@@ -134,7 +134,7 @@ export const organizationsDal = {
       const [row] = await db.select().from(organizations).where(eq(organizations.id, id));
       return row || null;
     }
-    const { data } = await supabase.from('organizations').select('*').eq('id', id).maybeSingle();
+    const { data } = await pgClient.from('organizations').select('*').eq('id', id).maybeSingle();
     return data || null;
   },
 
@@ -143,7 +143,7 @@ export const organizationsDal = {
       const [row] = await db.select().from(organizations).where(eq(organizations.slug, slug));
       return row || null;
     }
-    const { data } = await supabase.from('organizations').select('*').eq('slug', slug).maybeSingle();
+    const { data } = await pgClient.from('organizations').select('*').eq('slug', slug).maybeSingle();
     return data || null;
   },
 
@@ -151,7 +151,7 @@ export const organizationsDal = {
     if (isDirectDatabaseConfigured()) {
       return await db.select().from(organizations).orderBy(organizations.name);
     }
-    const { data } = await supabase.from('organizations').select('*').order('name', { ascending: true });
+    const { data } = await pgClient.from('organizations').select('*').order('name', { ascending: true });
     return data || [];
   },
 
@@ -160,7 +160,7 @@ export const organizationsDal = {
       const [updated] = await db.update(organizations).set(updates).where(eq(organizations.id, id)).returning();
       return updated || null;
     }
-    const { data, error } = await supabase.from('organizations').update(updates).eq('id', id).select().maybeSingle();
+    const { data, error } = await pgClient.from('organizations').update(updates).eq('id', id).select().maybeSingle();
     if (error) throw error;
     return data;
   },
@@ -175,7 +175,7 @@ export const usersDal = {
       const [row] = await db.select().from(users).where(eq(users.id, id));
       return row || null;
     }
-    const { data } = await supabase.from('users').select('*').eq('id', id).maybeSingle();
+    const { data } = await pgClient.from('users').select('*').eq('id', id).maybeSingle();
     return data || null;
   },
 
@@ -184,7 +184,7 @@ export const usersDal = {
     if (isDirectDatabaseConfigured()) {
       return await db.select().from(users).where(inArray(users.id, ids));
     }
-    const { data } = await supabase.from('users').select('*').in('id', ids);
+    const { data } = await pgClient.from('users').select('*').in('id', ids);
     return data || [];
   },
 
@@ -193,7 +193,7 @@ export const usersDal = {
       const [row] = await db.select().from(users).where(eq(users.email, email));
       return row || null;
     }
-    const { data } = await supabase.from('users').select('*').eq('email', email).maybeSingle();
+    const { data } = await pgClient.from('users').select('*').eq('email', email).maybeSingle();
     return data || null;
   },
 };
@@ -207,7 +207,7 @@ export const apiKeysDal = {
       const [row] = await db.select().from(apiKeys).where(eq(apiKeys.hashed_key, keyHash));
       return row || null;
     }
-    const { data } = await supabase.from('api_keys').select('*').eq('hashed_key', keyHash).maybeSingle();
+    const { data } = await pgClient.from('api_keys').select('*').eq('hashed_key', keyHash).maybeSingle();
     return data || null;
   },
 
@@ -216,7 +216,7 @@ export const apiKeysDal = {
       const [row] = await db.select().from(apiKeys).where(eq(apiKeys.id, id));
       return row || null;
     }
-    const { data } = await supabase.from('api_keys').select('*').eq('id', id).maybeSingle();
+    const { data } = await pgClient.from('api_keys').select('*').eq('id', id).maybeSingle();
     return data || null;
   },
 
@@ -225,7 +225,7 @@ export const apiKeysDal = {
       const rows = await db.select().from(apiKeys).where(and(eq(apiKeys.org_id, orgId), eq(apiKeys.is_active, true)));
       return rows.length;
     }
-    const { count } = await supabase.from('api_keys').select('*', { count: 'exact', head: true }).eq('org_id', orgId).eq('is_active', true);
+    const { count } = await pgClient.from('api_keys').select('*', { count: 'exact', head: true }).eq('org_id', orgId).eq('is_active', true);
     return count || 0;
   },
 };

@@ -1250,7 +1250,7 @@ paths:
                     example: success
                   message:
                     type: string
-                    example: El archivo 'factura-noviembre.jpg' fue eliminado exitosamente de S3 y de Supabase.
+                    example: El archivo 'factura-noviembre.jpg' fue eliminado exitosamente de S3 y de PostgreSQL.
                   deletedFileId:
                     type: string
                     format: uuid

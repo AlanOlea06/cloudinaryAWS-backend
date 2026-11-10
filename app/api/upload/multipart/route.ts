@@ -1,7 +1,7 @@
 import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { addServiceLog } from '@/lib/service-logs';
 import {
   validateAllowedFileType,
@@ -54,7 +54,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  let query = supabase.from('files').select('*');
+  let query = pgClient.from('files').select('*');
   if (ticketId) {
     query = query.eq('ticket_id', ticketId);
   } else if (fileId) {
@@ -192,7 +192,7 @@ export async function DELETE(req: NextRequest) {
     );
   }
 
-  let query = supabase.from('files').select('*');
+  let query = pgClient.from('files').select('*');
   if (ticketId) {
     query = query.eq('ticket_id', ticketId);
   } else if (fileId) {
@@ -238,9 +238,9 @@ export async function DELETE(req: NextRequest) {
   }
 
   if (deleteRow) {
-    await supabase.from('files').delete().eq('id', fileRow.id);
+    await pgClient.from('files').delete().eq('id', fileRow.id);
   } else {
-    await supabase
+    await pgClient
       .from('files')
       .update({
         status: 'failed',
@@ -355,7 +355,7 @@ async function handleCreateMultipart(req: NextRequest, body: any) {
   }
 
   // Verify user belongs to org and has can_upload
-  const { data: userRow, error: userErr } = await supabase
+  const { data: userRow, error: userErr } = await pgClient
     .from('users')
     .select('id, org_id, can_upload, role')
     .eq('id', userId)
@@ -382,7 +382,7 @@ async function handleCreateMultipart(req: NextRequest, body: any) {
   // ============================================================================
   try {
     const nowIso = new Date().toISOString();
-    const { data: expiredBatch } = await supabase
+    const { data: expiredBatch } = await pgClient
       .from('files')
       .select('id, s3_pending_key, expires_at')
       .eq('org_id', orgId)
@@ -401,7 +401,7 @@ async function handleCreateMultipart(req: NextRequest, body: any) {
             console.warn('[TEMPORARY-LAMBDA-FALLBACK] Error borrando S3 en limpieza oportunista multipart:', err.message);
           }
           if (s3Deleted) {
-            await supabase.from('files').delete().eq('id', exp.id);
+            await pgClient.from('files').delete().eq('id', exp.id);
           }
         }
       }
@@ -436,7 +436,7 @@ async function handleCreateMultipart(req: NextRequest, body: any) {
     extension: ext,
   });
 
-  const { data: insertedFile, error: insertError } = await supabase
+  const { data: insertedFile, error: insertError } = await pgClient
     .from('files')
     .insert({
       ticket_id: ticketId,
@@ -530,7 +530,7 @@ async function handlePresignPart(req: NextRequest, body: any) {
     );
   }
 
-  let query = supabase.from('files').select('*');
+  let query = pgClient.from('files').select('*');
   if (ticketId) {
     query = query.eq('ticket_id', ticketId);
   } else {
@@ -622,7 +622,7 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
     );
   }
 
-  let query = supabase.from('files').select('*');
+  let query = pgClient.from('files').select('*');
   if (ticketId) {
     query = query.eq('ticket_id', ticketId);
   } else {
@@ -718,7 +718,7 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
   const actualSize = Number(headMeta.contentLength ?? -1);
   if (declaredSize > 0 && actualSize !== declaredSize) {
     await deleteS3Object(fileRow.s3_pending_key);
-    await supabase
+    await pgClient
       .from('files')
       .update({
         status: 'failed',
@@ -744,7 +744,7 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
     try {
       await deleteS3Object(fileRow.s3_pending_key);
     } catch {}
-    await supabase
+    await pgClient
       .from('files')
       .update({
         status: 'failed',
@@ -771,7 +771,7 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
       await deleteS3Object(fileRow.s3_pending_key);
     } catch {}
     const magicMismatch = `Cabecera binaria inválida: detectado '${detectedMagicMime || 'desconocido'}' no coincide con declarado '${declaredMime}'.`;
-    await supabase
+    await pgClient
       .from('files')
       .update({
         status: 'failed',
@@ -866,7 +866,7 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
 
   const isChecksumVerified = Boolean(fileRow.sha256_hash && headMeta.checksumSHA256);
 
-  await supabase
+  await pgClient
     .from('files')
     .update({
       s3_upload_id: null,

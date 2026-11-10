@@ -4,7 +4,7 @@
 // Propósito: Firma y verificación HMAC-SHA256 con expiración para URLs de
 //            transformación dinámica (/api/img/[id]?w=&h=&fit=&format=&exp=&sig=).
 // Nota (Sección 2): Deshabilitado en producción hasta la etapa de transformaciones.
-// Sin secretos por defecto ni reutilización de SUPABASE_SERVICE_ROLE_KEY.
+// Sin secretos por defecto ni reutilización de PostgreSQL_SERVICE_ROLE_KEY.
 // ============================================================================
 
 import crypto from 'crypto';

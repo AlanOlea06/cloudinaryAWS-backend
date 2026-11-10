@@ -7,7 +7,7 @@ import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 // ============================================================================
 
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
 import { dispatchFileWebhook } from '@/lib/lambda-fallback/webhook-dispatcher';
 
@@ -43,7 +43,7 @@ export async function GET(
     const validatedOrgId = req.headers.get('x-validated-org-id');
     const validatedUserId = req.headers.get('x-validated-user-id');
 
-    const { data: fileRow, error: fetchErr } = await supabase
+    const { data: fileRow, error: fetchErr } = await pgClient
       .from('files')
       .select('*')
       .eq('id', fileId)
@@ -143,7 +143,7 @@ export async function POST(
     const triggerWebhook = Boolean(body?.triggerWebhook || body?.action === 'webhook');
     const clientIp = req.headers.get('x-forwarded-for') || '127.0.0.1';
 
-    const { data: fileRow } = await supabase
+    const { data: fileRow } = await pgClient
       .from('files')
       .select('*')
       .eq('id', fileId)

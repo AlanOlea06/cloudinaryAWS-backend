@@ -381,7 +381,7 @@ export default function ServiceLogsPage() {
             {logs.length === 0 ? (
               <tr>
                 <td colSpan={16} style={{ ...cellStyle, textAlign: 'center', padding: '36px', color: '#57606a' }}>
-                  {loading ? 'Cargando registros desde Supabase...' : 'No hay registros en service_logs.'}
+                  {loading ? 'Cargando registros desde PostgreSQL...' : 'No hay registros en service_logs.'}
                 </td>
               </tr>
             ) : (

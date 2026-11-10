@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { getServiceLogs, clearServiceLogs } from '@/lib/service-logs';
 import { verifyAdminSecretHeader } from '@/lib/env';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -64,7 +64,7 @@ export async function GET(req: NextRequest) {
   // Caso 1: Llave de una Organización -> devolver únicamente los logs de esa organización (con su IP real sin censurar)
   if (!isAdmin && rawApiKey) {
     const keyHash = crypto.createHash('sha256').update(rawApiKey).digest('hex');
-    const { data: keyRecord } = await supabase
+    const { data: keyRecord } = await pgClient
       .from('api_keys')
       .select('id, org_id, name, is_active')
       .eq('hashed_key', keyHash)

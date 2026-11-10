@@ -146,12 +146,12 @@ function jsonError(
   return res;
 }
 
-const SUPABASE_TIMEOUT_MS = 3500;
+const DB_AUTH_TIMEOUT_MS = 3500;
 
 async function fetchWithTimeout(
   url: string,
   options: RequestInit,
-  timeoutMs: number = SUPABASE_TIMEOUT_MS
+  timeoutMs: number = DB_AUTH_TIMEOUT_MS
 ): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);

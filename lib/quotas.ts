@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { pgClient } from './postgres';
 
 export interface QuotaCheckResult {
   allowed: boolean;
@@ -23,7 +23,7 @@ export async function checkOrganizationQuotas(
   incomingFileSizeBytes: number
 ): Promise<QuotaCheckResult> {
   // 1. Fetch organization quota limits from public.organizations
-  const { data: orgRow } = await supabase
+  const { data: orgRow } = await pgClient
     .from('organizations')
     .select('id, name, max_storage_bytes, max_pending_tickets')
     .eq('id', orgId)
@@ -33,7 +33,7 @@ export async function checkOrganizationQuotas(
   const maxPendingTickets = Number(orgRow?.max_pending_tickets ?? 20); // Default 20 pending tickets
 
   // 2. Fetch active files for this organization
-  const { data: orgFiles } = await supabase
+  const { data: orgFiles } = await pgClient
     .from('files')
     .select('id, status, size_bytes')
     .eq('org_id', orgId)

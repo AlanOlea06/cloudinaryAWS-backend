@@ -1,6 +1,6 @@
 import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { addServiceLog } from '@/lib/service-logs';
 import { deleteS3ObjectsByKeys } from '@/lib/s3';
 import { verifyAdminSecretHeader } from '@/lib/env';
@@ -35,7 +35,7 @@ export async function GET(req: NextRequest) {
     const orgId = searchParams.get('orgId');
     const status = searchParams.get('status');
 
-    let query = supabase
+    let query = pgClient
       .from('files')
       .select(`
         *,
@@ -59,7 +59,7 @@ export async function GET(req: NextRequest) {
 
     if (error) {
       return NextResponse.json(
-        { error: 'Error al consultar la tabla files en Supabase', details: error.message },
+        { error: 'Error al consultar la tabla files en PostgreSQL', details: error.message },
         { status: 500, headers: corsHeaders }
       );
     }
@@ -104,7 +104,7 @@ export async function DELETE(req: NextRequest) {
     const id = searchParams.get('id');
     const ticketId = searchParams.get('ticketId');
 
-    let selectQuery = supabase
+    let selectQuery = pgClient
       .from('files')
       .select('id, s3_pending_key, s3_processed_key');
 
@@ -135,7 +135,7 @@ export async function DELETE(req: NextRequest) {
       }
     }
 
-    let deleteQuery = supabase.from('files').delete();
+    let deleteQuery = pgClient.from('files').delete();
 
     if (id) {
       deleteQuery = deleteQuery.eq('id', id);

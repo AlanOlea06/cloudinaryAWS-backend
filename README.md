@@ -8,7 +8,7 @@ Servidor encargado de la orquestación de subidas multimedia, aislamiento multi-
 
 - **Node.js**: v20+
 - **AWS**: Cuenta con acceso a S3 y distribución CloudFront (`/static/*`).
-- **Base de Datos SQL**: PostgreSQL 15+ (AWS RDS, Neon, Supabase Pooler, Docker) o cualquier motor SQL compatible con los esquemas en `database/universal/` (`schema.postgresql.sql`, `schema.mysql.sql`, `schema.sqlite.sql`).
+- **Base de Datos SQL**: PostgreSQL 15+ (AWS RDS, Neon, PostgreSQL Pooler, Docker) o cualquier motor SQL compatible con los esquemas en `database/universal/` (`schema.postgresql.sql`, `schema.mysql.sql`, `schema.sqlite.sql`).
 
 ---
 
@@ -25,8 +25,7 @@ Configurar en Vercel (`Project -> Settings -> Environment Variables`) y en local
 3. `AWS_REGION`
 4. `AWS_S3_BUCKET_NAME`
 5. `AWS_CLOUDFRONT_DOMAIN`
-6. `SUPABASE_URL` (compatibilidad / middleware Edge)
-7. `SUPABASE_SERVICE_ROLE_KEY` (compatibilidad / fallback HTTP)
+6. `ORG_INVITE_CODE` (código de invitación para onboarding en `/api/organizations`)
 8. `TICKET_SIGNING_SECRET` (opcional de rotación: `TICKET_SIGNING_SECRET_PREVIOUS`)
 9. `ADMIN_API_SECRET` (opcional de rotación: `ADMIN_API_SECRET_PREVIOUS`)
 10. `CRON_SECRET`

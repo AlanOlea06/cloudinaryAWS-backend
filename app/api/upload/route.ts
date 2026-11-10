@@ -1,7 +1,7 @@
 import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
 import { addServiceLog } from '@/lib/service-logs';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import {
   isAwsConfigured,
   buildOrgS3FolderPrefix,
@@ -74,10 +74,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Query User from Supabase (Real Database Lookup - No Hardcoding)
+    // 1. Query User from PostgreSQL (Real Database Lookup - No Hardcoding)
     let user: any = null;
     if (userId) {
-      const { data: dbUser } = await supabase
+      const { data: dbUser } = await pgClient
         .from('users')
         .select('id, org_id, name, email, role, can_upload')
         .eq('id', userId)
@@ -120,12 +120,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2. Query Organizations from Supabase (Real Database Lookup - No Hardcoding)
+    // 2. Query Organizations from PostgreSQL (Real Database Lookup - No Hardcoding)
     let userOrg: any = null;
     let targetOrg: any = null;
 
     if (user.orgId) {
-      const { data: dbUserOrg } = await supabase
+      const { data: dbUserOrg } = await pgClient
         .from('organizations')
         .select('id, name, slug')
         .eq('id', user.orgId)
@@ -137,7 +137,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (orgId) {
-      const { data: dbTargetOrg } = await supabase
+      const { data: dbTargetOrg } = await pgClient
         .from('organizations')
         .select('id, name, slug')
         .eq('id', orgId)
@@ -295,7 +295,7 @@ export async function POST(req: NextRequest) {
     // ============================================================================
     try {
       const nowIso = new Date().toISOString();
-      const { data: expiredBatch } = await supabase
+      const { data: expiredBatch } = await pgClient
         .from('files')
         .select('id, s3_pending_key, expires_at')
         .eq('org_id', user.orgId)
@@ -314,7 +314,7 @@ export async function POST(req: NextRequest) {
               console.warn('[TEMPORARY-LAMBDA-FALLBACK] Error borrando S3 en limpieza oportunista:', err.message);
             }
             if (s3Deleted) {
-              await supabase.from('files').delete().eq('id', exp.id);
+              await pgClient.from('files').delete().eq('id', exp.id);
             }
           }
         }
@@ -415,7 +415,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Insert file record into Supabase (files table - original_name only in DB, scan_status='not_scanned')
+    // 1. Insert file record into PostgreSQL (files table - original_name only in DB, scan_status='not_scanned')
     const filePayload: Record<string, any> = {
       id: fileId,
       ticket_id: ticketId,
@@ -436,10 +436,10 @@ export async function POST(req: NextRequest) {
       created_at: new Date(timestamp).toISOString(),
     };
 
-    const { error: insertErr } = await supabase.from('files').insert(filePayload);
+    const { error: insertErr } = await pgClient.from('files').insert(filePayload);
 
     if (insertErr) {
-      console.error('Error inserting file in Supabase files table:', insertErr.message);
+      console.error('Error inserting file in PostgreSQL files table:', insertErr.message);
       return NextResponse.json(
         {
           error: 'Database Error',
@@ -450,7 +450,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 2. Record audit log event in Supabase
+    // 2. Record audit log event in PostgreSQL
     await addServiceLog({
       method: req.method,
       action: 'TICKET_ISSUED',
@@ -572,11 +572,11 @@ export async function PUT(req: NextRequest) {
     );
   }
 
-  // 1. Retrieve file record from Supabase (files table)
+  // 1. Retrieve file record from PostgreSQL (files table)
   let fileRow: any = null;
 
   try {
-    const { data: existingFiles, error: errFiles } = await supabase
+    const { data: existingFiles, error: errFiles } = await pgClient
       .from('files')
       .select('*')
       .eq('ticket_id', ticketId)
@@ -586,7 +586,7 @@ export async function PUT(req: NextRequest) {
       fileRow = existingFiles[0];
     }
   } catch (dbErr: any) {
-    console.error('Error querying ticket in Supabase:', dbErr.message);
+    console.error('Error querying ticket in PostgreSQL:', dbErr.message);
   }
 
   // CHECK 1: Ticket Existence (Return 404 if ticket doesn't exist)
@@ -686,7 +686,7 @@ export async function PUT(req: NextRequest) {
   const TTL_MS = 300 * 1000;
   if (!isNaN(createdAtMs) && Date.now() > createdAtMs + TTL_MS + GRACE_PERIOD_MS) {
     try {
-      await supabase.from('files').update({ status: 'expired' }).eq('ticket_id', ticketId);
+      await pgClient.from('files').update({ status: 'expired' }).eq('ticket_id', ticketId);
     } catch (expErr: any) {
       console.warn('Could not mark ticket expired in DB:', expErr.message);
     }
@@ -812,7 +812,7 @@ export async function PUT(req: NextRequest) {
     }
 
     const failNowIso = new Date().toISOString();
-    await supabase
+    await pgClient
       .from('files')
       .update({
         status: 'failed',
@@ -861,7 +861,7 @@ export async function PUT(req: NextRequest) {
       await deleteS3Object(pendingKey);
     } catch {}
     const failNowIso = new Date().toISOString();
-    await supabase
+    await pgClient
       .from('files')
       .update({
         status: 'failed',
@@ -888,7 +888,7 @@ export async function PUT(req: NextRequest) {
     } catch {}
     const magicMismatchReason = `Cabecera binaria inválida: detectado '${detectedMagicMime || 'desconocido'}' no coincide con el tipo MIME declarado '${declaredMime}'.`;
     const failNowIso = new Date().toISOString();
-    await supabase
+    await pgClient
       .from('files')
       .update({
         status: 'failed',
@@ -932,7 +932,7 @@ export async function PUT(req: NextRequest) {
       } catch {}
       const checksumMismatchReason = `Checksum SHA-256 no coincide: declarado base64='${expectedBase64}' vs S3='${headMeta.checksumSHA256}'.`;
       const failNowIso = new Date().toISOString();
-      await supabase
+      await pgClient
         .from('files')
         .update({
           status: 'failed',
@@ -1065,7 +1065,7 @@ export async function PUT(req: NextRequest) {
 
   const isChecksumVerified = Boolean(fileRow.sha256_hash && headMeta.checksumSHA256);
 
-  await supabase
+  await pgClient
     .from('files')
     .update({
       status: 'uploaded',

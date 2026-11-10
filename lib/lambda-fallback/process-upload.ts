@@ -20,7 +20,7 @@
 
 import crypto from 'crypto';
 import sharp from 'sharp';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { addServiceLog } from '@/lib/service-logs';
 import {
   buildOrgS3FolderPrefix,
@@ -104,8 +104,8 @@ export async function processUpload(
     };
   }
 
-  // 1. Fetch file record from Supabase
-  const { data: fileRow, error: fetchErr } = await supabase
+  // 1. Fetch file record from PostgreSQL
+  const { data: fileRow, error: fetchErr } = await pgClient
     .from('files')
     .select('*')
     .eq('id', fileId)
@@ -155,7 +155,7 @@ export async function processUpload(
 
   if (!pendingKey) {
     const errMsg = 'El registro no cuenta con archivo pendiente para procesar.';
-    await supabase
+    await pgClient
       .from('files')
       .update({
         status: 'failed',
@@ -250,7 +250,7 @@ export async function processUpload(
     const publicCfUrl = visibility === 'public' ? getBaseCloudFrontUrl(finalKey) : null;
     const nowIso = new Date().toISOString();
 
-    const { error: updateErr } = await supabase
+    const { error: updateErr } = await pgClient
       .from('files')
       .update({
         s3_processed_key: finalKey,
@@ -269,7 +269,7 @@ export async function processUpload(
       try {
         await deleteS3Object(finalKey);
       } catch {}
-      throw new Error(`Error actualizando registro procesado en Supabase: ${updateErr.message}`);
+      throw new Error(`Error actualizando registro procesado en PostgreSQL: ${updateErr.message}`);
     }
 
     await addServiceLog({
@@ -323,7 +323,7 @@ export async function processUpload(
     const failNowIso = new Date().toISOString();
     const newRetryCount = Number(fileRow.retry_count || 0) + 1;
 
-    await supabase
+    await pgClient
       .from('files')
       .update({
         status: 'failed',
@@ -380,7 +380,7 @@ export async function processUpload(
  * export const handler = async (event: any) => {
  *   for (const record of event.Records || []) {
  *     const s3Key = decodeURIComponent(record.s3.object.key.replace(/\+/g, ' '));
- *     const { data: fileRow } = await supabase
+ *     const { data: fileRow } = await pgClient
  *       .from('files')
  *       .select('id')
  *       .eq('s3_pending_key', s3Key)

@@ -10,7 +10,7 @@ import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 
 import { NextRequest, NextResponse } from 'next/server';
 import sharp from 'sharp';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { addServiceLog } from '@/lib/service-logs';
 import {
   getS3ObjectBuffer,
@@ -126,7 +126,7 @@ export async function POST(
       );
     }
 
-    const { data: fileRow, error: dbErr } = await supabase
+    const { data: fileRow, error: dbErr } = await pgClient
       .from('files')
       .select('*')
       .eq('id', fileId)
@@ -316,7 +316,7 @@ export async function GET(
     }
 
     // 3. Query file record
-    const { data: fileRow, error: dbErr } = await supabase
+    const { data: fileRow, error: dbErr } = await pgClient
       .from('files')
       .select('*')
       .eq('id', fileId)

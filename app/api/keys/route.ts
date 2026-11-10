@@ -1,7 +1,7 @@
 import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { verifyAdminSecretHeader } from '@/lib/env';
 import { addServiceLog } from '@/lib/service-logs';
 import { checkSharedRateLimit, buildRateLimitKey } from '@/lib/shared-rate-limit';
@@ -68,9 +68,9 @@ async function resolveCallerAuth(req: NextRequest): Promise<CallerAuthResult> {
     };
   }
 
-  // Re-read directly from Supabase (defense-in-depth against header tampering)
+  // Re-read directly from PostgreSQL (defense-in-depth against header tampering)
   const hashed = hashApiKey(rawApiKey);
-  const { data: keyRecord, error } = await supabase
+  const { data: keyRecord, error } = await pgClient
     .from('api_keys')
     .select('id, org_id, user_id, name, can_read, can_upload, can_delete, can_manage_keys, is_active')
     .eq('hashed_key', hashed)
@@ -170,7 +170,7 @@ export async function GET(req: NextRequest) {
       targetOrgId = callerOrgId;
     }
 
-    let query = supabase
+    let query = pgClient
       .from('api_keys')
       .select('id, org_id, user_id, name, can_read, can_upload, can_delete, can_manage_keys, is_active, created_at')
       .order('created_at', { ascending: false });
@@ -376,7 +376,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 7. Verify organization exists and read max_api_keys
-    const { data: orgData, error: orgError } = await supabase
+    const { data: orgData, error: orgError } = await pgClient
       .from('organizations')
       .select('id, name, max_api_keys')
       .eq('id', effectiveOrgId)
@@ -400,7 +400,7 @@ export async function POST(req: NextRequest) {
 
     // 8. If cleanUserId was provided, verify user exists and belongs to effectiveOrgId
     if (cleanUserId !== null) {
-      const { data: userData, error: userError } = await supabase
+      const { data: userData, error: userError } = await pgClient
         .from('users')
         .select('id, org_id, name, email')
         .eq('id', cleanUserId)
@@ -447,7 +447,7 @@ export async function POST(req: NextRequest) {
       is_active: true,
     };
 
-    const { data: insertedKey, error: insertError } = await supabase
+    const { data: insertedKey, error: insertError } = await pgClient
       .from('api_keys')
       .insert(insertPayload)
       .select('id, org_id, user_id, name, can_read, can_upload, can_delete, can_manage_keys, is_active, created_at')
@@ -556,7 +556,7 @@ export async function PATCH(req: NextRequest) {
       );
     }
 
-    const { data: existingKey, error: fetchError } = await supabase
+    const { data: existingKey, error: fetchError } = await pgClient
       .from('api_keys')
       .select('id, org_id, user_id, name, can_read, can_upload, can_delete, can_manage_keys, is_active')
       .eq('id', keyId)
@@ -608,7 +608,7 @@ export async function PATCH(req: NextRequest) {
       );
     }
 
-    const { data: updatedKey, error: updateError } = await supabase
+    const { data: updatedKey, error: updateError } = await pgClient
       .from('api_keys')
       .update(updatePayload)
       .eq('id', keyId)
@@ -683,7 +683,7 @@ export async function DELETE(req: NextRequest) {
     }
 
     // 1. Fetch target key
-    const { data: targetKey, error: fetchError } = await supabase
+    const { data: targetKey, error: fetchError } = await pgClient
       .from('api_keys')
       .select('id, org_id, user_id, name, can_manage_keys, is_active')
       .eq('id', keyId)
@@ -748,7 +748,7 @@ export async function DELETE(req: NextRequest) {
 
       // Condition 5: If it is the last key with can_manage_keys of the organization, deleting requires x-admin-secret
       if (targetKey.can_manage_keys && targetKey.is_active) {
-        const { count: manageKeyCount, error: countErr } = await supabase
+        const { count: manageKeyCount, error: countErr } = await pgClient
           .from('api_keys')
           .select('id', { count: 'exact', head: true })
           .eq('org_id', caller.org_id)
@@ -772,7 +772,7 @@ export async function DELETE(req: NextRequest) {
     const callerDescription = authResult.auth.type === 'admin' ? 'admin' : `key:${authResult.auth.callerKey.id}`;
 
     if (mode === 'revoke') {
-      const { data, error } = await supabase
+      const { data, error } = await pgClient
         .from('api_keys')
         .update({ is_active: false })
         .eq('id', keyId)
@@ -798,7 +798,7 @@ export async function DELETE(req: NextRequest) {
       );
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await pgClient
       .from('api_keys')
       .delete()
       .eq('id', keyId)

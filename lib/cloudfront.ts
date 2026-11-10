@@ -43,7 +43,7 @@ function encodeS3KeyForUrl(s3Key: string): string {
 }
 
 /**
- * Construye la URL de CloudFront bajo el prefijo /static/* para almacenar en Supabase (cloudfront_url)
+ * Construye la URL de CloudFront bajo el prefijo /static/* para almacenar en PostgreSQL (cloudfront_url)
  * y entregar archivos públicos.
  */
 export function getBaseCloudFrontUrl(s3Key: string): string | null {

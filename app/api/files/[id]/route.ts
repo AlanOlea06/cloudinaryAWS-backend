@@ -1,7 +1,7 @@
 import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 import { NextRequest, NextResponse } from 'next/server';
 import { S3Client, DeleteObjectCommand } from '@aws-sdk/client-s3';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { addServiceLog } from '@/lib/service-logs';
 import {
   generateCloudFrontUrl,
@@ -51,8 +51,8 @@ export async function GET(
       );
     }
 
-    // 2. Consultar la tabla files en Supabase para obtener la clave de S3, user_id, org_id y visibility
-    const { data: fileRow, error: dbError } = await supabase
+    // 2. Consultar la tabla files en PostgreSQL para obtener la clave de S3, user_id, org_id y visibility
+    const { data: fileRow, error: dbError } = await pgClient
       .from('files')
       .select('id, user_id, org_id, ticket_id, original_name, s3_pending_key, s3_processed_key, cloudfront_url, status, mime_type, visibility, sha256_verified')
       .eq('id', fileId)
@@ -225,7 +225,7 @@ export async function GET(
         let requesterName = 'Usuario No Autorizado';
         let ownerName = 'Propietario';
 
-        const { data: involvedUsers } = await supabase
+        const { data: involvedUsers } = await pgClient
           .from('users')
           .select('id, name')
           .in('id', [requestingUserId, fileRow.user_id]);
@@ -275,7 +275,7 @@ export async function GET(
       // Tarea A.2: Archivo PRIVADO con permisos validados ->
       // 1) Asegurar que cloudfront_url sea NULL en la base de datos
       if (fileRow.cloudfront_url !== null) {
-        await supabase
+        await pgClient
           .from('files')
           .update({
             cloudfront_url: null,
@@ -366,10 +366,10 @@ export async function GET(
       );
     }
 
-    // Persistir cloudfront_url en Supabase únicamente para archivos públicos
+    // Persistir cloudfront_url en PostgreSQL únicamente para archivos públicos
     const baseCfUrl = getBaseCloudFrontUrl(s3Key);
     if (baseCfUrl && fileRow.cloudfront_url !== baseCfUrl) {
-      await supabase
+      await pgClient
         .from('files')
         .update({
           cloudfront_url: baseCfUrl,
@@ -447,8 +447,8 @@ export async function DELETE(
       );
     }
 
-    // 1. Consultar el archivo en Supabase
-    const { data: fileRow, error: dbError } = await supabase
+    // 1. Consultar el archivo en PostgreSQL
+    const { data: fileRow, error: dbError } = await pgClient
       .from('files')
       .select('*')
       .eq('id', fileId)
@@ -523,8 +523,8 @@ export async function DELETE(
       cloudfrontInvalidationId = invRes.invalidationId;
     }
 
-    // 5. Eliminar el registro de public.files en Supabase
-    const { error: delError } = await supabase
+    // 5. Eliminar el registro de public.files en PostgreSQL
+    const { error: delError } = await pgClient
       .from('files')
       .delete()
       .eq('id', fileId);
@@ -547,13 +547,13 @@ export async function DELETE(
       fileId: fileId,
       fileName: fileRow.original_name,
       ipAddress: req.headers.get('x-forwarded-for') || '127.0.0.1',
-      message: `File '${fileRow.original_name}' permanently deleted from S3 (${deletedS3Keys.length} objects removed, CloudFront invalidated: ${cloudfrontInvalidated}) and Supabase. [fileId: ${fileId}]`,
+      message: `File '${fileRow.original_name}' permanently deleted from S3 (${deletedS3Keys.length} objects removed, CloudFront invalidated: ${cloudfrontInvalidated}) and PostgreSQL. [fileId: ${fileId}]`,
     });
 
     return NextResponse.json(
       {
         status: 'success',
-        message: `El archivo '${fileRow.original_name}' fue eliminado exitosamente de S3 y de Supabase.`,
+        message: `El archivo '${fileRow.original_name}' fue eliminado exitosamente de S3 y de PostgreSQL.`,
         deletedFileId: fileId,
         ticketId: fileRow.ticket_id,
         storageCleaned: true,

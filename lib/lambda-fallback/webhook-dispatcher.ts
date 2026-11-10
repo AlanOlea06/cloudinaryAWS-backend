@@ -18,7 +18,7 @@ import crypto from 'crypto';
 import dns from 'dns';
 import https from 'https';
 import net from 'net';
-import { supabase } from '@/lib/supabase';
+import { pgClient } from '@/lib/postgres';
 import { addServiceLog } from '@/lib/service-logs';
 import { db, isDirectDatabaseConfigured, webhookDeliveries } from '@/lib/db';
 import { sql, and, eq, lt } from 'drizzle-orm';
@@ -373,7 +373,7 @@ async function finalizeDelivery(
     };
   }
   // Only finalize if we still own the claim (same status and attempt number).
-  await supabase
+  await pgClient
     .from('webhook_deliveries')
     .update(update)
     .eq('id', d.id)
@@ -385,7 +385,7 @@ async function sendClaimedDelivery(d: ClaimedDelivery, ipAddress: string): Promi
   const base = { deliveryId: d.id, attempts: d.attempts };
 
   // Current organization configuration (read at send time)
-  const { data: org } = await supabase
+  const { data: org } = await pgClient
     .from('organizations')
     .select('webhook_url, webhook_secret')
     .eq('id', d.org_id)
@@ -415,7 +415,7 @@ async function sendClaimedDelivery(d: ClaimedDelivery, ipAddress: string): Promi
     return { ...base, configured: true, delivered: false, lastStatusCode: null, error: ssrfError };
   }
 
-  const { data: file } = await supabase.from('files').select('*').eq('id', d.file_id).maybeSingle();
+  const { data: file } = await pgClient.from('files').select('*').eq('id', d.file_id).maybeSingle();
   if (!file) {
     await finalizeDelivery(d, { delivered: false, statusCode: null, error: 'FILE_NOT_FOUND', terminal: true });
     return { ...base, configured: true, delivered: false, lastStatusCode: null, error: 'FILE_NOT_FOUND' };
@@ -487,10 +487,10 @@ export async function dispatchFileWebhook(params: {
     configured: false, delivered: false, deliveryId: null, attempts: 0, lastStatusCode: null, error: null,
   };
 
-  const { data: file } = await supabase.from('files').select('id, org_id').eq('id', fileId).maybeSingle();
+  const { data: file } = await pgClient.from('files').select('id, org_id').eq('id', fileId).maybeSingle();
   if (!file?.org_id) return { ...notConfigured, error: 'FILE_NOT_FOUND' };
 
-  const { data: org } = await supabase
+  const { data: org } = await pgClient
     .from('organizations')
     .select('webhook_url, webhook_secret')
     .eq('id', file.org_id)
@@ -513,7 +513,7 @@ export async function dispatchFileWebhook(params: {
   // [TEMPORARY-LAMBDA-FALLBACK: WEBHOOK-CIRCUIT-BREAKER]
   // ============================================================================
   const CIRCUIT_BREAKER_FAILURES_THRESHOLD = 3;
-  const { data: recentDeliveries } = await supabase
+  const { data: recentDeliveries } = await pgClient
     .from('webhook_deliveries')
     .select('status')
     .eq('org_id', file.org_id)
@@ -526,7 +526,7 @@ export async function dispatchFileWebhook(params: {
     recentDeliveries.every((d) => d.status !== 'delivered'));
 
   if (isCircuitBreakerOpen) {
-    const { data: queuedRow } = await supabase
+    const { data: queuedRow } = await pgClient
       .from('webhook_deliveries')
       .insert({
         org_id: file.org_id,
@@ -564,7 +564,7 @@ export async function dispatchFileWebhook(params: {
   // END [TEMPORARY-LAMBDA-FALLBACK: WEBHOOK-CIRCUIT-BREAKER]
   // ============================================================================
 
-  const { data: row, error: insertErr } = await supabase
+  const { data: row, error: insertErr } = await pgClient
     .from('webhook_deliveries')
     .insert({
       org_id: file.org_id,
@@ -640,8 +640,8 @@ export async function processPendingWebhookDeliveries(limit = 20): Promise<{
     }
   }
 
-  // 2. Legacy Supabase RPC Fallback
-  const { data, error } = await supabase.rpc('claim_webhook_deliveries', {
+  // 2. Legacy PostgreSQL RPC Fallback
+  const { data, error } = await pgClient.rpc('claim_webhook_deliveries', {
     p_limit: limit,
     p_lock_seconds: SENDING_LOCK_SECONDS,
   });
@@ -675,8 +675,8 @@ export async function purgeOldWebhookDeliveries(): Promise<{ ok: boolean; error?
   const deliveredCutoff = new Date(now - DELIVERED_RETENTION_DAYS * 86400000).toISOString();
   const failedCutoff = new Date(now - FAILED_RETENTION_DAYS * 86400000).toISOString();
 
-  const r1 = await supabase.from('webhook_deliveries').delete().eq('status', 'delivered').lt('updated_at', deliveredCutoff);
-  const r2 = await supabase.from('webhook_deliveries').delete().eq('status', 'failed').lt('updated_at', failedCutoff);
+  const r1 = await pgClient.from('webhook_deliveries').delete().eq('status', 'delivered').lt('updated_at', deliveredCutoff);
+  const r2 = await pgClient.from('webhook_deliveries').delete().eq('status', 'failed').lt('updated_at', failedCutoff);
   const err = r1.error || r2.error;
   return err ? { ok: false, error: err.code || 'DELETE_FAILED' } : { ok: true };
 }
