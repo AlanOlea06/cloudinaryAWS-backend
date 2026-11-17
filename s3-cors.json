@@ -1,19 +1,21 @@
 {
   "CORSRules": [
     {
-      "AllowedHeaders": [
+      "AllowedOrigins": [
         "*"
       ],
       "AllowedMethods": [
-        "GET",
         "PUT",
-        "POST",
-        "DELETE",
-        "HEAD"
+        "HEAD",
+        "GET",
+        "POST"
       ],
-      "AllowedOrigins": [
-        "http://localhost:3000",
-        "https://cloudinary-aws-backend.vercel.app"
+      "AllowedHeaders": [
+        "*",
+        "content-type",
+        "cache-control",
+        "content-disposition",
+        "x-amz-checksum-sha256"
       ],
       "ExposeHeaders": [
         "ETag",

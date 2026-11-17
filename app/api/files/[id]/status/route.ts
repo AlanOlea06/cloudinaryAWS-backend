@@ -8,8 +8,6 @@ import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { pgClient } from '@/lib/postgres';
-import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
-import { dispatchFileWebhook } from '@/lib/lambda-fallback/webhook-dispatcher';
 
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -171,59 +169,15 @@ export async function POST(
         { status: 403, headers: corsHeaders }
       );
     }
-
-    // Manual webhook dispatch using organization configuration
-    if (triggerWebhook) {
-      const event: 'file.uploaded' | 'file.processed' | 'file.failed' =
-        fileRow.status === 'failed'
-          ? 'file.failed'
-          : fileRow.status === 'uploaded'
-          ? 'file.uploaded'
-          : 'file.processed';
-
-      const webhookRes = await dispatchFileWebhook({
-        fileId: fileRow.id,
-        event,
-        ipAddress: clientIp,
-      });
-
-      return NextResponse.json(
-        {
-          status: webhookRes.delivered ? 'success' : 'webhook_dispatch_recorded',
-          fileId: fileRow.id,
-          fileStatus: fileRow.status,
-          scanStatus: fileRow.scan_status || 'not_scanned',
-          webhook: webhookRes,
-        },
-        { status: 200, headers: corsHeaders }
-      );
-    }
-
-    if (!ENABLE_SERVER_PROCESSING_FALLBACK) {
-      return NextResponse.json(
-        {
-          error: 'Bad Request',
-          code: 'SERVER_PROCESSING_DISABLED',
-          message:
-            '[TEST-ONLY] El procesamiento completo en Vercel está desactivado por diseño ("Ningún archivo pasa por Vercel"). Las transformaciones profundas y escaneo quedan diferidas a AWS Lambda.',
-          fileId: fileRow.id,
-          fileStatus: fileRow.status,
-          scanStatus: fileRow.scan_status || 'not_scanned',
-        },
-        { status: 400, headers: corsHeaders }
-      );
-    }
-
-    const procResult = await processUpload(fileId, {
-      ipAddress: clientIp,
-      triggerSource: 'manual_status_endpoint',
-    });
-
     return NextResponse.json(
       {
-        ...procResult,
+        status: 'success',
+        fileId: fileRow.id,
+        fileStatus: fileRow.status,
+        scanStatus: fileRow.scan_status || 'not_scanned',
+        message: 'El procesamiento post-subida y escaneo de malware son gestionados automáticamente por AWS GuardDuty y la Lambda practicas-alan-fn1.',
       },
-      { status: procResult.success ? 200 : 400, headers: corsHeaders }
+      { status: 200, headers: corsHeaders }
     );
   } catch (err: any) {
     return NextResponse.json(

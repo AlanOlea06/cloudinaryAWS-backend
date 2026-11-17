@@ -9,11 +9,9 @@ import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 // ============================================================================
 
 import { NextRequest, NextResponse } from 'next/server';
-import sharp from 'sharp';
 import { pgClient } from '@/lib/postgres';
 import { addServiceLog } from '@/lib/service-logs';
 import {
-  getS3ObjectBuffer,
   PRIVATE_NO_STORE_CACHE_CONTROL,
   PUBLIC_SHORT_TTL_CACHE_CONTROL,
 } from '@/lib/s3';
@@ -25,7 +23,8 @@ import {
   ALLOWED_TRANSFORM_FORMATS,
   signImageTransformParams,
   verifyImageTransformSignature,
-} from '@/lib/lambda-fallback/image-transform';
+  invokeTransformLambda,
+} from '@/lib/image-transform';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -42,17 +41,6 @@ export async function POST(
   req: NextRequest,
   context: { params: { id: string } | Promise<{ id: string }> }
 ) {
-  if (process.env.NODE_ENV === 'production') {
-    return NextResponse.json(
-      {
-        error: 'Service Unavailable',
-        code: 'IMAGE_TRANSFORM_DISABLED_IN_PRODUCTION',
-        message: 'El endpoint /api/img está deshabilitado en producción hasta la etapa de transformaciones.',
-      },
-      { status: 503, headers: corsHeaders }
-    );
-  }
-
   try {
     const resolvedParams = await Promise.resolve(context.params);
     const fileId = resolvedParams?.id?.trim();
@@ -211,17 +199,6 @@ export async function GET(
   req: NextRequest,
   context: { params: { id: string } | Promise<{ id: string }> }
 ) {
-  if (process.env.NODE_ENV === 'production') {
-    return NextResponse.json(
-      {
-        error: 'Service Unavailable',
-        code: 'IMAGE_TRANSFORM_DISABLED_IN_PRODUCTION',
-        message: 'El endpoint /api/img está deshabilitado en producción hasta la etapa de transformaciones.',
-      },
-      { status: 503, headers: corsHeaders }
-    );
-  }
-
   try {
     const resolvedParams = await Promise.resolve(context.params);
     const fileId = resolvedParams?.id?.trim();
@@ -349,41 +326,33 @@ export async function GET(
       );
     }
 
-    const sourceBuffer = await getS3ObjectBuffer(s3Key);
-    if (!sourceBuffer || sourceBuffer.length === 0) {
+    // 4. Delegar la transformación con Sharp a la Lambda practicas-alan-fn2 en AWS
+    const lambdaResult = await invokeTransformLambda({
+      fileId: fileRow.id,
+      userId: fileRow.user_id,
+      orgId: fileRow.org_id,
+      ticketId: fileRow.ticket_id,
+      s3Key,
+      w: width,
+      h: height,
+      fit: fitRaw,
+      format: formatRaw,
+      visibility: fileRow.visibility || 'private',
+    });
+
+    if (!lambdaResult?.ok || !lambdaResult.base64Body) {
       return NextResponse.json(
-        { error: 'Not Found', code: 'S3_OBJECT_EMPTY', message: 'No se pudo leer el objeto binario desde S3.' },
-        { status: 404, headers: corsHeaders }
+        {
+          error: 'Bad Gateway',
+          code: lambdaResult?.error || 'LAMBDA_TRANSFORM_FAILED',
+          message: 'La Lambda practicas-alan-fn2 no pudo procesar la transformación solicitada.',
+        },
+        { status: 502, headers: corsHeaders }
       );
     }
 
-    // 4. Transform image with sharp (.rotate() first to strip EXIF and preserve orientation)
-    let pipeline = sharp(sourceBuffer).rotate();
-    if (width || height) {
-      pipeline = pipeline.resize({
-        width,
-        height,
-        fit: fitRaw as any,
-        withoutEnlargement: false,
-      });
-    }
-
-    let contentType = 'image/webp';
-    if (formatRaw === 'webp') {
-      pipeline = pipeline.webp({ quality: 85 });
-      contentType = 'image/webp';
-    } else if (formatRaw === 'jpeg' || formatRaw === 'jpg') {
-      pipeline = pipeline.jpeg({ quality: 88, mozjpeg: true });
-      contentType = 'image/jpeg';
-    } else if (formatRaw === 'png') {
-      pipeline = pipeline.png({ compressionLevel: 9 });
-      contentType = 'image/png';
-    } else if (formatRaw === 'avif') {
-      pipeline = pipeline.avif({ quality: 75 });
-      contentType = 'image/avif';
-    }
-
-    const outputBuffer = await pipeline.toBuffer();
+    const outputBuffer = Buffer.from(lambdaResult.base64Body, 'base64');
+    const contentType = lambdaResult.contentType || 'image/webp';
 
     // 5. Enforce Vercel 4 MB response limit
     if (outputBuffer.length > MAX_VERCEL_RESPONSE_BYTES) {

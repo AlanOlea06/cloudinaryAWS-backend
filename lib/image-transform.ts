@@ -1,6 +1,4 @@
 // ============================================================================
-// [TEMPORARY-LAMBDA-FALLBACK: TASK-B12-IMAGE-TRANSFORM-SIGNER]
-// Búsqueda rápida: "TEMPORARY-LAMBDA-FALLBACK"
 // Propósito: Firma y verificación HMAC-SHA256 con expiración para URLs de
 //            transformación dinámica (/api/img/[id]?w=&h=&fit=&format=&exp=&sig=).
 // Nota (Sección 2): Deshabilitado en producción hasta la etapa de transformaciones.
@@ -120,4 +118,85 @@ export function verifyImageTransformSignature(
   }
 
   return { valid: true };
+}
+
+function hmacSha256(key: Buffer | string, data: string): Buffer {
+  return crypto.createHmac('sha256', key).update(data, 'utf8').digest();
+}
+
+function sha256Hex(data: string): string {
+  return crypto.createHash('sha256').update(data, 'utf8').digest('hex');
+}
+
+/**
+ * Invoca a la Lambda `practicas-alan-fn2` en AWS (`us-east-1`) mediante AWS SigV4
+ * para transformar imágenes con Sharp en la nube de AWS sin cargar el servidor Next.js.
+ */
+export async function invokeTransformLambda(payload: {
+  fileId: string;
+  userId?: string | null;
+  orgId?: string | null;
+  ticketId?: string | null;
+  s3Key: string;
+  w?: number;
+  h?: number;
+  fit: string;
+  format: string;
+  visibility: string;
+}): Promise<{
+  ok: boolean;
+  fromCache?: boolean;
+  variantKey?: string;
+  contentType?: string;
+  sizeBytes?: number;
+  base64Body?: string;
+  error?: string;
+}> {
+  const accessKeyId = requireEnv('AWS_ACCESS_KEY_ID');
+  const secretAccessKey = requireEnv('AWS_SECRET_ACCESS_KEY');
+  const region = process.env.AWS_REGION?.trim() || 'us-east-1';
+  const fnName = process.env.AWS_LAMBDA_TRANSFORM_NAME?.trim() || 'practicas-alan-fn2';
+  const bucketName = requireEnv('AWS_S3_BUCKET_NAME');
+
+  const host = `lambda.${region}.amazonaws.com`;
+  const pathUri = `/2015-03-31/functions/${encodeURIComponent(fnName)}/invocations`;
+  const body = JSON.stringify({ ...payload, bucketName });
+
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const payloadHash = sha256Hex(body);
+
+  const canonicalHeaders = `content-type:application/json\nhost:${host}\nx-amz-date:${amzDate}\n`;
+  const signedHeaders = 'content-type;host;x-amz-date';
+  const canonicalRequest = `POST\n${pathUri}\n\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
+
+  const algorithm = 'AWS4-HMAC-SHA256';
+  const credentialScope = `${dateStamp}/${region}/lambda/aws4_request`;
+  const stringToSign = `${algorithm}\n${amzDate}\n${credentialScope}\n${sha256Hex(canonicalRequest)}`;
+
+  const kDate = hmacSha256(`AWS4${secretAccessKey}`, dateStamp);
+  const kRegion = hmacSha256(kDate, region);
+  const kService = hmacSha256(kRegion, 'lambda');
+  const kSigning = hmacSha256(kService, 'aws4_request');
+  const signature = crypto.createHmac('sha256', kSigning).update(stringToSign, 'utf8').digest('hex');
+
+  const authorization = `${algorithm} Credential=${accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+
+  const resp = await fetch(`https://${host}${pathUri}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Amz-Date': amzDate,
+      Authorization: authorization,
+    },
+    body,
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => '');
+    throw new Error(`Error al invocar Lambda ${fnName} (HTTP ${resp.status}): ${errText}`);
+  }
+
+  return await resp.json();
 }

@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import { pgClient } from '@/lib/postgres';
 import { verifyAdminSecretHeader, verifyOrgInviteCode } from '@/lib/env';
 import { addServiceLog } from '@/lib/service-logs';
-import { validateWebhookUrlSSRF } from '@/lib/lambda-fallback/webhook-dispatcher';
+import { validateWebhookUrlSSRF } from '@/lib/webhook-security';
 import { deriveOrgScopedUserUuid } from '@/lib/user-namespace';
 
 

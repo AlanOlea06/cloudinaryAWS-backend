@@ -17,11 +17,6 @@ import {
   abortS3MultipartUpload,
   listS3UploadedParts,
 } from '@/lib/s3';
-import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
-import {
-  processPendingWebhookDeliveries,
-  purgeOldWebhookDeliveries,
-} from '@/lib/lambda-fallback/webhook-dispatcher';
 import { purgeStaleRateLimitBuckets } from '@/lib/shared-rate-limit';
 import { verifyCronSecretHeader } from '@/lib/env';
 
@@ -217,81 +212,6 @@ async function runMaintenanceCron(req: NextRequest) {
         aborted: false,
       });
     }
-  }
-
-  // ==========================================================================
-  // 3. [TEST-ONLY: CRON-RETRY-PROCESSING]
-  // REINTENTAR PROCESAMIENTOS PENDIENTES O FALLIDOS
-  // Respeta estrictamente ENABLE_SERVER_PROCESSING_FALLBACK:
-  // Si está apagado (por defecto en producción), NUNCA procesa archivos en Vercel
-  // y NUNCA marca 'failed' un archivo 'uploaded' por no estar procesado.
-  // ==========================================================================
-  if (ENABLE_SERVER_PROCESSING_FALLBACK) {
-    let retryQuery: any = pgClient
-      .from('files')
-      .select('*')
-      .in('status', ['completed', 'failed'])
-      .is('s3_processed_key', null)
-      .not('s3_pending_key', 'is', null)
-      .lt('retry_count', 3);
-
-    if (targetTicketId) {
-      retryQuery = retryQuery.eq('ticket_id', targetTicketId);
-    }
-
-    const { data: retryRows } = await retryQuery;
-
-    for (const row of retryRows || []) {
-      if (!row.s3_pending_key) continue;
-
-      const head = await headS3Object(row.s3_pending_key);
-      if (!head.exists) {
-        // Object no longer in pending -> mark failed
-        await pgClient
-          .from('files')
-          .update({
-            status: 'failed',
-            retry_count: Number(row.retry_count || 0) + 1,
-            error_message: 'Objeto pendiente ya no existe en S3 durante reintento de Cron.',
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', row.id);
-        continue;
-      }
-
-      const procRes = await processUpload(row.id, {
-        ipAddress: clientIp,
-        triggerSource: 'cron_retry',
-      });
-
-      summary.retriedProcessings.push({
-        fileId: row.id,
-        ticketId: row.ticket_id,
-        success: procRes.success,
-        newStatus: procRes.status,
-      });
-    }
-  }
-
-  // --------------------------------------------------------------------------
-  // 4. Atomic Webhook Processing with SKIP LOCKED & Backoff (Task C)
-  // --------------------------------------------------------------------------
-  try {
-    const webhooksSummary = await processPendingWebhookDeliveries();
-    summary.retriedWebhooks = webhooksSummary;
-  } catch (webhookCronErr: any) {
-    console.warn('[CRON_MAINTENANCE] Error processing pending webhooks:', webhookCronErr?.message);
-    summary.retriedWebhooks = { error: webhookCronErr?.message };
-  }
-
-  // --------------------------------------------------------------------------
-  // 5. Webhook Deliveries Retention (Delivered > 30d, Failed > 90d)
-  // --------------------------------------------------------------------------
-  try {
-    const webhookPurge = await purgeOldWebhookDeliveries();
-    summary.webhookRetention = webhookPurge;
-  } catch (purgeErr: any) {
-    summary.webhookRetention = { error: purgeErr?.message };
   }
 
   // --------------------------------------------------------------------------

@@ -9,7 +9,7 @@ import { corsHeaders, handleCorsOptions } from '@/lib/cors';
 
 import { NextRequest, NextResponse } from 'next/server';
 import { pgClient } from '@/lib/postgres';
-import { verifyWebhookSignature } from '@/lib/lambda-fallback/webhook-dispatcher';
+import { verifyWebhookSignature } from '@/lib/webhook-security';
 import { verifyAdminSecretHeader } from '@/lib/env';
 
 interface ReceivedWebhookEntry {

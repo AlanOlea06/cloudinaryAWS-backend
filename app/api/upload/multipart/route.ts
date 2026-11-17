@@ -20,8 +20,6 @@ import {
 import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/ticket-token';
 import { getBaseCloudFrontUrl } from '@/lib/cloudfront';
 import { detectMagicBytesMime } from '@/lib/magic-bytes';
-import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
-import { dispatchFileWebhook, processPendingWebhookDeliveries } from '@/lib/lambda-fallback/webhook-dispatcher';
 import { checkOrganizationQuotas } from '@/lib/quotas';
 
 
@@ -793,75 +791,15 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
     );
   }
 
-  // 4. [TEST-ONLY: TASK-B6-MULTIPART-TRIGGER]
-  if (ENABLE_SERVER_PROCESSING_FALLBACK) {
-    const processResult = await processUpload(fileRow.id, {
-      triggerSource: 'multipart_complete',
-      ipAddress,
-    });
-
-    if (!processResult.success) {
-      return NextResponse.json(
-        {
-          error: 'Bad Request',
-          code: processResult.code || 'PROCESS_UPLOAD_FAILED',
-          message: processResult.message,
-          ticketId: fileRow.ticket_id,
-          fileId: fileRow.id,
-          processing: processResult,
-        },
-        { status: 400, headers: corsHeaders }
-      );
-    }
-
-    return NextResponse.json(
-      {
-        status: 'success',
-        action: 'complete',
-        ticketId: fileRow.ticket_id,
-        fileId: fileRow.id,
-        fileStatus: 'uploaded',
-        scanStatus: processResult.scanStatus,
-        visibility: fileRow.visibility,
-        partsCompleted: partsToComplete.length,
-        cloudfrontUrl: fileRow.visibility === 'public' ? processResult.cloudfrontUrl : null,
-        processing: {
-          executed: true,
-          exifStripped: processResult.exifStripped,
-          detectedMime: processResult.detectedMimeType,
-          originalSizeBytes: processResult.originalSizeBytes,
-          processedSizeBytes: processResult.processedSizeBytes,
-          sha256Hash: processResult.sha256Hash,
-        },
-        webhook: processResult.webhook,
-      },
-      { status: 200, headers: corsHeaders }
-    );
-  }
-
-  // 5. PRODUCTION FLOW: Promote verified object from static/pending/{orgId}/ to static/{public|private}/{orgId}/ in S3
+  // 5. PRODUCTION FLOW: La promoción de static/pending/ a static/{public|private}/ y limpieza EXIF
+  // la ejecuta exclusivamente la Lambda practicas-alan-fn1 cuando GuardDuty emite NO_THREATS_FOUND.
   const fileVisibility: 'public' | 'private' =
     String(fileRow.visibility || 'private').toLowerCase() === 'public' ? 'public' : 'private';
-  const expectedDisposition: 'inline' | 'attachment' =
-    String(fileRow.extension || '').toLowerCase() === '.pdf' ? 'attachment' : 'inline';
-
-  let promotedKey = fileRow.s3_pending_key;
-  try {
-    const promoted = await promotePendingS3ObjectToFinal(
-      fileRow.s3_pending_key,
-      fileRow.org_id,
-      fileVisibility,
-      fileRow.mime_type || 'application/octet-stream',
-      expectedDisposition
-    );
-    promotedKey = promoted.finalKey;
-  } catch (promoteErr: any) {
-    console.warn('Could not promote multipart S3 object from pending to final folder:', promoteErr.message);
-  }
-
+  const fileNamePart = String(fileRow.s3_pending_key || '').split('/').pop();
+  const finalExpectedKey = `static/${fileVisibility}/${fileRow.org_id}/${fileNamePart}`;
   const publicCfUrl =
-    fileVisibility === 'public' && promotedKey
-      ? getBaseCloudFrontUrl(promotedKey)
+    fileVisibility === 'public' && fileNamePart
+      ? getBaseCloudFrontUrl(finalExpectedKey)
       : null;
 
   const isChecksumVerified = Boolean(fileRow.sha256_hash && headMeta.checksumSHA256);
@@ -876,7 +814,7 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
       completed_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       cloudfront_url: publicCfUrl,
-      s3_processed_key: promotedKey,
+      s3_processed_key: fileRow.s3_processed_key || null,
       sha256_verified: isChecksumVerified,
     })
     .eq('id', fileRow.id);
@@ -894,17 +832,6 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
     message: `Multipart upload completado: status='uploaded', scan_status='not_scanned', parts=${partsToComplete.length}, size=${actualSize}, magicBytesVerified=true, sha256_verified=${isChecksumVerified}.`,
   });
 
-  const webhookResult = await dispatchFileWebhook({
-    fileId: fileRow.id,
-    event: 'file.uploaded',
-    ipAddress,
-  });
-
-  // Procesamiento oportunista de webhooks pendientes (10% de probabilidad, máx 2 entregas)
-  if (Math.random() < 0.1) {
-    await processPendingWebhookDeliveries(2).catch(() => undefined);
-  }
-
   return NextResponse.json(
     {
       status: 'success',
@@ -921,7 +848,6 @@ async function handleCompleteMultipart(req: NextRequest, body: any) {
         magicBytesVerified: true,
         detectedMimeType: detectedMagicMime,
       },
-      webhook: webhookResult,
     },
     { status: 200, headers: corsHeaders }
   );

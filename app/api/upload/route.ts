@@ -21,8 +21,6 @@ import {
 import { generateTicketConfirmToken, verifyTicketConfirmToken } from '@/lib/ticket-token';
 import { getBaseCloudFrontUrl } from '@/lib/cloudfront';
 import { detectMagicBytesMime } from '@/lib/magic-bytes';
-import { processUpload, ENABLE_SERVER_PROCESSING_FALLBACK } from '@/lib/lambda-fallback/process-upload';
-import { dispatchFileWebhook, processPendingWebhookDeliveries } from '@/lib/lambda-fallback/webhook-dispatcher';
 import { checkOrganizationQuotas } from '@/lib/quotas';
 
 export async function OPTIONS() {
@@ -972,95 +970,14 @@ export async function PUT(req: NextRequest) {
   const nowIso = new Date().toISOString();
   const clientIp = req.headers.get('x-forwarded-for') || '127.0.0.1';
 
-  // [TEST-ONLY: TASK-B6-TRIGGER-FROM-CONFIRM]
-  // Fallback for local testing only (disabled by default in production per "no binary files through Vercel" rule)
-  if (ENABLE_SERVER_PROCESSING_FALLBACK) {
-    const procResult = await processUpload(fileRow.id, {
-      ipAddress: clientIp,
-      triggerSource: 'put_confirm',
-    });
-
-    if (!procResult.success) {
-      return NextResponse.json(
-        {
-          error: 'Bad Request',
-          code: procResult.code || 'PROCESS_UPLOAD_FAILED',
-          method: req.method,
-          message: procResult.message,
-          ticketId,
-          fileId: fileRow.id,
-          processing: procResult,
-        },
-        { status: 400, headers: corsHeaders }
-      );
-    }
-
-    return NextResponse.json(
-      {
-        status: 'success',
-        method: req.method,
-        message: `File upload confirmed and processed (test fallback) for ticket ${ticketId}`,
-        ticketId,
-        fileId: fileRow.id,
-        fileStatus: 'uploaded',
-        scanStatus: procResult.scanStatus,
-        visibility: fileVisibility,
-        ownerUserId: fileRow?.user_id || null,
-        cacheControl: getCacheControlForVisibility(fileVisibility, false),
-        cloudfrontUrl: fileVisibility === 'public' ? procResult.cloudfrontUrl : null,
-        tokenVerified: true,
-        headVerification: {
-          verified: true,
-          actualSizeBytes: actualSize,
-          actualContentType: actualMime,
-          eTag: headMeta.eTag,
-        },
-        processing: {
-          exifStripped: procResult.exifStripped,
-          detectedMimeType: procResult.detectedMimeType,
-          originalSizeBytes: procResult.originalSizeBytes,
-          processedSizeBytes: procResult.processedSizeBytes,
-          sha256Hash: procResult.sha256Hash,
-        },
-        webhook: procResult.webhook,
-      },
-      { status: 200, headers: corsHeaders }
-    );
-  }
-
-  // PRODUCTION FLOW: Promote verified object from static/pending/{orgId}/ to static/{public|private}/{orgId}/ in S3
-  let s3CacheControl: string | null = null;
-  let promotedKey = fileRow.s3_pending_key;
-
-  if (fileRow?.s3_pending_key) {
-    try {
-      const promoted = await promotePendingS3ObjectToFinal(
-        fileRow.s3_pending_key,
-        fileRow.org_id,
-        fileVisibility,
-        fileRow.mime_type || 'application/octet-stream',
-        expectedDisposition
-      );
-      promotedKey = promoted.finalKey;
-      s3CacheControl = promoted.cacheControl;
-    } catch (promoteErr: any) {
-      console.warn('Could not promote S3 object from pending to final folder:', promoteErr.message);
-      if (fileVisibility === 'public') {
-        try {
-          s3CacheControl = await applyS3CacheControlMetadata(
-            fileRow.s3_pending_key,
-            fileRow.mime_type || 'application/octet-stream',
-            fileVisibility,
-            expectedDisposition
-          );
-        } catch {}
-      }
-    }
-  }
-
+  // PRODUCTION FLOW: La promoción de static/pending/ a static/{public|private}/ y limpieza EXIF
+  // la ejecuta exclusivamente la Lambda practicas-alan-fn1 cuando GuardDuty emite NO_THREATS_FOUND.
+  const fileNamePart = String(fileRow.s3_pending_key || '').split('/').pop();
+  const finalExpectedKey = `static/${fileVisibility}/${fileRow.org_id}/${fileNamePart}`;
+  const s3CacheControl = getCacheControlForVisibility(fileVisibility, false);
   const publicCfUrl =
-    fileVisibility === 'public' && promotedKey
-      ? getBaseCloudFrontUrl(promotedKey)
+    fileVisibility === 'public' && fileNamePart
+      ? getBaseCloudFrontUrl(finalExpectedKey)
       : null;
 
   const isChecksumVerified = Boolean(fileRow.sha256_hash && headMeta.checksumSHA256);
@@ -1073,7 +990,7 @@ export async function PUT(req: NextRequest) {
       completed_at: nowIso,
       updated_at: nowIso,
       cloudfront_url: publicCfUrl,
-      s3_processed_key: promotedKey,
+      s3_processed_key: fileRow.s3_processed_key || null,
       sha256_verified: isChecksumVerified,
     })
     .eq('ticket_id', ticketId);
@@ -1090,17 +1007,6 @@ export async function PUT(req: NextRequest) {
     ipAddress: clientIp,
     message: `File confirmed in S3: status='uploaded', scan_status='not_scanned', visibility='${fileVisibility}', size=${actualSize}, magicBytesVerified=true, sha256_verified=${isChecksumVerified}`,
   });
-
-  const webhookResult = await dispatchFileWebhook({
-    fileId: fileRow.id,
-    event: 'file.uploaded',
-    ipAddress: clientIp,
-  });
-
-  // Procesamiento oportunista de webhooks pendientes (10% de probabilidad, máx 2 entregas)
-  if (Math.random() < 0.1) {
-    await processPendingWebhookDeliveries(2).catch(() => undefined);
-  }
 
   return NextResponse.json(
     {
@@ -1131,7 +1037,6 @@ export async function PUT(req: NextRequest) {
         detectedMimeType: detectedMagicMime,
         checksumVerified: isChecksumVerified,
       },
-      webhook: webhookResult,
     },
     { status: 200, headers: corsHeaders }
   );

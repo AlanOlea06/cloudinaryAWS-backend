@@ -276,16 +276,10 @@ export async function middleware(request: NextRequest) {
     return applySecurityHeaders(NextResponse.next());
   }
 
-  // 2. Disable /api/img in production until the transformations stage
-  if (pathname === '/api/img' || pathname.startsWith('/api/img/')) {
-    if (isProd) {
-      return jsonError(
-        503,
-        'Service Unavailable',
-        'IMAGE_TRANSFORM_DISABLED_IN_PRODUCTION',
-        'El endpoint de transformaciones (/api/img) está deshabilitado en producción hasta la etapa de transformaciones.'
-      );
-    }
+  // 2. Signed image transformation GET endpoint (/api/img/[id]?w=&h=&fit=&format=&exp=&sig=)
+  // Authenticates via HMAC-SHA256 signature inside the route handler; POST /api/img/[id] still requires x-api-key.
+  if (pathname.startsWith('/api/img/') && method === 'GET') {
+    return applySecurityHeaders(NextResponse.next());
   }
 
   // 3. Block destructive test/debug endpoints in production
